@@ -66,6 +66,14 @@ install -m 644 wdx/mediainfo/luajit/*.lua      release/wdx/mediainfo/
 install -m 644 wdx/translitwdx/translitwdx.lua release/wdx/translitwdx/
 install -m 644 wdx/translitwdx/readme.txt      release/wdx/translitwdx/
 
+# diagramview
+mkdir -p release/wlx/diagramview
+make -C wlx/diagramview/src clean all
+install -m 644 wlx/diagramview/diagramview_qt6.wlx release/wlx/diagramview/
+install -m 644 wlx/diagramview/config.json release/wlx/diagramview/
+install -m 644 wlx/diagramview/*.md release/wlx/diagramview/
+install -m 644 wlx/diagramview/*.png release/wlx/diagramview/
+
 pushd release
 tar -czpf ../plugins-$(date +%y.%m.%d)-$ARCH.tar.gz *
 popd
