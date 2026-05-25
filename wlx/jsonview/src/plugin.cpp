@@ -331,8 +331,6 @@ bool JsonViewerWidget::loadFile(const QString& filePath)
 	file.close();
 
 	if (json.isNull() || json.isEmpty()) {
-		if (err.error != QJsonParseError::NoError)
-			QMessageBox::critical(this, PLUGNAME, err.errorString());
 		return false;
 	}
 
