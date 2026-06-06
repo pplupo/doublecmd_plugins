@@ -196,10 +196,11 @@ bool WrapAnywhereDelegate::wrapAnywhere() const { return m_wrap; }
 // EditableGridWidget
 // ---------------------------------------------------------------------------
 
-EditableGridWidget::EditableGridWidget(QTableView *view, FocusManager *fm, QWidget *parent)
+EditableGridWidget::EditableGridWidget(QTableView *view, GridMode mode, FocusManager *fm, QWidget *parent)
     : QWidget(parent)
     , m_fm(fm)
     , m_view(view)
+    , m_mode(mode)
     , m_isProgrammaticChange(false)
     , m_lastSortColumn(-1)
     , m_lastSortOrder(Qt::AscendingOrder)
@@ -226,26 +227,28 @@ EditableGridWidget::EditableGridWidget(QTableView *view, FocusManager *fm, QWidg
     });
     connect(m_undoStack, &QUndoStack::indexChanged, this, [this]() { updateRowNumbers(); });
 
-    // Track model data changes for undo integration.
-    // When a cell editor commits, the model emits dataChanged. We intercept
-    // it to push an EditCellCommand if the stashed old value differs.
-    if (m_view->model()) {
-        connect(m_view->model(), &QAbstractItemModel::dataChanged,
-                this, &EditableGridWidget::onDataChanged);
-    }
-
-    // Stash old value when entering a cell editor
-    connect(fm, &FocusManager::inputWidgetEntered, this, [this](QWidget *) {
-        QModelIndex current = m_view->currentIndex();
-        if (!current.isValid() || !m_view->model()) return;
-        QVariant existing = m_view->model()->data(current, Qt::UserRole);
-        if (!existing.isValid()) {
-            m_isProgrammaticChange = true;
-            m_view->model()->setData(current,
-                m_view->model()->data(current, Qt::EditRole), Qt::UserRole);
-            m_isProgrammaticChange = false;
+    // MemoryDocument mode: track data changes for undo integration.
+    // LiveDatabase mode: the model handles its own transactions;
+    // intercepting dataChanged would force the entire DB into RAM.
+    if (m_mode == GridMode::MemoryDocument) {
+        if (m_view->model()) {
+            connect(m_view->model(), &QAbstractItemModel::dataChanged,
+                    this, &EditableGridWidget::onDataChanged);
         }
-    });
+
+        // Stash old value when entering a cell editor
+        connect(fm, &FocusManager::inputWidgetEntered, this, [this](QWidget *) {
+            QModelIndex current = m_view->currentIndex();
+            if (!current.isValid() || !m_view->model()) return;
+            QVariant existing = m_view->model()->data(current, Qt::UserRole);
+            if (!existing.isValid()) {
+                m_isProgrammaticChange = true;
+                m_view->model()->setData(current,
+                    m_view->model()->data(current, Qt::EditRole), Qt::UserRole);
+                m_isProgrammaticChange = false;
+            }
+        });
+    }
 
     registerShortcuts();
     setupDragToMove();
@@ -549,6 +552,7 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
 }
 
 QTableView *EditableGridWidget::view() const { return m_view; }
+GridMode EditableGridWidget::mode() const { return m_mode; }
 QUndoStack *EditableGridWidget::undoStack() const { return m_undoStack; }
 bool EditableGridWidget::isDirty() const { return !m_undoStack->isClean(); }
 
@@ -608,6 +612,19 @@ void EditableGridWidget::onSortByColumn(int column)
         return;
     }
 
+    // --- LiveDatabase mode ---
+    // Do not snapshot memory. Just issue the ORDER BY command via model->sort().
+    // QSqlTableModel translates this to an SQL query and re-fetches lazily.
+    if (m_mode == GridMode::LiveDatabase) {
+        model->sort(column, m_lastSortOrder);
+        m_view->horizontalHeader()->setSortIndicatorShown(true);
+        m_view->horizontalHeader()->setSortIndicator(column, m_lastSortOrder);
+        m_lastSortOrder = (m_lastSortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
+        return;
+    }
+
+    // --- MemoryDocument mode ---
+    // Safely snapshot in-memory data for undo/redo.
     int rows = rowCount(), cols = colCount();
 
     QList<QVariantList> beforeData;
@@ -711,6 +728,13 @@ void EditableGridWidget::pasteSelection()
     QAbstractItemModel *model = m_view->model();
     if (!model) return;
 
+    if (m_mode == GridMode::LiveDatabase) {
+        // LiveDatabase: insert at end without undo wrapping
+        pasteSelectionAt(rowCount());
+        return;
+    }
+
+    // MemoryDocument: insert at selection with undo macro for reorder
     int targetVisualRow = rowCount();
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (!sel.isEmpty()) {
@@ -778,9 +802,15 @@ void EditableGridWidget::pasteSelectionAt(int atRow)
     }
 
     int rowsToInsert = lines.size();
-    m_isProgrammaticChange = true;
-    m_undoStack->push(new RowColCommand(model, atRow, rowsToInsert, true, true));
-    m_isProgrammaticChange = false;
+
+    if (m_mode == GridMode::LiveDatabase) {
+        // Direct model insertion, no undo command wrapper
+        model->insertRows(atRow, rowsToInsert);
+    } else {
+        m_isProgrammaticChange = true;
+        m_undoStack->push(new RowColCommand(model, atRow, rowsToInsert, true, true));
+        m_isProgrammaticChange = false;
+    }
 
     for (int i = 0; i < rowsToInsert; ++i) {
         QStringList list = lines.at(i).split(QLatin1Char(sep));
@@ -798,6 +828,11 @@ void EditableGridWidget::insertRows(int count, int atRow)
 {
     QAbstractItemModel *model = m_view->model();
     if (!model || colCount() <= 0 || count <= 0) return;
+
+    if (m_mode == GridMode::LiveDatabase) {
+        model->insertRows(atRow, count);
+        return;
+    }
     m_undoStack->push(new RowColCommand(model, atRow, count, true, true));
 }
 
@@ -812,6 +847,12 @@ void EditableGridWidget::deleteSelectedRows()
     for (const auto &index : sel) rowsSet.insert(index.row());
     QList<int> rowsToDelete = rowsSet.values();
     std::sort(rowsToDelete.begin(), rowsToDelete.end(), std::greater<int>());
+
+    if (m_mode == GridMode::LiveDatabase) {
+        for (int r : rowsToDelete)
+            model->removeRow(r);
+        return;
+    }
 
     m_undoStack->beginMacro("Delete rows");
     for (int r : rowsToDelete)
@@ -868,9 +909,14 @@ void EditableGridWidget::pasteColumnSelectionAt(int atCol)
         colsToInsert = lines.first().split(QLatin1Char(',')).size();
     }
 
-    m_isProgrammaticChange = true;
-    m_undoStack->push(new RowColCommand(model, atCol, colsToInsert, false, true));
-    m_isProgrammaticChange = false;
+    if (m_mode == GridMode::LiveDatabase) {
+        // Direct model insertion, no undo command wrapper
+        model->insertColumns(atCol, colsToInsert);
+    } else {
+        m_isProgrammaticChange = true;
+        m_undoStack->push(new RowColCommand(model, atCol, colsToInsert, false, true));
+        m_isProgrammaticChange = false;
+    }
 
     for (int r = 0; r < rowCount(); ++r) {
         QStringList list = lines.at(r).split(QLatin1Char(sep));
@@ -887,6 +933,11 @@ void EditableGridWidget::insertColumns(int count, int atCol)
 {
     QAbstractItemModel *model = m_view->model();
     if (!model || rowCount() <= 0 || count <= 0) return;
+
+    if (m_mode == GridMode::LiveDatabase) {
+        model->insertColumns(atCol, count);
+        return;
+    }
     m_undoStack->push(new RowColCommand(model, atCol, count, false, true));
 }
 
@@ -901,6 +952,12 @@ void EditableGridWidget::deleteSelectedColumns()
     for (const auto &index : sel) colsSet.insert(index.column());
     QList<int> colsToDelete = colsSet.values();
     std::sort(colsToDelete.begin(), colsToDelete.end(), std::greater<int>());
+
+    if (m_mode == GridMode::LiveDatabase) {
+        for (int c : colsToDelete)
+            model->removeColumn(c);
+        return;
+    }
 
     m_undoStack->beginMacro("Delete cols");
     for (int c : colsToDelete)

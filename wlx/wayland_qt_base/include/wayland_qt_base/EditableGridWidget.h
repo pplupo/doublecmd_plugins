@@ -13,6 +13,21 @@ namespace QtWlPlugin {
 
 class FocusManager;
 
+/// Defines the memory and undo strategy for EditableGridWidget.
+///
+/// MemoryDocument: Full QUndoStack tracking for all data mutations.
+///   Best for QTableWidget, QStandardItemModel, or any in-memory model.
+///   Sorting snapshots entire table state for undo.
+///
+/// LiveDatabase: Bypasses QUndoStack for data mutations (insert, delete, sort).
+///   Best for QSqlTableModel or other transactional models.
+///   Sorting delegates to model->sort() (SQL ORDER BY) with no RAM snapshot.
+///   Copy, context menus, drag-to-reorder, focus, and shortcuts still work.
+enum class GridMode {
+    MemoryDocument,
+    LiveDatabase
+};
+
 /// Custom delegate that wraps text at any character (not just word boundaries).
 class WrapAnywhereDelegate : public QStyledItemDelegate {
 public:
@@ -31,16 +46,16 @@ private:
 /// A QTableView wrapper with full undo/redo, keyboard navigation,
 /// drag-to-move columns/rows, context menus, and editing support.
 ///
-/// Accepts a pre-instantiated QTableView* via dependency injection.
+/// Accepts a pre-instantiated QTableView* and a GridMode via dependency injection.
 /// Because QTableWidget is a subclass of QTableView, you can inject either:
 ///
-///   // Item-based convenience:
-///   auto *grid = new EditableGridWidget(new QTableWidget(), fm, this);
+///   // Item-based (in-memory, full undo):
+///   auto *grid = new EditableGridWidget(new QTableWidget(), GridMode::MemoryDocument, fm, this);
 ///
-///   // Model-based flexibility:
+///   // Database (transactional, no RAM snapshots):
 ///   auto *sqlView = new QTableView();
-///   sqlView->setModel(myModel);
-///   auto *grid = new EditableGridWidget(sqlView, fm, this);
+///   sqlView->setModel(sqlModel);
+///   auto *grid = new EditableGridWidget(sqlView, GridMode::LiveDatabase, fm, this);
 ///
 /// All data access goes through QAbstractItemModel — no QTableWidgetItem
 /// dependency in the grid's own logic.
@@ -48,10 +63,11 @@ class EditableGridWidget : public QWidget {
     Q_OBJECT
 public:
     /// Takes ownership of the view and parents it to this widget.
-    explicit EditableGridWidget(QTableView *view, FocusManager *fm, QWidget *parent = nullptr);
+    explicit EditableGridWidget(QTableView *view, GridMode mode, FocusManager *fm, QWidget *parent = nullptr);
 
     /// Access the underlying view (may be QTableView or QTableWidget).
     QTableView *view() const;
+    GridMode mode() const;
     QUndoStack *undoStack() const;
 
     // --- Data operations (format-agnostic, model-based) ---
@@ -99,6 +115,7 @@ private:
 
     FocusManager *m_fm;
     QTableView *m_view;
+    GridMode m_mode;
     QUndoStack *m_undoStack;
     WrapAnywhereDelegate *m_wrapDelegate;
     bool m_isProgrammaticChange;

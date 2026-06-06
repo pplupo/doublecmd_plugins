@@ -306,37 +306,48 @@ Because `QTableWidget` is a subclass of `QTableView`, you can inject either:
 
 All internal data access goes through `QAbstractItemModel` / `QModelIndex` — zero `QTableWidgetItem` dependencies inside the grid.
 
+#### GridMode
+
+The constructor requires a `GridMode` enum that determines the undo/memory strategy:
+
+| Mode | Undo Strategy | Sorting | Best For |
+|------|--------------|---------|----------|
+| `GridMode::MemoryDocument` | Full `QUndoStack` tracking. Sort stores before/after snapshots in RAM. | Snapshot-based undo | `QTableWidget`, `QStandardItemModel`, in-memory data |
+| `GridMode::LiveDatabase` | Bypasses `QUndoStack` for data mutations. Sort issues `model->sort()` (SQL `ORDER BY`) with no RAM snapshot. | Direct `model->sort()` | `QSqlTableModel`, transactional models |
+
+Both modes share context menus, drag-to-reorder, focus management, keyboard shortcuts, and the `WrapAnywhereDelegate`.
+
 #### Constructor (Dependency Injection)
 
 ```cpp
 // The caller creates and configures the view, then hands it to the grid.
-explicit EditableGridWidget(QTableView *view, FocusManager *fm, QWidget *parent = nullptr);
+explicit EditableGridWidget(QTableView *view, GridMode mode, FocusManager *fm, QWidget *parent = nullptr);
 ```
 
-**With QTableWidget:**
+**In-memory document (full undo):**
 ```cpp
 auto *tw = new QTableWidget();
-auto *grid = new QtWlPlugin::EditableGridWidget(tw, fm, this);
+auto *grid = new QtWlPlugin::EditableGridWidget(tw, QtWlPlugin::GridMode::MemoryDocument, fm, this);
 ```
 
-**With QTableView + custom model:**
+**Live database (transactional):**
 ```cpp
 auto *tv = new QTableView();
-tv->setModel(myCustomModel);
-auto *grid = new QtWlPlugin::EditableGridWidget(tv, fm, this);
+tv->setModel(sqlModel);
+auto *grid = new QtWlPlugin::EditableGridWidget(tv, QtWlPlugin::GridMode::LiveDatabase, fm, this);
 ```
 
 #### Features
 
 | Feature | Details |
 |---------|---------|
-| **Undo/Redo** | `QUndoStack` automatically registered with FocusManager. Four internal undo command types: `EditCellCommand`, `RowColCommand`, `DataSnapshotCommand`, `SectionMoveCommand` — all operating through `QAbstractItemModel`. |
+| **Undo/Redo** | `QUndoStack` registered with FocusManager. In `MemoryDocument` mode: four undo command types (`EditCellCommand`, `RowColCommand`, `DataSnapshotCommand`, `SectionMoveCommand`). In `LiveDatabase` mode: data mutations bypass the undo stack — the transactional model handles reverts. |
 | **Cell editing** | Enter to open editor, Escape to cancel (reverts to pre-edit value), Up/Down to navigate between cells while editing, Enter to commit and advance right (wraps to next row). |
 | **Arrow navigation** | Left at column 0 wraps to the last column of the previous row. Right at last column wraps to column 0 of the next row. |
-| **Copy/Paste** | `copySelection(separator)` copies selected cells as text via `model()->data()`. `pasteSelection()` inserts clipboard rows via `model()->insertRows()` and `model()->setData()`, auto-detecting tab or comma delimiters. |
-| **Insert/Delete** | `insertRows(count, atRow)`, `deleteSelectedRows()`, `insertColumns(count, atCol)`, `deleteSelectedColumns()` — all via `model()->insertRows()`/`removeRows()` with full undo support. |
+| **Copy/Paste** | `copySelection(separator)` copies selected cells via `model()->data()`. `pasteSelection()` inserts clipboard rows — wrapped in undo commands in `MemoryDocument`, direct model calls in `LiveDatabase`. |
+| **Insert/Delete** | `insertRows()`, `deleteSelectedRows()`, `insertColumns()`, `deleteSelectedColumns()` — undo-wrapped in `MemoryDocument`, direct `model->insertRows()`/`removeRows()` in `LiveDatabase`. |
 | **Drag-to-move** | Multi-select row or column drag via headers. Uses a debounce timer to coalesce Qt's per-section `sectionMoved` signals into a single undo command. |
-| **Column sorting** | Click a column header once to "arm" it, click again to sort via `model()->sort()`. Stores a full data snapshot for undo. Toggles ascending/descending on subsequent clicks. |
+| **Column sorting** | Click header once to arm, click again to sort. `MemoryDocument`: stores full data snapshot for undo. `LiveDatabase`: issues `model->sort()` (SQL `ORDER BY`) with zero RAM overhead. |
 | **Word wrap** | `WrapAnywhereDelegate` enables character-level text wrapping (not just word boundaries). Toggle with `setWordWrap(bool)`. |
 | **Context menus** | Right-click on the table or vertical header → row operations. Right-click on horizontal header → column operations. Includes insert from clipboard. |
 | **Dirty tracking** | `isDirty()` / `dirtyChanged(bool)` signal based on `QUndoStack::isClean()`. |
@@ -344,10 +355,11 @@ auto *grid = new QtWlPlugin::EditableGridWidget(tv, fm, this);
 #### API
 
 ```cpp
-explicit EditableGridWidget(QTableView *view, FocusManager *fm, QWidget *parent = nullptr);
+explicit EditableGridWidget(QTableView *view, GridMode mode, FocusManager *fm, QWidget *parent = nullptr);
 
 // Access
 QTableView *view() const;     // Returns the injected view (may be QTableView or QTableWidget)
+GridMode mode() const;        // Returns the active mode
 QUndoStack *undoStack() const;
 
 // Row operations
@@ -626,7 +638,8 @@ public:
         // Inject a QTableWidget for item-based convenience
         auto *table = new QTableWidget();
         m_fm = new QtWlPlugin::FocusManager(this, table, this);
-        m_grid = new QtWlPlugin::EditableGridWidget(table, m_fm, this);
+        m_grid = new QtWlPlugin::EditableGridWidget(
+            table, QtWlPlugin::GridMode::MemoryDocument, m_fm, this);
 
         m_toolbar = new QtWlPlugin::PluginToolBar(m_fm, this);
         auto *actSave = m_toolbar->addToolAction("Save",
@@ -687,9 +700,12 @@ public:
         sqlView->setModel(sqlModel);
 
         m_fm = new QtWlPlugin::FocusManager(this, sqlView, this);
-        m_grid = new QtWlPlugin::EditableGridWidget(sqlView, m_fm, this);
+        m_grid = new QtWlPlugin::EditableGridWidget(
+            sqlView, QtWlPlugin::GridMode::LiveDatabase, m_fm, this);
 
-        // The grid handles all focus, context menus, undo, and shortcuts.
+        // The grid handles all focus, context menus, and shortcuts.
+        // Sorting uses model->sort() → SQL ORDER BY (no RAM snapshot).
+        // Insert/delete call model directly (no undo stack wrapping).
         // model->setData() triggers SQL UPDATEs via QSqlTableModel.
 
         layout->addWidget(m_grid, 1);
@@ -759,6 +775,10 @@ The base class `FindReplacePanel` has zero scope awareness. This is intentional 
 ### Model-Based, Format-Agnostic Grid
 
 `EditableGridWidget` accepts a `QTableView*` via dependency injection and performs all data operations through `QAbstractItemModel` (`model()->data()`, `model()->setData()`, `model()->insertRows()`, etc.). This means the same grid code works identically whether the underlying model is a `QTableWidget`'s internal model, a `QStandardItemModel`, a `QSqlTableModel`, or any custom `QAbstractItemModel`. The consumer is responsible for file I/O, encoding, and format-specific quoting — the grid knows nothing about data formats.
+
+### GridMode: MemoryDocument vs LiveDatabase
+
+The `GridMode` enum forces the downstream developer to explicitly acknowledge the memory paradigm of the data they are loading. `MemoryDocument` enables full undo/redo tracking — every edit, insert, delete, and sort is wrapped in a `QUndoCommand` backed by in-memory data snapshots. `LiveDatabase` bypasses all memory-intensive operations: sorting delegates to `model->sort()` (which translates to SQL `ORDER BY` for `QSqlTableModel`), and structural mutations (insert/delete) call the model directly without undo wrappers. This prevents the catastrophic RAM explosion that would occur if a 5-million-row SQLite table were snapshotted into `QVariantList` objects for undo support. Both modes share identical context menus, drag-to-reorder, focus proxying, keyboard shortcuts, and the `WrapAnywhereDelegate`.
 
 ### enca as Build Dependency
 
