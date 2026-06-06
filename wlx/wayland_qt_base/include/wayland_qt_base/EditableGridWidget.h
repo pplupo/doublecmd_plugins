@@ -1,7 +1,7 @@
 #pragma once
 
 #include <QWidget>
-#include <QTableWidget>
+#include <QTableView>
 #include <QUndoStack>
 #include <QHeaderView>
 #include <QStyledItemDelegate>
@@ -28,21 +28,33 @@ private:
     bool m_wrap = false;
 };
 
-/// A QTableWidget wrapper with full undo/redo, keyboard navigation,
+/// A QTableView wrapper with full undo/redo, keyboard navigation,
 /// drag-to-move columns/rows, context menus, and editing support.
 ///
-/// This is format-agnostic — it provides no file I/O, no parsing, no
-/// encoding detection. The consumer plugin loads data into the table
-/// and uses the grid's operations for editing.
+/// Accepts a pre-instantiated QTableView* via dependency injection.
+/// Because QTableWidget is a subclass of QTableView, you can inject either:
+///
+///   // Item-based convenience:
+///   auto *grid = new EditableGridWidget(new QTableWidget(), fm, this);
+///
+///   // Model-based flexibility:
+///   auto *sqlView = new QTableView();
+///   sqlView->setModel(myModel);
+///   auto *grid = new EditableGridWidget(sqlView, fm, this);
+///
+/// All data access goes through QAbstractItemModel — no QTableWidgetItem
+/// dependency in the grid's own logic.
 class EditableGridWidget : public QWidget {
     Q_OBJECT
 public:
-    explicit EditableGridWidget(FocusManager *fm, QWidget *parent = nullptr);
+    /// Takes ownership of the view and parents it to this widget.
+    explicit EditableGridWidget(QTableView *view, FocusManager *fm, QWidget *parent = nullptr);
 
-    QTableWidget *tableWidget() const;
+    /// Access the underlying view (may be QTableView or QTableWidget).
+    QTableView *view() const;
     QUndoStack *undoStack() const;
 
-    // --- Data operations (format-agnostic) ---
+    // --- Data operations (format-agnostic, model-based) ---
     void copySelection(char separator = '\t');
     QString getSelectionAsText(char separator = '\t');
     void pasteSelection();
@@ -70,18 +82,23 @@ protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
 
 private:
-    void setupTable();
+    void setupView();
     void registerShortcuts();
     void setupDragToMove();
     void showRowContextMenu(const QPoint &pos);
     void showColumnContextMenu(const QPoint &pos);
     void onSortByColumn(int column);
-    void onItemChanged(QTableWidgetItem *item);
+    void onDataChanged(const QModelIndex &topLeft, const QModelIndex &bottomRight,
+                       const QList<int> &roles);
     void updateRowNumbers();
     bool isSectionSelected(QHeaderView *header, int logicalIndex) const;
 
+    /// Helper: row/column count via the model
+    int rowCount() const;
+    int colCount() const;
+
     FocusManager *m_fm;
-    QTableWidget *m_view;
+    QTableView *m_view;
     QUndoStack *m_undoStack;
     WrapAnywhereDelegate *m_wrapDelegate;
     bool m_isProgrammaticChange;

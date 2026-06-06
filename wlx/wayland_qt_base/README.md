@@ -172,7 +172,7 @@ QtWlPlugin::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *par
 ```
 
 - `pluginRoot` — the top-level widget of the plugin (typically `this` in the plugin's main widget).
-- `primaryView` — the main content widget that should receive focus by default (e.g. a `QTableWidget`, `QTextEdit`, `QTreeView`).
+- `primaryView` — the main content widget that should receive focus by default (e.g. a `QTableView`, `QTextEdit`, `QTreeView`).
 
 The constructor installs the event filter on `qApp` and sets `pluginRoot`'s focus proxy to `primaryView`.
 
@@ -298,19 +298,45 @@ QAction *addToolAction(const QString &text,
 
 **Header:** `<wayland_qt_base/EditableGridWidget.h>`
 
-A `QWidget` wrapping a `QTableWidget` with full editing capabilities, undo/redo support, drag-to-move, and context menus. **Format-agnostic** — it provides no file I/O, no parsing, no encoding detection. The consumer plugin loads data into the table and uses the grid's operations.
+A `QWidget` wrapping a caller-injected `QTableView` with full editing capabilities, undo/redo support, drag-to-move, and context menus. **Format-agnostic** — it provides no file I/O, no parsing, no encoding detection.
+
+Because `QTableWidget` is a subclass of `QTableView`, you can inject either:
+- A `QTableWidget` for simple item-based workflows
+- A plain `QTableView` with any `QAbstractItemModel` (e.g. `QStandardItemModel`, `QSqlTableModel`) for model-based workflows
+
+All internal data access goes through `QAbstractItemModel` / `QModelIndex` — zero `QTableWidgetItem` dependencies inside the grid.
+
+#### Constructor (Dependency Injection)
+
+```cpp
+// The caller creates and configures the view, then hands it to the grid.
+explicit EditableGridWidget(QTableView *view, FocusManager *fm, QWidget *parent = nullptr);
+```
+
+**With QTableWidget:**
+```cpp
+auto *tw = new QTableWidget();
+auto *grid = new QtWlPlugin::EditableGridWidget(tw, fm, this);
+```
+
+**With QTableView + custom model:**
+```cpp
+auto *tv = new QTableView();
+tv->setModel(myCustomModel);
+auto *grid = new QtWlPlugin::EditableGridWidget(tv, fm, this);
+```
 
 #### Features
 
 | Feature | Details |
 |---------|---------|
-| **Undo/Redo** | `QUndoStack` automatically registered with FocusManager. Four internal undo command types: `EditCellCommand`, `RowColCommand`, `DataSnapshotCommand`, `SectionMoveCommand`. |
-| **Cell editing** | Enter to open editor, Escape to cancel (reverts to pre-edit text), Up/Down to navigate between cells while editing, Enter to commit and advance right (wraps to next row). |
+| **Undo/Redo** | `QUndoStack` automatically registered with FocusManager. Four internal undo command types: `EditCellCommand`, `RowColCommand`, `DataSnapshotCommand`, `SectionMoveCommand` — all operating through `QAbstractItemModel`. |
+| **Cell editing** | Enter to open editor, Escape to cancel (reverts to pre-edit value), Up/Down to navigate between cells while editing, Enter to commit and advance right (wraps to next row). |
 | **Arrow navigation** | Left at column 0 wraps to the last column of the previous row. Right at last column wraps to column 0 of the next row. |
-| **Copy/Paste** | `copySelection(separator)` copies selected cells as text. `pasteSelection()` inserts clipboard rows at the current selection, auto-detecting tab or comma delimiters. |
-| **Insert/Delete** | `insertRows(count, atRow)`, `deleteSelectedRows()`, `insertColumns(count, atCol)`, `deleteSelectedColumns()` — all with full undo support. |
+| **Copy/Paste** | `copySelection(separator)` copies selected cells as text via `model()->data()`. `pasteSelection()` inserts clipboard rows via `model()->insertRows()` and `model()->setData()`, auto-detecting tab or comma delimiters. |
+| **Insert/Delete** | `insertRows(count, atRow)`, `deleteSelectedRows()`, `insertColumns(count, atCol)`, `deleteSelectedColumns()` — all via `model()->insertRows()`/`removeRows()` with full undo support. |
 | **Drag-to-move** | Multi-select row or column drag via headers. Uses a debounce timer to coalesce Qt's per-section `sectionMoved` signals into a single undo command. |
-| **Column sorting** | Click a column header once to "arm" it, click again to sort. Stores a full data snapshot for undo. Toggles ascending/descending on subsequent clicks. |
+| **Column sorting** | Click a column header once to "arm" it, click again to sort via `model()->sort()`. Stores a full data snapshot for undo. Toggles ascending/descending on subsequent clicks. |
 | **Word wrap** | `WrapAnywhereDelegate` enables character-level text wrapping (not just word boundaries). Toggle with `setWordWrap(bool)`. |
 | **Context menus** | Right-click on the table or vertical header → row operations. Right-click on horizontal header → column operations. Includes insert from clipboard. |
 | **Dirty tracking** | `isDirty()` / `dirtyChanged(bool)` signal based on `QUndoStack::isClean()`. |
@@ -318,10 +344,10 @@ A `QWidget` wrapping a `QTableWidget` with full editing capabilities, undo/redo 
 #### API
 
 ```cpp
-explicit EditableGridWidget(FocusManager *fm, QWidget *parent = nullptr);
+explicit EditableGridWidget(QTableView *view, FocusManager *fm, QWidget *parent = nullptr);
 
 // Access
-QTableWidget *tableWidget() const;
+QTableView *view() const;     // Returns the injected view (may be QTableView or QTableWidget)
 QUndoStack *undoStack() const;
 
 // Row operations
@@ -350,7 +376,7 @@ bool isDirty() const;
 void dirtyChanged(bool dirty);
 ```
 
-The consumer populates `tableWidget()` directly (e.g. `setRowCount()`, `setColumnCount()`, `setItem()`), then uses the grid's operations for editing.
+The consumer provides a `QTableView` (or `QTableWidget`) with a model already set. All grid operations go through `view()->model()` using `QModelIndex`.
 
 #### Registered Shortcuts
 
@@ -583,12 +609,13 @@ private:
 };
 ```
 
-### Plugin with editable grid + undo
+### Plugin with editable grid + undo (QTableWidget)
 
 ```cpp
 #include <wayland_qt_base/FocusManager.h>
 #include <wayland_qt_base/PluginToolBar.h>
 #include <wayland_qt_base/EditableGridWidget.h>
+#include <QTableWidget>
 
 class DataEditorWidget : public QWidget {
     Q_OBJECT
@@ -596,14 +623,10 @@ public:
     DataEditorWidget(QWidget *parent = nullptr) : QWidget(parent) {
         auto *layout = new QVBoxLayout(this);
 
-        m_grid = new QtWlPlugin::EditableGridWidget(nullptr, this);
-
-        // FocusManager is created with the grid's table as primaryView
-        m_fm = new QtWlPlugin::FocusManager(this, m_grid->tableWidget(), this);
-
-        // The grid's constructor already registered undo shortcuts via setUndoStack
-        // Access the stack for custom commands:
-        QUndoStack *stack = m_fm->undoStack();
+        // Inject a QTableWidget for item-based convenience
+        auto *table = new QTableWidget();
+        m_fm = new QtWlPlugin::FocusManager(this, table, this);
+        m_grid = new QtWlPlugin::EditableGridWidget(table, m_fm, this);
 
         m_toolbar = new QtWlPlugin::PluginToolBar(m_fm, this);
         auto *actSave = m_toolbar->addToolAction("Save",
@@ -618,27 +641,62 @@ public:
 
         layout->addWidget(m_toolbar);
         layout->addWidget(m_grid, 1);
-
-        // Load your data into the grid
         loadData();
     }
 
 private:
     void loadData() {
-        QTableWidget *tw = m_grid->tableWidget();
+        // You can still access QTableWidget-specific methods on the original pointer
+        auto *tw = qobject_cast<QTableWidget*>(m_grid->view());
         tw->setRowCount(100);
         tw->setColumnCount(5);
-        // ... populate cells
+        // ... populate cells with QTableWidgetItem
     }
 
     void onSave() {
-        QTableWidget *tw = m_grid->tableWidget();
         // ... write data in your format
         m_fm->undoStack()->setClean();
     }
 
     QtWlPlugin::FocusManager *m_fm;
     QtWlPlugin::PluginToolBar *m_toolbar;
+    QtWlPlugin::EditableGridWidget *m_grid;
+};
+```
+
+### Plugin with editable grid + SQL model (QTableView)
+
+```cpp
+#include <wayland_qt_base/FocusManager.h>
+#include <wayland_qt_base/PluginToolBar.h>
+#include <wayland_qt_base/EditableGridWidget.h>
+#include <QTableView>
+#include <QSqlTableModel>
+
+class SqlEditorWidget : public QWidget {
+    Q_OBJECT
+public:
+    SqlEditorWidget(QSqlDatabase db, QWidget *parent = nullptr) : QWidget(parent) {
+        auto *layout = new QVBoxLayout(this);
+
+        // Inject a QTableView with a SQL model
+        auto *sqlView = new QTableView();
+        auto *sqlModel = new QSqlTableModel(this, db);
+        sqlModel->setTable("users");
+        sqlModel->select();
+        sqlView->setModel(sqlModel);
+
+        m_fm = new QtWlPlugin::FocusManager(this, sqlView, this);
+        m_grid = new QtWlPlugin::EditableGridWidget(sqlView, m_fm, this);
+
+        // The grid handles all focus, context menus, undo, and shortcuts.
+        // model->setData() triggers SQL UPDATEs via QSqlTableModel.
+
+        layout->addWidget(m_grid, 1);
+    }
+
+private:
+    QtWlPlugin::FocusManager *m_fm;
     QtWlPlugin::EditableGridWidget *m_grid;
 };
 ```
@@ -698,9 +756,9 @@ The base class `FindReplacePanel` has zero scope awareness. This is intentional 
 
 `ScopedFindReplacePanel` adds a scope combo box for plugins that want predefined scope options. It inserts into the base's `optionsRow()` layout, so there's no UI duplication.
 
-### Format-Agnostic Grid
+### Model-Based, Format-Agnostic Grid
 
-`EditableGridWidget` provides all editing operations (copy, paste, insert, delete, drag, sort, undo) without any knowledge of CSV, TSV, JSON, or any other format. The consumer populates the `QTableWidget` with data in whatever format they parse, and uses the grid's operations for editing. File I/O, encoding, and format-specific quoting are entirely the consumer's concern.
+`EditableGridWidget` accepts a `QTableView*` via dependency injection and performs all data operations through `QAbstractItemModel` (`model()->data()`, `model()->setData()`, `model()->insertRows()`, etc.). This means the same grid code works identically whether the underlying model is a `QTableWidget`'s internal model, a `QStandardItemModel`, a `QSqlTableModel`, or any custom `QAbstractItemModel`. The consumer is responsible for file I/O, encoding, and format-specific quoting — the grid knows nothing about data formats.
 
 ### enca as Build Dependency
 

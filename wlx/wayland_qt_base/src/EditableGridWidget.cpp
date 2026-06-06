@@ -9,9 +9,11 @@
 #include <QTextOption>
 #include <QTextDocument>
 #include <QAbstractTextDocumentLayout>
+#include <QAbstractItemModel>
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QAbstractItemDelegate>
+#include <QItemSelectionModel>
 #include <QRegularExpression>
 #include <QMessageBox>
 #include <algorithm>
@@ -19,57 +21,51 @@
 namespace QtWlPlugin {
 
 // ---------------------------------------------------------------------------
-// Undo Commands (internal, format-agnostic — no CSV quoting)
+// Undo Commands — all operate through QAbstractItemModel, not QTableWidgetItem
 // ---------------------------------------------------------------------------
 
 class EditCellCommand : public QUndoCommand {
 public:
-    EditCellCommand(QTableWidget *view, int row, int col,
-                    const QString &oldText, const QString &newText,
+    EditCellCommand(QAbstractItemModel *model, const QModelIndex &index,
+                    const QVariant &oldValue, const QVariant &newValue,
                     QUndoCommand *parent = nullptr)
-        : QUndoCommand(parent), m_view(view), m_row(row), m_col(col),
-          m_oldText(oldText), m_newText(newText) {
-        setText(QString("Edit cell (%1, %2)").arg(row).arg(col));
+        : QUndoCommand(parent), m_model(model),
+          m_row(index.row()), m_col(index.column()),
+          m_oldValue(oldValue), m_newValue(newValue) {
+        setText(QString("Edit cell (%1, %2)").arg(m_row).arg(m_col));
     }
     void undo() override {
-        m_view->blockSignals(true);
-        if (auto *item = m_view->item(m_row, m_col)) item->setText(m_oldText);
-        m_view->blockSignals(false);
+        QModelIndex idx = m_model->index(m_row, m_col);
+        m_model->setData(idx, m_oldValue, Qt::EditRole);
     }
     void redo() override {
-        m_view->blockSignals(true);
-        if (auto *item = m_view->item(m_row, m_col)) item->setText(m_newText);
-        m_view->blockSignals(false);
+        QModelIndex idx = m_model->index(m_row, m_col);
+        m_model->setData(idx, m_newValue, Qt::EditRole);
     }
 private:
-    QTableWidget *m_view;
+    QAbstractItemModel *m_model;
     int m_row, m_col;
-    QString m_oldText, m_newText;
+    QVariant m_oldValue, m_newValue;
 };
 
 class RowColCommand : public QUndoCommand {
 public:
-    RowColCommand(QTableWidget *view, int index, int count, bool isRow, bool isInsert,
+    RowColCommand(QAbstractItemModel *model, int index, int count, bool isRow, bool isInsert,
                   QUndoCommand *parent = nullptr)
-        : QUndoCommand(parent), m_view(view), m_index(index), m_count(count),
+        : QUndoCommand(parent), m_model(model), m_index(index), m_count(count),
           m_isRow(isRow), m_isInsert(isInsert) {
         setText(QString("%1 %2 %3(s)").arg(isInsert ? "Insert" : "Delete")
                 .arg(count).arg(isRow ? "row" : "col"));
         if (!isInsert) {
+            // Snapshot data before deletion for undo restore
+            int crossDim = isRow ? model->columnCount() : model->rowCount();
             for (int i = 0; i < count; ++i) {
-                QStringList list;
-                int limit = isRow ? view->columnCount() : view->rowCount();
-                for (int j = 0; j < limit; ++j) {
-                    auto *item = isRow ? view->item(index + i, j) : view->item(j, index + i);
-                    list << (item ? item->text() : "");
+                QVariantList list;
+                for (int j = 0; j < crossDim; ++j) {
+                    QModelIndex idx = isRow ? model->index(index + i, j)
+                                           : model->index(j, index + i);
+                    list << model->data(idx, Qt::EditRole);
                 }
-                m_data << list;
-            }
-        } else {
-            for (int i = 0; i < count; ++i) {
-                QStringList list;
-                int limit = isRow ? view->columnCount() : view->rowCount();
-                for (int j = 0; j < limit; ++j) list << "";
                 m_data << list;
             }
         }
@@ -79,54 +75,49 @@ public:
 
 private:
     void applyInsert() {
-        m_view->blockSignals(true);
-        for (int i = 0; i < m_count; ++i) {
-            if (m_isRow) m_view->insertRow(m_index + i);
-            else m_view->insertColumn(m_index + i);
-            QStringList list = i < m_data.size() ? m_data[i] : QStringList();
-            int limit = m_isRow ? m_view->columnCount() : m_view->rowCount();
-            for (int j = 0; j < limit; ++j) {
-                QString text = j < list.size() ? list[j] : "";
-                auto *item = new QTableWidgetItem(text);
-                item->setToolTip(text);
-                item->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsEditable);
-                if (m_isRow) m_view->setItem(m_index + i, j, item);
-                else m_view->setItem(j, m_index + i, item);
+        if (m_isRow) m_model->insertRows(m_index, m_count);
+        else m_model->insertColumns(m_index, m_count);
+
+        // Restore saved data if we have any (undo of delete)
+        if (!m_data.isEmpty()) {
+            int crossDim = m_isRow ? m_model->columnCount() : m_model->rowCount();
+            for (int i = 0; i < m_count && i < m_data.size(); ++i) {
+                const QVariantList &list = m_data[i];
+                for (int j = 0; j < crossDim && j < list.size(); ++j) {
+                    QModelIndex idx = m_isRow ? m_model->index(m_index + i, j)
+                                              : m_model->index(j, m_index + i);
+                    m_model->setData(idx, list[j], Qt::EditRole);
+                }
             }
         }
-        m_view->blockSignals(false);
     }
     void applyDelete() {
-        m_view->blockSignals(true);
-        for (int i = m_count - 1; i >= 0; --i) {
-            if (m_isRow) m_view->removeRow(m_index + i);
-            else m_view->removeColumn(m_index + i);
-        }
-        m_view->blockSignals(false);
+        if (m_isRow) m_model->removeRows(m_index, m_count);
+        else m_model->removeColumns(m_index, m_count);
     }
-    QTableWidget *m_view;
+    QAbstractItemModel *m_model;
     int m_index, m_count;
-    QList<QStringList> m_data;
+    QList<QVariantList> m_data;
     bool m_isRow, m_isInsert;
 };
 
 class DataSnapshotCommand : public QUndoCommand {
 public:
-    DataSnapshotCommand(QTableWidget *view, const QList<QStringList> &before,
-                        const QList<QStringList> &after, const QString &text)
-        : m_view(view), m_before(before), m_after(after), m_first(true) { setText(text); }
+    DataSnapshotCommand(QAbstractItemModel *model, const QList<QVariantList> &before,
+                        const QList<QVariantList> &after, const QString &text)
+        : m_model(model), m_before(before), m_after(after), m_first(true) { setText(text); }
     void undo() override { restore(m_before); }
     void redo() override { if (m_first) { m_first = false; return; } restore(m_after); }
 private:
-    void restore(const QList<QStringList> &data) {
-        m_view->blockSignals(true);
-        for (int r = 0; r < data.size() && r < m_view->rowCount(); ++r)
-            for (int c = 0; c < data[r].size() && c < m_view->columnCount(); ++c)
-                if (auto *item = m_view->item(r, c)) item->setText(data[r][c]);
-        m_view->blockSignals(false);
+    void restore(const QList<QVariantList> &data) {
+        for (int r = 0; r < data.size() && r < m_model->rowCount(); ++r)
+            for (int c = 0; c < data[r].size() && c < m_model->columnCount(); ++c) {
+                QModelIndex idx = m_model->index(r, c);
+                m_model->setData(idx, data[r][c], Qt::EditRole);
+            }
     }
-    QTableWidget *m_view;
-    QList<QStringList> m_before, m_after;
+    QAbstractItemModel *m_model;
+    QList<QVariantList> m_before, m_after;
     bool m_first;
 };
 
@@ -152,7 +143,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// WrapAnywhereDelegate
+// WrapAnywhereDelegate — already model-based (uses QModelIndex)
 // ---------------------------------------------------------------------------
 
 void WrapAnywhereDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
@@ -205,9 +196,10 @@ bool WrapAnywhereDelegate::wrapAnywhere() const { return m_wrap; }
 // EditableGridWidget
 // ---------------------------------------------------------------------------
 
-EditableGridWidget::EditableGridWidget(FocusManager *fm, QWidget *parent)
+EditableGridWidget::EditableGridWidget(QTableView *view, FocusManager *fm, QWidget *parent)
     : QWidget(parent)
     , m_fm(fm)
+    , m_view(view)
     , m_isProgrammaticChange(false)
     , m_lastSortColumn(-1)
     , m_lastSortOrder(Qt::AscendingOrder)
@@ -217,11 +209,14 @@ EditableGridWidget::EditableGridWidget(FocusManager *fm, QWidget *parent)
 {
     setFocusPolicy(Qt::NoFocus);
 
+    // Take ownership
+    m_view->setParent(this);
+
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-
-    setupTable();
     layout->addWidget(m_view);
+
+    setupView();
 
     m_undoStack = new QUndoStack(this);
     fm->setUndoStack(m_undoStack);
@@ -230,16 +225,25 @@ EditableGridWidget::EditableGridWidget(FocusManager *fm, QWidget *parent)
         emit dirtyChanged(!clean);
     });
     connect(m_undoStack, &QUndoStack::indexChanged, this, [this]() { updateRowNumbers(); });
-    connect(m_view, &QTableWidget::itemChanged, this, &EditableGridWidget::onItemChanged);
 
-    // Stash old text when entering a cell editor
+    // Track model data changes for undo integration.
+    // When a cell editor commits, the model emits dataChanged. We intercept
+    // it to push an EditCellCommand if the stashed old value differs.
+    if (m_view->model()) {
+        connect(m_view->model(), &QAbstractItemModel::dataChanged,
+                this, &EditableGridWidget::onDataChanged);
+    }
+
+    // Stash old value when entering a cell editor
     connect(fm, &FocusManager::inputWidgetEntered, this, [this](QWidget *) {
-        if (auto *item = m_view->currentItem()) {
-            if (!item->data(Qt::UserRole).isValid()) {
-                m_isProgrammaticChange = true;
-                item->setData(Qt::UserRole, item->text());
-                m_isProgrammaticChange = false;
-            }
+        QModelIndex current = m_view->currentIndex();
+        if (!current.isValid() || !m_view->model()) return;
+        QVariant existing = m_view->model()->data(current, Qt::UserRole);
+        if (!existing.isValid()) {
+            m_isProgrammaticChange = true;
+            m_view->model()->setData(current,
+                m_view->model()->data(current, Qt::EditRole), Qt::UserRole);
+            m_isProgrammaticChange = false;
         }
     });
 
@@ -247,9 +251,8 @@ EditableGridWidget::EditableGridWidget(FocusManager *fm, QWidget *parent)
     setupDragToMove();
 }
 
-void EditableGridWidget::setupTable()
+void EditableGridWidget::setupView()
 {
-    m_view = new QTableWidget(this);
     m_view->setFocusPolicy(Qt::ClickFocus);
     m_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
 
@@ -288,6 +291,16 @@ void EditableGridWidget::setupTable()
     m_view->installEventFilter(this);
 }
 
+int EditableGridWidget::rowCount() const
+{
+    return m_view->model() ? m_view->model()->rowCount() : 0;
+}
+
+int EditableGridWidget::colCount() const
+{
+    return m_view->model() ? m_view->model()->columnCount() : 0;
+}
+
 void EditableGridWidget::registerShortcuts()
 {
     // Ctrl+C → copy
@@ -305,40 +318,46 @@ void EditableGridWidget::registerShortcuts()
     // Enter/Return → edit current cell
     m_fm->registerShortcut(QKeySequence(Qt::Key_Return), FocusManager::WhenNoInput,
         [this]() {
-            if (m_view->currentItem()) { m_view->editItem(m_view->currentItem()); return true; }
+            QModelIndex current = m_view->currentIndex();
+            if (current.isValid()) { m_view->edit(current); return true; }
             return false;
         });
     m_fm->registerShortcut(QKeySequence(Qt::Key_Enter), FocusManager::WhenNoInput,
         [this]() {
-            if (m_view->currentItem()) { m_view->editItem(m_view->currentItem()); return true; }
+            QModelIndex current = m_view->currentIndex();
+            if (current.isValid()) { m_view->edit(current); return true; }
             return false;
         });
 
     // Arrow keys with right-wrap
     auto arrowHandler = [this](int key) -> bool {
-        int visualCol = m_view->horizontalHeader()->visualIndex(m_view->currentIndex().column());
-        int visualRow = m_view->verticalHeader()->visualIndex(m_view->currentIndex().row());
+        QModelIndex current = m_view->currentIndex();
+        if (!current.isValid()) return false;
+        int visualCol = m_view->horizontalHeader()->visualIndex(current.column());
+        int visualRow = m_view->verticalHeader()->visualIndex(current.row());
+        int numRows = rowCount();
+        int numCols = colCount();
         if (key == Qt::Key_Up) visualRow--;
         if (key == Qt::Key_Down) visualRow++;
         if (key == Qt::Key_Left) {
             visualCol--;
             if (visualCol < 0 && visualRow > 0) {
-                visualCol = m_view->columnCount() - 1;
+                visualCol = numCols - 1;
                 visualRow--;
             }
         }
         if (key == Qt::Key_Right) {
             visualCol++;
-            if (visualCol >= m_view->columnCount() && visualRow < m_view->rowCount() - 1) {
+            if (visualCol >= numCols && visualRow < numRows - 1) {
                 visualCol = 0;
                 visualRow++;
             }
         }
-        visualRow = qBound(0, visualRow, m_view->rowCount() - 1);
-        visualCol = qBound(0, visualCol, m_view->columnCount() - 1);
+        visualRow = qBound(0, visualRow, numRows - 1);
+        visualCol = qBound(0, visualCol, numCols - 1);
         int r = m_view->verticalHeader()->logicalIndex(visualRow);
         int c = m_view->horizontalHeader()->logicalIndex(visualCol);
-        m_view->setCurrentCell(r, c);
+        m_view->setCurrentIndex(m_view->model()->index(r, c));
         return true;
     };
 
@@ -454,18 +473,21 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
     // --- In-editor key handling ---
     if (event->type() == QEvent::KeyPress && obj == m_view && m_fm->activeInput()) {
         auto *ke = static_cast<QKeyEvent *>(event);
+        QAbstractItemModel *model = m_view->model();
+        if (!model) return QWidget::eventFilter(obj, event);
 
         if (ke->key() == Qt::Key_Escape) {
-            if (auto *item = m_view->currentItem()) {
-                QVariant oldData = item->data(Qt::UserRole);
+            QModelIndex current = m_view->currentIndex();
+            if (current.isValid()) {
+                QVariant oldData = model->data(current, Qt::UserRole);
                 if (oldData.isValid()) {
                     m_isProgrammaticChange = true;
-                    item->setText(oldData.toString());
-                    item->setData(Qt::UserRole, QVariant());
+                    model->setData(current, oldData, Qt::EditRole);
+                    model->setData(current, QVariant(), Qt::UserRole);
                     m_isProgrammaticChange = false;
                 }
             }
-            m_view->closePersistentEditor(m_view->currentItem());
+            m_view->closePersistentEditor(m_view->currentIndex());
             return true;
         }
 
@@ -474,21 +496,22 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
             int r = current.row(), c = current.column();
             if (ke->key() == Qt::Key_Up) r--;
             if (ke->key() == Qt::Key_Down) r++;
-            r = qBound(0, r, m_view->rowCount() - 1);
+            r = qBound(0, r, rowCount() - 1);
 
             // Cancel current edit without saving
-            if (auto *item = m_view->currentItem()) {
-                QVariant oldData = item->data(Qt::UserRole);
+            if (current.isValid()) {
+                QVariant oldData = model->data(current, Qt::UserRole);
                 if (oldData.isValid()) {
                     m_isProgrammaticChange = true;
-                    item->setText(oldData.toString());
-                    item->setData(Qt::UserRole, QVariant());
+                    model->setData(current, oldData, Qt::EditRole);
+                    model->setData(current, QVariant(), Qt::UserRole);
                     m_isProgrammaticChange = false;
                 }
             }
-            m_view->closePersistentEditor(m_view->currentItem());
-            m_view->setCurrentCell(r, c);
-            m_view->editItem(m_view->item(r, c));
+            m_view->closePersistentEditor(m_view->currentIndex());
+            QModelIndex target = model->index(r, c);
+            m_view->setCurrentIndex(target);
+            m_view->edit(target);
             return true;
         }
 
@@ -500,21 +523,22 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
             QAbstractItemDelegate *delegate = m_view->itemDelegateForIndex(current);
             QWidget *editor = m_fm->activeInput();
             if (delegate && editor)
-                delegate->setModelData(editor, m_view->model(), current);
+                delegate->setModelData(editor, model, current);
 
             // Navigate right (wrap to next row)
             int visualCol = m_view->horizontalHeader()->visualIndex(c);
             int visualRow = m_view->verticalHeader()->visualIndex(r);
             visualCol++;
-            if (visualCol >= m_view->columnCount()) {
+            if (visualCol >= colCount()) {
                 visualCol = 0;
                 visualRow++;
             }
-            if (visualRow < m_view->rowCount()) {
+            if (visualRow < rowCount()) {
                 int nr = m_view->verticalHeader()->logicalIndex(visualRow);
                 int nc = m_view->horizontalHeader()->logicalIndex(visualCol);
                 QTimer::singleShot(0, this, [this, nr, nc]() {
-                    m_view->setCurrentCell(nr, nc);
+                    if (m_view->model())
+                        m_view->setCurrentIndex(m_view->model()->index(nr, nc));
                 });
             }
             return true;
@@ -524,7 +548,7 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
     return QWidget::eventFilter(obj, event);
 }
 
-QTableWidget *EditableGridWidget::tableWidget() const { return m_view; }
+QTableView *EditableGridWidget::view() const { return m_view; }
 QUndoStack *EditableGridWidget::undoStack() const { return m_undoStack; }
 bool EditableGridWidget::isDirty() const { return !m_undoStack->isClean(); }
 
@@ -543,30 +567,40 @@ void EditableGridWidget::setWordWrap(bool wrap)
 bool EditableGridWidget::wordWrap() const { return m_wrapDelegate->wrapAnywhere(); }
 void EditableGridWidget::setShowGrid(bool show) { m_view->setShowGrid(show); }
 
-void EditableGridWidget::onItemChanged(QTableWidgetItem *item)
+void EditableGridWidget::onDataChanged(const QModelIndex &topLeft, const QModelIndex &bottomRight,
+                                        const QList<int> &roles)
 {
-    if (m_isProgrammaticChange || !item) return;
+    Q_UNUSED(bottomRight);
+    Q_UNUSED(roles);
+    if (m_isProgrammaticChange || !topLeft.isValid()) return;
 
-    QVariant oldData = item->data(Qt::UserRole);
+    QAbstractItemModel *model = m_view->model();
+    if (!model) return;
+
+    QVariant oldData = model->data(topLeft, Qt::UserRole);
     if (!oldData.isValid()) return;
 
+    QVariant newValue = model->data(topLeft, Qt::EditRole);
     QString oldText = oldData.toString();
-    QString newText = item->text();
+    QString newText = newValue.toString();
 
     m_isProgrammaticChange = true;
-    item->setData(Qt::UserRole, QVariant());
+    model->setData(topLeft, QVariant(), Qt::UserRole); // clear stash
     m_isProgrammaticChange = false;
 
     if (oldText != newText) {
         m_isProgrammaticChange = true;
-        item->setText(oldText);
+        model->setData(topLeft, oldData, Qt::EditRole); // revert so undo command applies it
         m_isProgrammaticChange = false;
-        m_undoStack->push(new EditCellCommand(m_view, item->row(), item->column(), oldText, newText));
+        m_undoStack->push(new EditCellCommand(model, topLeft, oldData, newValue));
     }
 }
 
 void EditableGridWidget::onSortByColumn(int column)
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model) return;
+
     if (column != m_lastSortColumn) {
         m_lastSortColumn = column;
         m_lastSortOrder = Qt::AscendingOrder;
@@ -574,27 +608,27 @@ void EditableGridWidget::onSortByColumn(int column)
         return;
     }
 
-    QList<QStringList> beforeData;
-    for (int r = 0; r < m_view->rowCount(); ++r) {
-        QStringList row;
-        for (int c = 0; c < m_view->columnCount(); ++c)
-            row << (m_view->item(r, c) ? m_view->item(r, c)->text() : "");
+    int rows = rowCount(), cols = colCount();
+
+    QList<QVariantList> beforeData;
+    for (int r = 0; r < rows; ++r) {
+        QVariantList row;
+        for (int c = 0; c < cols; ++c)
+            row << model->data(model->index(r, c), Qt::EditRole);
         beforeData << row;
     }
 
-    m_view->blockSignals(true);
-    m_view->sortItems(column, m_lastSortOrder);
-    m_view->blockSignals(false);
+    model->sort(column, m_lastSortOrder);
 
-    QList<QStringList> afterData;
-    for (int r = 0; r < m_view->rowCount(); ++r) {
-        QStringList row;
-        for (int c = 0; c < m_view->columnCount(); ++c)
-            row << (m_view->item(r, c) ? m_view->item(r, c)->text() : "");
+    QList<QVariantList> afterData;
+    for (int r = 0; r < rows; ++r) {
+        QVariantList row;
+        for (int c = 0; c < cols; ++c)
+            row << model->data(model->index(r, c), Qt::EditRole);
         afterData << row;
     }
 
-    m_undoStack->push(new DataSnapshotCommand(m_view, beforeData, afterData, "Sort"));
+    m_undoStack->push(new DataSnapshotCommand(model, beforeData, afterData, "Sort"));
     m_view->horizontalHeader()->setSortIndicatorShown(true);
     m_view->horizontalHeader()->setSortIndicator(column, m_lastSortOrder);
     m_lastSortOrder = (m_lastSortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
@@ -602,38 +636,34 @@ void EditableGridWidget::onSortByColumn(int column)
 
 void EditableGridWidget::updateRowNumbers()
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model) return;
     QHeaderView *vh = m_view->verticalHeader();
-    m_view->blockSignals(true);
-    for (int v = 0; v < m_view->rowCount(); ++v) {
+    for (int v = 0; v < rowCount(); ++v) {
         int logical = vh->logicalIndex(v);
-        auto *item = m_view->verticalHeaderItem(logical);
-        if (!item) {
-            item = new QTableWidgetItem();
-            m_view->setVerticalHeaderItem(logical, item);
-        }
-        item->setText(QString::number(v + 1));
+        model->setHeaderData(logical, Qt::Vertical, QString::number(v + 1));
     }
-    m_view->blockSignals(false);
 }
 
 bool EditableGridWidget::isSectionSelected(QHeaderView *header, int logicalIndex) const
 {
     QItemSelectionModel *sel = m_view->selectionModel();
-    if (!sel) return false;
+    QAbstractItemModel *model = m_view->model();
+    if (!sel || !model) return false;
     bool isHorizontal = (header == m_view->horizontalHeader());
     if (isHorizontal) {
-        for (int r = 0; r < m_view->rowCount(); ++r)
-            if (!sel->isSelected(m_view->model()->index(r, logicalIndex))) return false;
-        return m_view->rowCount() > 0;
+        for (int r = 0; r < rowCount(); ++r)
+            if (!sel->isSelected(model->index(r, logicalIndex))) return false;
+        return rowCount() > 0;
     } else {
-        for (int c = 0; c < m_view->columnCount(); ++c)
-            if (!sel->isSelected(m_view->model()->index(logicalIndex, c))) return false;
-        return m_view->columnCount() > 0;
+        for (int c = 0; c < colCount(); ++c)
+            if (!sel->isSelected(model->index(logicalIndex, c))) return false;
+        return colCount() > 0;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Copy / Paste / Insert / Delete — Format-agnostic
+// Copy / Paste / Insert / Delete — all via QAbstractItemModel
 // ---------------------------------------------------------------------------
 
 void EditableGridWidget::copySelection(char separator)
@@ -645,11 +675,13 @@ void EditableGridWidget::copySelection(char separator)
 
 QString EditableGridWidget::getSelectionAsText(char separator)
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model || !m_view->selectionModel()) return {};
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (sel.isEmpty()) return {};
 
-    int minVRow = m_view->rowCount(), maxVRow = -1;
-    int minVCol = m_view->columnCount(), maxVCol = -1;
+    int minVRow = rowCount(), maxVRow = -1;
+    int minVCol = colCount(), maxVCol = -1;
     for (const auto &index : sel) {
         int vr = m_view->verticalHeader()->visualIndex(index.row());
         int vc = m_view->horizontalHeader()->visualIndex(index.column());
@@ -663,12 +695,10 @@ QString EditableGridWidget::getSelectionAsText(char separator)
         QStringList rowItems;
         for (int vc = minVCol; vc <= maxVCol; ++vc) {
             int c = m_view->horizontalHeader()->logicalIndex(vc);
-            QModelIndex idx = m_view->model()->index(r, c);
+            QModelIndex idx = model->index(r, c);
             QString cellText;
-            if (m_view->selectionModel()->isSelected(idx)) {
-                auto *item = m_view->item(r, c);
-                cellText = item ? item->text() : "";
-            }
+            if (m_view->selectionModel()->isSelected(idx))
+                cellText = model->data(idx, Qt::DisplayRole).toString();
             rowItems << cellText;
         }
         outText += rowItems.join(separator) + "\n";
@@ -678,10 +708,13 @@ QString EditableGridWidget::getSelectionAsText(char separator)
 
 void EditableGridWidget::pasteSelection()
 {
-    int targetVisualRow = m_view->rowCount();
+    QAbstractItemModel *model = m_view->model();
+    if (!model) return;
+
+    int targetVisualRow = rowCount();
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (!sel.isEmpty()) {
-        int minVRow = m_view->rowCount();
+        int minVRow = rowCount();
         for (const auto &index : sel) {
             int vr = m_view->verticalHeader()->visualIndex(index.row());
             if (vr < minVRow) minVRow = vr;
@@ -689,7 +722,7 @@ void EditableGridWidget::pasteSelection()
         targetVisualRow = minVRow;
     }
 
-    int endRow = m_view->rowCount();
+    int endRow = rowCount();
     bool needsMove = (targetVisualRow < endRow);
 
     QList<int> beforeOrder;
@@ -702,7 +735,7 @@ void EditableGridWidget::pasteSelection()
     if (needsMove) m_undoStack->beginMacro("Paste rows");
     pasteSelectionAt(endRow);
 
-    int rowsInserted = m_view->rowCount() - endRow;
+    int rowsInserted = rowCount() - endRow;
     if (rowsInserted > 0 && needsMove) {
         QList<int> midOrder;
         for (int v = 0; v < vh->count(); ++v) midOrder.append(vh->logicalIndex(v));
@@ -723,7 +756,9 @@ void EditableGridWidget::pasteSelection()
 
 void EditableGridWidget::pasteSelectionAt(int atRow)
 {
-    int targetCols = m_view->columnCount();
+    QAbstractItemModel *model = m_view->model();
+    if (!model) return;
+    int targetCols = colCount();
     if (targetCols <= 0) return;
 
     QString text = QApplication::clipboard()->text();
@@ -744,7 +779,7 @@ void EditableGridWidget::pasteSelectionAt(int atRow)
 
     int rowsToInsert = lines.size();
     m_isProgrammaticChange = true;
-    m_undoStack->push(new RowColCommand(m_view, atRow, rowsToInsert, true, true));
+    m_undoStack->push(new RowColCommand(model, atRow, rowsToInsert, true, true));
     m_isProgrammaticChange = false;
 
     for (int i = 0; i < rowsToInsert; ++i) {
@@ -752,23 +787,24 @@ void EditableGridWidget::pasteSelectionAt(int atRow)
         for (int vc = 0; vc < targetCols; ++vc) {
             int c = m_view->horizontalHeader()->logicalIndex(vc);
             QString cellText = vc < list.size() ? list.at(vc).trimmed() : "";
-            if (auto *item = m_view->item(atRow + i, c)) {
-                m_isProgrammaticChange = true;
-                item->setText(cellText);
-                m_isProgrammaticChange = false;
-            }
+            m_isProgrammaticChange = true;
+            model->setData(model->index(atRow + i, c), cellText, Qt::EditRole);
+            m_isProgrammaticChange = false;
         }
     }
 }
 
 void EditableGridWidget::insertRows(int count, int atRow)
 {
-    if (m_view->columnCount() <= 0 || count <= 0) return;
-    m_undoStack->push(new RowColCommand(m_view, atRow, count, true, true));
+    QAbstractItemModel *model = m_view->model();
+    if (!model || colCount() <= 0 || count <= 0) return;
+    m_undoStack->push(new RowColCommand(model, atRow, count, true, true));
 }
 
 void EditableGridWidget::deleteSelectedRows()
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model || !m_view->selectionModel()) return;
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (sel.isEmpty()) return;
 
@@ -779,28 +815,28 @@ void EditableGridWidget::deleteSelectedRows()
 
     m_undoStack->beginMacro("Delete rows");
     for (int r : rowsToDelete)
-        m_undoStack->push(new RowColCommand(m_view, r, 1, true, false));
+        m_undoStack->push(new RowColCommand(model, r, 1, true, false));
     m_undoStack->endMacro();
 }
 
 void EditableGridWidget::copyColumnSelection(char separator)
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model || !m_view->selectionModel()) return;
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (sel.isEmpty()) return;
 
-    int minCol = m_view->columnCount(), maxCol = -1;
+    int minCol = colCount(), maxCol = -1;
     for (const auto &index : sel) {
         if (index.column() < minCol) minCol = index.column();
         if (index.column() > maxCol) maxCol = index.column();
     }
 
     QString outText;
-    for (int r = 0; r < m_view->rowCount(); ++r) {
+    for (int r = 0; r < rowCount(); ++r) {
         QStringList rowItems;
-        for (int c = minCol; c <= maxCol; ++c) {
-            QString cellText = m_view->item(r, c) ? m_view->item(r, c)->text() : "";
-            rowItems << cellText;
-        }
+        for (int c = minCol; c <= maxCol; ++c)
+            rowItems << model->data(model->index(r, c), Qt::DisplayRole).toString();
         outText += rowItems.join(separator) + "\n";
     }
     QApplication::clipboard()->setText(outText);
@@ -808,6 +844,9 @@ void EditableGridWidget::copyColumnSelection(char separator)
 
 void EditableGridWidget::pasteColumnSelectionAt(int atCol)
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model) return;
+
     QString text = QApplication::clipboard()->text();
     if (text.isEmpty()) return;
 
@@ -815,10 +854,10 @@ void EditableGridWidget::pasteColumnSelectionAt(int atCol)
     if (!lines.isEmpty() && lines.last().isEmpty()) lines.removeLast();
     if (lines.isEmpty()) return;
 
-    if (lines.size() != m_view->rowCount()) {
+    if (lines.size() != rowCount()) {
         QMessageBox::warning(this, "Paste Error",
             QString("Clipboard contains %1 rows, but table has %2.")
-            .arg(lines.size()).arg(m_view->rowCount()));
+            .arg(lines.size()).arg(rowCount()));
         return;
     }
 
@@ -830,30 +869,31 @@ void EditableGridWidget::pasteColumnSelectionAt(int atCol)
     }
 
     m_isProgrammaticChange = true;
-    m_undoStack->push(new RowColCommand(m_view, atCol, colsToInsert, false, true));
+    m_undoStack->push(new RowColCommand(model, atCol, colsToInsert, false, true));
     m_isProgrammaticChange = false;
 
-    for (int r = 0; r < m_view->rowCount(); ++r) {
+    for (int r = 0; r < rowCount(); ++r) {
         QStringList list = lines.at(r).split(QLatin1Char(sep));
         for (int c = 0; c < colsToInsert; ++c) {
             QString cellText = c < list.size() ? list.at(c).trimmed() : "";
-            if (auto *item = m_view->item(r, atCol + c)) {
-                m_isProgrammaticChange = true;
-                item->setText(cellText);
-                m_isProgrammaticChange = false;
-            }
+            m_isProgrammaticChange = true;
+            model->setData(model->index(r, atCol + c), cellText, Qt::EditRole);
+            m_isProgrammaticChange = false;
         }
     }
 }
 
 void EditableGridWidget::insertColumns(int count, int atCol)
 {
-    if (m_view->rowCount() <= 0 || count <= 0) return;
-    m_undoStack->push(new RowColCommand(m_view, atCol, count, false, true));
+    QAbstractItemModel *model = m_view->model();
+    if (!model || rowCount() <= 0 || count <= 0) return;
+    m_undoStack->push(new RowColCommand(model, atCol, count, false, true));
 }
 
 void EditableGridWidget::deleteSelectedColumns()
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model || !m_view->selectionModel()) return;
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (sel.isEmpty()) return;
 
@@ -864,7 +904,7 @@ void EditableGridWidget::deleteSelectedColumns()
 
     m_undoStack->beginMacro("Delete cols");
     for (int c : colsToDelete)
-        m_undoStack->push(new RowColCommand(m_view, c, 1, false, false));
+        m_undoStack->push(new RowColCommand(model, c, 1, false, false));
     m_undoStack->endMacro();
 }
 
@@ -874,12 +914,15 @@ void EditableGridWidget::deleteSelectedColumns()
 
 void EditableGridWidget::showRowContextMenu(const QPoint &pos)
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model) return;
+
     QMenu menu(this);
     QAction *actCopyTSV = nullptr, *actCopyCSV = nullptr, *actDelete = nullptr;
     QAction *actInsertAbove = nullptr, *actInsertBelow = nullptr;
     QAction *actPasteAbove = nullptr, *actPasteBelow = nullptr;
 
-    int minRow = m_view->rowCount(), maxRow = -1, numRows = 0;
+    int minRow = rowCount(), maxRow = -1, numRows = 0;
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (!sel.isEmpty()) {
         QSet<int> rows;
@@ -925,12 +968,15 @@ void EditableGridWidget::showRowContextMenu(const QPoint &pos)
 
 void EditableGridWidget::showColumnContextMenu(const QPoint &pos)
 {
+    QAbstractItemModel *model = m_view->model();
+    if (!model) return;
+
     QMenu menu(this);
     QAction *actCopy = nullptr, *actDelete = nullptr;
     QAction *actInsertLeft = nullptr, *actInsertRight = nullptr;
     QAction *actPasteLeft = nullptr, *actPasteRight = nullptr;
 
-    int minCol = m_view->columnCount(), maxCol = -1, numCols = 0;
+    int minCol = colCount(), maxCol = -1, numCols = 0;
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (!sel.isEmpty()) {
         QSet<int> cols;
