@@ -19,6 +19,7 @@ class PluginSplitView;
 
 class DbEngine;
 class KeyValueModel;
+class QSortFilterProxyModel;
 
 /// Main plugin widget for database file viewing/editing.
 ///
@@ -77,4 +78,5 @@ private:
     QListWidget *m_tableList = nullptr;
     QAction *m_actSubmit = nullptr;
     QAction *m_actRevert = nullptr;
+    QSortFilterProxyModel *m_filterProxy = nullptr;
 };

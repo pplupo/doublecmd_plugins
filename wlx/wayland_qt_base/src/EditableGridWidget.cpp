@@ -18,6 +18,7 @@
 #include <QItemSelectionModel>
 #include <QRegularExpression>
 #include <QMessageBox>
+#include <QSortFilterProxyModel>
 #include <algorithm>
 
 namespace QtWlPlugin {
@@ -242,11 +243,20 @@ EditableGridWidget::EditableGridWidget(QTableView *view, GridMode mode, FocusMan
         connect(fm, &FocusManager::inputWidgetEntered, this, [this](QWidget *) {
             QModelIndex current = m_view->currentIndex();
             if (!current.isValid() || !m_view->model()) return;
-            QVariant existing = m_view->model()->data(current, Qt::UserRole);
+
+            QAbstractItemModel *model = m_view->model();
+            QModelIndex sourceIndex = current;
+            QAbstractItemModel *sourceModel = model;
+            if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model)) {
+                sourceModel = proxy->sourceModel();
+                sourceIndex = proxy->mapToSource(current);
+            }
+
+            QVariant existing = sourceModel->data(sourceIndex, Qt::UserRole);
             if (!existing.isValid()) {
                 m_isProgrammaticChange = true;
-                m_view->model()->setData(current,
-                    m_view->model()->data(current, Qt::EditRole), Qt::UserRole);
+                sourceModel->setData(sourceIndex,
+                    sourceModel->data(sourceIndex, Qt::EditRole), Qt::UserRole);
                 m_isProgrammaticChange = false;
             }
         });
@@ -592,22 +602,29 @@ void EditableGridWidget::onDataChanged(const QModelIndex &topLeft, const QModelI
     QAbstractItemModel *model = m_view->model();
     if (!model) return;
 
-    QVariant oldData = model->data(topLeft, Qt::UserRole);
+    QModelIndex sourceIndex = topLeft;
+    QAbstractItemModel *sourceModel = model;
+    if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model)) {
+        sourceModel = proxy->sourceModel();
+        sourceIndex = proxy->mapToSource(topLeft);
+    }
+
+    QVariant oldData = sourceModel->data(sourceIndex, Qt::UserRole);
     if (!oldData.isValid()) return;
 
-    QVariant newValue = model->data(topLeft, Qt::EditRole);
+    QVariant newValue = sourceModel->data(sourceIndex, Qt::EditRole);
     QString oldText = oldData.toString();
     QString newText = newValue.toString();
 
     m_isProgrammaticChange = true;
-    model->setData(topLeft, QVariant(), Qt::UserRole); // clear stash
+    sourceModel->setData(sourceIndex, QVariant(), Qt::UserRole); // clear stash
     m_isProgrammaticChange = false;
 
     if (oldText != newText) {
         m_isProgrammaticChange = true;
-        model->setData(topLeft, oldData, Qt::EditRole); // revert so undo command applies it
+        sourceModel->setData(sourceIndex, oldData, Qt::EditRole); // revert so undo command applies it
         m_isProgrammaticChange = false;
-        m_undoStack->push(new EditCellCommand(model, topLeft, oldData, newValue));
+        m_undoStack->push(new EditCellCommand(sourceModel, sourceIndex, oldData, newValue));
     }
 }
 
@@ -627,7 +644,12 @@ void EditableGridWidget::onSortByColumn(int column)
     // Do not snapshot memory. Just issue the ORDER BY command via model->sort().
     // QSqlTableModel translates this to an SQL query and re-fetches lazily.
     if (m_mode == GridMode::LiveDatabase) {
-        model->sort(column, m_lastSortOrder);
+        QAbstractItemModel *targetModel = model;
+        if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model)) {
+            if (proxy->sourceModel())
+                targetModel = proxy->sourceModel();
+        }
+        targetModel->sort(column, m_lastSortOrder);
         m_view->horizontalHeader()->setSortIndicatorShown(true);
         m_view->horizontalHeader()->setSortIndicator(column, m_lastSortOrder);
         m_lastSortOrder = (m_lastSortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
@@ -814,12 +836,24 @@ void EditableGridWidget::pasteSelectionAt(int atRow)
 
     int rowsToInsert = lines.size();
 
+    QAbstractItemModel *targetModel = model;
+    int targetRow = atRow;
+    if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model)) {
+        targetModel = proxy->sourceModel();
+        if (atRow < proxy->rowCount()) {
+            QModelIndex proxyIdx = proxy->index(atRow, 0);
+            targetRow = proxy->mapToSource(proxyIdx).row();
+        } else {
+            targetRow = targetModel->rowCount();
+        }
+    }
+
     if (m_mode == GridMode::LiveDatabase) {
         // Direct model insertion, no undo command wrapper
-        model->insertRows(atRow, rowsToInsert);
+        targetModel->insertRows(targetRow, rowsToInsert);
     } else {
         m_isProgrammaticChange = true;
-        m_undoStack->push(new RowColCommand(model, atRow, rowsToInsert, true, true));
+        m_undoStack->push(new RowColCommand(targetModel, targetRow, rowsToInsert, true, true));
         m_isProgrammaticChange = false;
     }
 
@@ -829,7 +863,7 @@ void EditableGridWidget::pasteSelectionAt(int atRow)
             int c = m_view->horizontalHeader()->logicalIndex(vc);
             QString cellText = vc < list.size() ? list.at(vc).trimmed() : "";
             m_isProgrammaticChange = true;
-            model->setData(model->index(atRow + i, c), cellText, Qt::EditRole);
+            targetModel->setData(targetModel->index(targetRow + i, c), cellText, Qt::EditRole);
             m_isProgrammaticChange = false;
         }
     }
@@ -840,11 +874,23 @@ void EditableGridWidget::insertRows(int count, int atRow)
     QAbstractItemModel *model = m_view->model();
     if (!model || colCount() <= 0 || count <= 0) return;
 
+    QAbstractItemModel *targetModel = model;
+    int targetRow = atRow;
+    if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model)) {
+        targetModel = proxy->sourceModel();
+        if (atRow < proxy->rowCount()) {
+            QModelIndex proxyIdx = proxy->index(atRow, 0);
+            targetRow = proxy->mapToSource(proxyIdx).row();
+        } else {
+            targetRow = targetModel->rowCount();
+        }
+    }
+
     if (m_mode == GridMode::LiveDatabase) {
-        model->insertRows(atRow, count);
+        targetModel->insertRows(targetRow, count);
         return;
     }
-    m_undoStack->push(new RowColCommand(model, atRow, count, true, true));
+    m_undoStack->push(new RowColCommand(targetModel, targetRow, count, true, true));
 }
 
 void EditableGridWidget::deleteSelectedRows()
@@ -854,20 +900,32 @@ void EditableGridWidget::deleteSelectedRows()
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (sel.isEmpty()) return;
 
+    QAbstractItemModel *targetModel = model;
+    QSortFilterProxyModel *proxy = qobject_cast<QSortFilterProxyModel*>(model);
+    if (proxy) {
+        targetModel = proxy->sourceModel();
+    }
+
     QSet<int> rowsSet;
-    for (const auto &index : sel) rowsSet.insert(index.row());
+    for (const auto &index : sel) {
+        if (proxy) {
+            rowsSet.insert(proxy->mapToSource(index).row());
+        } else {
+            rowsSet.insert(index.row());
+        }
+    }
     QList<int> rowsToDelete = rowsSet.values();
     std::sort(rowsToDelete.begin(), rowsToDelete.end(), std::greater<int>());
 
     if (m_mode == GridMode::LiveDatabase) {
         for (int r : rowsToDelete)
-            model->removeRow(r);
+            targetModel->removeRow(r);
         return;
     }
 
     m_undoStack->beginMacro("Delete rows");
     for (int r : rowsToDelete)
-        m_undoStack->push(new RowColCommand(model, r, 1, true, false));
+        m_undoStack->push(new RowColCommand(targetModel, r, 1, true, false));
     m_undoStack->endMacro();
 }
 
@@ -899,6 +957,10 @@ void EditableGridWidget::pasteColumnSelectionAt(int atCol)
     QAbstractItemModel *model = m_view->model();
     if (!model) return;
 
+    QAbstractItemModel *targetModel = model;
+    if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model))
+        targetModel = proxy->sourceModel();
+
     QString text = QApplication::clipboard()->text();
     if (text.isEmpty()) return;
 
@@ -922,19 +984,25 @@ void EditableGridWidget::pasteColumnSelectionAt(int atCol)
 
     if (m_mode == GridMode::LiveDatabase) {
         // Direct model insertion, no undo command wrapper
-        model->insertColumns(atCol, colsToInsert);
+        targetModel->insertColumns(atCol, colsToInsert);
     } else {
         m_isProgrammaticChange = true;
-        m_undoStack->push(new RowColCommand(model, atCol, colsToInsert, false, true));
+        m_undoStack->push(new RowColCommand(targetModel, atCol, colsToInsert, false, true));
         m_isProgrammaticChange = false;
     }
 
+    QSortFilterProxyModel *proxy = qobject_cast<QSortFilterProxyModel*>(model);
     for (int r = 0; r < rowCount(); ++r) {
+        int targetRow = r;
+        if (proxy) {
+            QModelIndex proxyIdx = proxy->index(r, 0);
+            targetRow = proxy->mapToSource(proxyIdx).row();
+        }
         QStringList list = lines.at(r).split(QLatin1Char(sep));
         for (int c = 0; c < colsToInsert; ++c) {
             QString cellText = c < list.size() ? list.at(c).trimmed() : "";
             m_isProgrammaticChange = true;
-            model->setData(model->index(r, atCol + c), cellText, Qt::EditRole);
+            targetModel->setData(targetModel->index(targetRow, atCol + c), cellText, Qt::EditRole);
             m_isProgrammaticChange = false;
         }
     }
@@ -945,11 +1013,15 @@ void EditableGridWidget::insertColumns(int count, int atCol)
     QAbstractItemModel *model = m_view->model();
     if (!model || rowCount() <= 0 || count <= 0) return;
 
+    QAbstractItemModel *targetModel = model;
+    if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model))
+        targetModel = proxy->sourceModel();
+
     if (m_mode == GridMode::LiveDatabase) {
-        model->insertColumns(atCol, count);
+        targetModel->insertColumns(atCol, count);
         return;
     }
-    m_undoStack->push(new RowColCommand(model, atCol, count, false, true));
+    m_undoStack->push(new RowColCommand(targetModel, atCol, count, false, true));
 }
 
 void EditableGridWidget::deleteSelectedColumns()
@@ -959,6 +1031,10 @@ void EditableGridWidget::deleteSelectedColumns()
     QModelIndexList sel = m_view->selectionModel()->selectedIndexes();
     if (sel.isEmpty()) return;
 
+    QAbstractItemModel *targetModel = model;
+    if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model))
+        targetModel = proxy->sourceModel();
+
     QSet<int> colsSet;
     for (const auto &index : sel) colsSet.insert(index.column());
     QList<int> colsToDelete = colsSet.values();
@@ -966,13 +1042,13 @@ void EditableGridWidget::deleteSelectedColumns()
 
     if (m_mode == GridMode::LiveDatabase) {
         for (int c : colsToDelete)
-            model->removeColumn(c);
+            targetModel->removeColumn(c);
         return;
     }
 
     m_undoStack->beginMacro("Delete cols");
     for (int c : colsToDelete)
-        m_undoStack->push(new RowColCommand(model, c, 1, false, false));
+        m_undoStack->push(new RowColCommand(targetModel, c, 1, false, false));
     m_undoStack->endMacro();
 }
 

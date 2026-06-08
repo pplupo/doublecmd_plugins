@@ -103,6 +103,15 @@ void DbViewWidget::setupUi(const QString &firstTable)
     m_grid->setFilterRow(m_filterRow);
     m_grid->setThemeToggleEnabled(true);
 
+    connect(m_filterRow, &FilterRowWidget::filterChanged, this,
+            [this](int column, const QString &text) {
+        if (m_filterProxy) {
+            m_filterProxy->setFilterKeyColumn(column);
+            m_filterProxy->setFilterFixedString(text);
+            updateStatusBar();
+        }
+    });
+
     // Setup KV context menu integration
     setupKvContextMenu();
 
@@ -214,10 +223,16 @@ void DbViewWidget::setupKvContextMenu()
 {
     m_grid->setExtraContextMenuCallback(
         [this](QMenu *menu, const QModelIndex &idx) {
-        auto *kvModel = qobject_cast<KeyValueModel*>(m_tableView->model());
-        if (!kvModel || !idx.isValid()) return;
+        QAbstractItemModel *model = m_tableView->model();
+        auto *kvModel = qobject_cast<KeyValueModel*>(model);
+        QModelIndex srcIdx = idx;
+        if (auto *proxy = qobject_cast<QSortFilterProxyModel*>(model)) {
+            kvModel = qobject_cast<KeyValueModel*>(proxy->sourceModel());
+            srcIdx = proxy->mapToSource(idx);
+        }
+        if (!kvModel || !srcIdx.isValid()) return;
 
-        int row = idx.row();
+        int row = srcIdx.row();
 
         // Hex toggle
         bool isBinary = kvModel->isBinaryValue(row);
@@ -267,7 +282,12 @@ void DbViewWidget::rebuildGrid(const QString &tableName)
     QAbstractItemModel *model = m_engine->modelForTable(tableName);
     if (!model) return;
 
-    m_tableView->setModel(model);
+    if (!m_filterProxy) {
+        m_filterProxy = new QSortFilterProxyModel(this);
+        m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    }
+    m_filterProxy->setSourceModel(model);
+    m_tableView->setModel(m_filterProxy);
 
     // Recreate EditableGridWidget if it already exists (table switch)
     if (m_grid) {
@@ -306,11 +326,18 @@ void DbViewWidget::updateStatusBar()
 {
     if (!m_statusBar) return;
 
-    int rows = 0;
-    if (m_tableView && m_tableView->model())
-        rows = m_tableView->model()->rowCount();
+    int total = 0;
+    int filtered = 0;
+    if (m_tableView && m_tableView->model()) {
+        filtered = m_tableView->model()->rowCount();
+        if (m_filterProxy && m_filterProxy->sourceModel()) {
+            total = m_filterProxy->sourceModel()->rowCount();
+        } else {
+            total = filtered;
+        }
+    }
 
-    m_statusBar->setRowCount(rows, rows);
+    m_statusBar->setRowCount(filtered, total);
 
     if (m_engine)
         m_statusBar->setEncoding(m_engine->currentTableName());
