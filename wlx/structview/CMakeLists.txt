@@ -22,6 +22,7 @@ add_library(structview_qt6 SHARED
     src/JsonEngine.cpp
     src/XmlEngine.cpp
     src/IniEngine.cpp
+    src/CborEngine.cpp
 )
 
 set_target_properties(structview_qt6 PROPERTIES

@@ -158,6 +158,7 @@ namespace {
 
 extern std::unique_ptr<TextFormatEngine> createJsonEngine();
 extern std::unique_ptr<TextFormatEngine> createXmlEngine();
+extern std::unique_ptr<TextFormatEngine> createCborEngine();
 
 static std::unique_ptr<TextFormatEngine> createIniEngine(const QString &filepath)
 {
@@ -211,8 +212,8 @@ std::unique_ptr<TextFormatEngine> TextFormatEngine::createForFile(const QString 
         return createXmlEngine();
     if (ext == QStringLiteral("ini") || ext == QStringLiteral("cfg") || ext == QStringLiteral("conf"))
         return createIniEngine(filepath);
-    // CBOR: stubbed for future
-    // if (ext == "cbor") return createCborEngine();
+    if (ext == QStringLiteral("cbor"))
+        return createCborEngine();
 
     return nullptr;
 }
