@@ -1,5 +1,6 @@
 #include "DbViewWidget.h"
-#include "SqliteBackend.h"
+#include "DbEngine.h"
+#include "KeyValueModel.h"
 
 #include <wayland_qt_base/FocusManager.h>
 #include <wayland_qt_base/PluginToolBar.h>
@@ -11,10 +12,11 @@
 #include <QLabel>
 #include <QTableView>
 #include <QHeaderView>
-#include <QSqlTableModel>
-#include <QSqlError>
 #include <QMessageBox>
 #include <QAbstractItemModel>
+#include <QMenu>
+#include <QFileDialog>
+#include <QFile>
 
 // ---------------------------------------------------------------------------
 // Construction / destruction
@@ -22,14 +24,6 @@
 
 DbViewWidget::DbViewWidget(QWidget *parent)
     : QWidget(parent)
-    , m_backend(new SqliteBackend(this))
-    , m_fm(nullptr)
-    , m_toolbar(nullptr)
-    , m_grid(nullptr)
-    , m_findPanel(nullptr)
-    , m_tableView(nullptr)
-    , m_tableSelector(nullptr)
-    , m_rowCountLabel(nullptr)
 {
 }
 
@@ -41,11 +35,12 @@ DbViewWidget::~DbViewWidget() = default;
 
 bool DbViewWidget::loadFile(const QString &filepath)
 {
-    if (!m_backend->openDatabase(filepath))
+    m_engine = DbEngine::createForFile(filepath);
+    if (!m_engine)
         return false;
 
-    QStringList tables = m_backend->tableNames();
-    QStringList views = m_backend->viewNames();
+    QStringList tables = m_engine->tableNames();
+    QStringList views = m_engine->viewNames();
 
     if (tables.isEmpty() && views.isEmpty())
         return false;
@@ -71,6 +66,11 @@ void DbViewWidget::setupUi(const QString &firstTable)
     m_tableView->horizontalHeader()->setStretchLastSection(true);
     m_tableView->setAlternatingRowColors(true);
 
+    // Enable context menu for KV binary value operations
+    m_tableView->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tableView, &QTableView::customContextMenuRequested,
+            this, &DbViewWidget::onContextMenu);
+
     m_fm = new QtWlPlugin::FocusManager(this, m_tableView, this);
 
     // Build grid first — we need it before the toolbar connects to it
@@ -89,48 +89,61 @@ void DbViewWidget::setupToolbar()
 {
     m_toolbar = new QtWlPlugin::PluginToolBar(m_fm, this);
 
-    // Table selector combo
-    m_tableSelector = new QComboBox(m_toolbar);
-    m_tableSelector->setMinimumWidth(150);
-
-    QStringList tables = m_backend->tableNames();
-    QStringList views = m_backend->viewNames();
-
-    for (const auto &t : tables)
-        m_tableSelector->addItem(QStringLiteral("📋 ") + t, t);
-    for (const auto &v : views)
-        m_tableSelector->addItem(QStringLiteral("👁 ") + v, v);
-
-    // Select current table
-    for (int i = 0; i < m_tableSelector->count(); ++i) {
-        if (m_tableSelector->itemData(i).toString() == m_backend->currentTableName()) {
-            m_tableSelector->setCurrentIndex(i);
-            break;
-        }
-    }
-
-    connect(m_tableSelector, &QComboBox::currentIndexChanged,
-            this, [this](int index) {
-        QString tableName = m_tableSelector->itemData(index).toString();
-        onTableSelected(tableName);
-    });
-
-    m_toolbar->addWidget(m_tableSelector);
+    // Engine label
+    m_engineLabel = new QLabel(m_toolbar);
+    m_engineLabel->setText(QStringLiteral(" [%1] ").arg(m_engine->engineName()));
+    m_toolbar->addWidget(m_engineLabel);
     m_toolbar->addSeparator();
 
-    // Submit changes (Ctrl+S)
-    auto *actSubmit = m_toolbar->addToolAction(
-        QStringLiteral("Submit"),
-        QKeySequence(Qt::CTRL | Qt::Key_S),
-        QtWlPlugin::FocusManager::Always);
-    connect(actSubmit, &QAction::triggered, this, &DbViewWidget::onSubmitChanges);
+    // Table selector combo (only for multi-table engines)
+    if (m_engine->supportsMultipleTables()) {
+        m_tableSelector = new QComboBox(m_toolbar);
+        m_tableSelector->setMinimumWidth(150);
 
-    // Revert changes (Ctrl+Z — revert all pending, not per-cell undo)
-    auto *actRevert = m_toolbar->addToolAction(
-        QStringLiteral("Revert"),
-        QKeySequence(Qt::CTRL | Qt::Key_Z),
-        QtWlPlugin::FocusManager::WhenNoInput);
-    connect(actRevert, &QAction::triggered, this, &DbViewWidget::onRevertChanges);
+        QStringList tables = m_engine->tableNames();
+        QStringList views = m_engine->viewNames();
+
+        for (const auto &t : tables)
+            m_tableSelector->addItem(QStringLiteral("\xF0\x9F\x93\x8B ") + t, t);
+        for (const auto &v : views)
+            m_tableSelector->addItem(QStringLiteral("\xF0\x9F\x91\x81 ") + v, v);
+
+        // Select current table
+        for (int i = 0; i < m_tableSelector->count(); ++i) {
+            if (m_tableSelector->itemData(i).toString() == m_engine->currentTableName()) {
+                m_tableSelector->setCurrentIndex(i);
+                break;
+            }
+        }
+
+        connect(m_tableSelector, &QComboBox::currentIndexChanged,
+                this, [this](int index) {
+            QString tableName = m_tableSelector->itemData(index).toString();
+            onTableSelected(tableName);
+        });
+
+        m_toolbar->addWidget(m_tableSelector);
+        m_toolbar->addSeparator();
+    }
+
+    // Submit/Revert (only for engines that support it)
+    if (m_engine->supportsSubmitRevert()) {
+        m_actSubmit = m_toolbar->addToolAction(
+            QStringLiteral("Submit"),
+            QKeySequence(Qt::CTRL | Qt::Key_S),
+            QtWlPlugin::FocusManager::Always);
+        connect(m_actSubmit, &QAction::triggered, this, &DbViewWidget::onSubmitChanges);
+
+        m_actRevert = m_toolbar->addToolAction(
+            QStringLiteral("Revert"),
+            QKeySequence(Qt::CTRL | Qt::Key_Z),
+            QtWlPlugin::FocusManager::WhenNoInput);
+        connect(m_actRevert, &QAction::triggered, this, &DbViewWidget::onRevertChanges);
+    } else {
+        // KV engines: direct writes, show auto-save label
+        auto *autoLabel = new QLabel(QStringLiteral(" Auto-save "), m_toolbar);
+        m_toolbar->addWidget(autoLabel);
+    }
 
     m_toolbar->addSeparator();
 
@@ -167,7 +180,7 @@ void DbViewWidget::setupFindReplace()
 
 void DbViewWidget::rebuildGrid(const QString &tableName)
 {
-    QSqlTableModel *model = m_backend->modelForTable(tableName);
+    QAbstractItemModel *model = m_engine->modelForTable(tableName);
     if (!model) return;
 
     m_tableView->setModel(model);
@@ -187,7 +200,7 @@ void DbViewWidget::rebuildGrid(const QString &tableName)
 
 void DbViewWidget::onTableSelected(const QString &tableName)
 {
-    if (tableName.isEmpty() || tableName == m_backend->currentTableName())
+    if (tableName.isEmpty() || tableName == m_engine->currentTableName())
         return;
 
     rebuildGrid(tableName);
@@ -195,7 +208,6 @@ void DbViewWidget::onTableSelected(const QString &tableName)
     // Re-insert grid into layout (after toolbar, before find panel)
     auto *lay = qobject_cast<QVBoxLayout*>(layout());
     if (lay) {
-        // Index 0 = toolbar, we insert at 1
         lay->insertWidget(1, m_grid, 1);
     }
 
@@ -219,24 +231,80 @@ void DbViewWidget::updateRowCount()
 
 void DbViewWidget::onSubmitChanges()
 {
-    auto *model = qobject_cast<QSqlTableModel*>(m_tableView->model());
-    if (!model) return;
+    if (!m_engine || !m_engine->supportsSubmitRevert()) return;
 
-    if (!model->submitAll()) {
+    if (!m_engine->submitAll()) {
         QMessageBox::warning(this, QStringLiteral("Submit Error"),
-            QStringLiteral("Failed to submit changes:\n%1").arg(model->lastError().text()));
-        model->revertAll();
+            QStringLiteral("Failed to submit changes:\n%1").arg(m_engine->lastError()));
+        m_engine->revertAll();
     }
     updateRowCount();
 }
 
 void DbViewWidget::onRevertChanges()
 {
-    auto *model = qobject_cast<QSqlTableModel*>(m_tableView->model());
-    if (!model) return;
+    if (!m_engine || !m_engine->supportsSubmitRevert()) return;
 
-    model->revertAll();
+    m_engine->revertAll();
     updateRowCount();
+}
+
+// ---------------------------------------------------------------------------
+// Context menu (KV binary operations)
+// ---------------------------------------------------------------------------
+
+void DbViewWidget::onContextMenu(const QPoint &pos)
+{
+    QModelIndex idx = m_tableView->indexAt(pos);
+    if (!idx.isValid()) return;
+
+    auto *kvModel = qobject_cast<KeyValueModel*>(m_tableView->model());
+    if (!kvModel) return; // Not a KV engine, no special context menu
+
+    int row = idx.row();
+    QMenu menu(this);
+
+    // Hex toggle
+    bool isBinary = kvModel->isBinaryValue(row);
+    if (isBinary) {
+        QAction *hexAction = menu.addAction(QStringLiteral("Toggle Hex View"));
+        connect(hexAction, &QAction::triggered, this, [kvModel, row]() {
+            // Toggle: check current state
+            bool currentlyHex = kvModel->data(kvModel->index(row, 1), Qt::DisplayRole)
+                                    .toString().contains(QStringLiteral(" "));
+            kvModel->setHexMode(row, !currentlyHex);
+        });
+    }
+
+    // Save value as file
+    QAction *saveAction = menu.addAction(QStringLiteral("Save Value as File..."));
+    connect(saveAction, &QAction::triggered, this, [this, kvModel, row]() {
+        QByteArray data = kvModel->rawValue(row);
+        QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Save Value"));
+        if (path.isEmpty()) return;
+
+        QFile f(path);
+        if (f.open(QIODevice::WriteOnly)) {
+            f.write(data);
+            f.close();
+        }
+    });
+
+    // Load value from file
+    QAction *loadAction = menu.addAction(QStringLiteral("Load Value from File..."));
+    connect(loadAction, &QAction::triggered, this, [this, kvModel, row]() {
+        QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Load Value"));
+        if (path.isEmpty()) return;
+
+        QFile f(path);
+        if (f.open(QIODevice::ReadOnly)) {
+            QByteArray fileData = f.readAll();
+            f.close();
+            kvModel->loadValueFromFile(row, fileData);
+        }
+    });
+
+    menu.exec(m_tableView->viewport()->mapToGlobal(pos));
 }
 
 // ---------------------------------------------------------------------------

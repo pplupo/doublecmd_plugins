@@ -135,5 +135,6 @@ int DCPCALL ListSearchText(HWND ListWin, char* SearchString, int SearchParameter
 void DCPCALL ListGetDetectString(char* DetectString, int maxlen)
 {
     snprintf(DetectString, maxlen - 1,
-        "EXT=\"DB\" | EXT=\"SQLITE\" | EXT=\"SQLITE3\" | EXT=\"DB3\"");
+        "EXT=\"DB\" | EXT=\"SQLITE\" | EXT=\"SQLITE3\" | EXT=\"DB3\" | "
+        "EXT=\"DUCKDB\" | EXT=\"LDB\" | EXT=\"SST\"");
 }

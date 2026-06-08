@@ -1,10 +1,12 @@
 #pragma once
 
 #include <QWidget>
+#include <memory>
 
 class QComboBox;
 class QLabel;
 class QTableView;
+class QAction;
 
 namespace QtWlPlugin {
 class FocusManager;
@@ -13,17 +15,18 @@ class EditableGridWidget;
 class FindReplacePanel;
 }
 
-class SqliteBackend;
+class DbEngine;
+class KeyValueModel;
 
-/// Main plugin widget for SQLite database file viewing/editing.
+/// Main plugin widget for database file viewing/editing.
 ///
-/// Assembles the full UI: toolbar with table selector combo,
-/// grid (via EditableGridWidget in LiveDatabase mode), and
-/// find panel (search-only, no replace).
+/// Engine-agnostic: works with any DbEngine subclass (SQLite, DuckDB,
+/// LevelDB, RocksDB). Adapts the UI based on engine capabilities:
+///   - supportsMultipleTables(): show/hide table selector
+///   - supportsSubmitRevert(): show/hide Submit/Revert vs "Auto-save" label
 ///
-/// The table selector combo allows switching between tables and views.
-/// Changes are buffered via QSqlTableModel::OnManualSubmit until
-/// the user clicks Submit or presses Ctrl+S.
+/// KV-specific context menu: hex view toggle, save value as file,
+/// load value from file.
 class DbViewWidget : public QWidget {
     Q_OBJECT
 public:
@@ -42,6 +45,7 @@ private slots:
     void onSubmitChanges();
     void onRevertChanges();
     void onFind(bool forward);
+    void onContextMenu(const QPoint &pos);
 
 private:
     void setupUi(const QString &firstTable);
@@ -50,12 +54,15 @@ private:
     void rebuildGrid(const QString &tableName);
     void updateRowCount();
 
-    SqliteBackend *m_backend;
-    QtWlPlugin::FocusManager *m_fm;
-    QtWlPlugin::PluginToolBar *m_toolbar;
-    QtWlPlugin::EditableGridWidget *m_grid;
-    QtWlPlugin::FindReplacePanel *m_findPanel;
-    QTableView *m_tableView;
-    QComboBox *m_tableSelector;
-    QLabel *m_rowCountLabel;
+    std::unique_ptr<DbEngine> m_engine;
+    QtWlPlugin::FocusManager *m_fm = nullptr;
+    QtWlPlugin::PluginToolBar *m_toolbar = nullptr;
+    QtWlPlugin::EditableGridWidget *m_grid = nullptr;
+    QtWlPlugin::FindReplacePanel *m_findPanel = nullptr;
+    QTableView *m_tableView = nullptr;
+    QComboBox *m_tableSelector = nullptr;
+    QLabel *m_rowCountLabel = nullptr;
+    QLabel *m_engineLabel = nullptr;
+    QAction *m_actSubmit = nullptr;
+    QAction *m_actRevert = nullptr;
 };

@@ -1,4 +1,4 @@
-#include "SqliteBackend.h"
+#include "SqliteEngine.h"
 
 #include <QSqlDatabase>
 #include <QSqlTableModel>
@@ -6,20 +6,20 @@
 #include <QSqlError>
 #include <QUuid>
 
-SqliteBackend::SqliteBackend(QObject *parent)
-    : QObject(parent)
+SqliteEngine::SqliteEngine(QObject *parent)
+    : DbEngine(parent)
     , m_connectionName(QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
 }
 
-SqliteBackend::~SqliteBackend()
+SqliteEngine::~SqliteEngine()
 {
-    closeDatabase();
+    close();
 }
 
-bool SqliteBackend::openDatabase(const QString &filepath)
+bool SqliteEngine::open(const QString &filepath)
 {
-    closeDatabase();
+    close();
 
     m_db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connectionName);
     m_db.setDatabaseName(filepath);
@@ -30,7 +30,7 @@ bool SqliteBackend::openDatabase(const QString &filepath)
     return true;
 }
 
-void SqliteBackend::closeDatabase()
+void SqliteEngine::close()
 {
     if (m_currentModel) {
         delete m_currentModel;
@@ -41,31 +41,29 @@ void SqliteBackend::closeDatabase()
     if (m_db.isOpen())
         m_db.close();
 
-    // Remove the connection (must be done after closing)
     if (QSqlDatabase::connectionNames().contains(m_connectionName))
         QSqlDatabase::removeDatabase(m_connectionName);
 }
 
-QStringList SqliteBackend::tableNames() const
+QStringList SqliteEngine::tableNames() const
 {
     if (!m_db.isOpen())
         return {};
     return m_db.tables(QSql::Tables);
 }
 
-QStringList SqliteBackend::viewNames() const
+QStringList SqliteEngine::viewNames() const
 {
     if (!m_db.isOpen())
         return {};
     return m_db.tables(QSql::Views);
 }
 
-QSqlTableModel *SqliteBackend::modelForTable(const QString &tableName)
+QAbstractItemModel *SqliteEngine::modelForTable(const QString &tableName)
 {
     if (!m_db.isOpen())
         return nullptr;
 
-    // Destroy previous model
     if (m_currentModel) {
         delete m_currentModel;
         m_currentModel = nullptr;
@@ -78,7 +76,6 @@ QSqlTableModel *SqliteBackend::modelForTable(const QString &tableName)
     model->setEditStrategy(QSqlTableModel::OnManualSubmit);
     model->select();
 
-    // Fetch all rows for accurate count (QSqlTableModel lazy-loads by default)
     while (model->canFetchMore())
         model->fetchMore();
 
@@ -86,21 +83,29 @@ QSqlTableModel *SqliteBackend::modelForTable(const QString &tableName)
     return model;
 }
 
-QSqlDatabase SqliteBackend::database() const
-{
-    return m_db;
-}
-
-QString SqliteBackend::currentTableName() const
+QString SqliteEngine::currentTableName() const
 {
     return m_currentTable;
 }
 
-bool SqliteBackend::execSql(const QString &sql)
+bool SqliteEngine::submitAll()
 {
-    if (!m_db.isOpen())
+    if (!m_currentModel) return false;
+    if (!m_currentModel->submitAll())
         return false;
+    return true;
+}
 
-    QSqlQuery query(m_db);
-    return query.exec(sql);
+bool SqliteEngine::revertAll()
+{
+    if (!m_currentModel) return false;
+    m_currentModel->revertAll();
+    return true;
+}
+
+QString SqliteEngine::lastError() const
+{
+    if (m_currentModel)
+        return m_currentModel->lastError().text();
+    return m_db.lastError().text();
 }
