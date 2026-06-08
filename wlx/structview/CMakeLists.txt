@@ -5,14 +5,43 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
+# Allow older cmake_minimum_required in FetchContent dependencies
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Xml)
 # Ensure the platform static library is built with -fPIC
 # (required because we link it into a shared .wlx library)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+include(FetchContent)
+
+# ---------------------------------------------------------------------------
+# yaml-cpp — YAML 1.2 parser
+# ---------------------------------------------------------------------------
+FetchContent_Declare(yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(yaml-cpp)
+
+# ---------------------------------------------------------------------------
+# toml++ — header-only TOML parser (v3.4.0)
+# ---------------------------------------------------------------------------
+FetchContent_Declare(tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG        v3.4.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(tomlplusplus)
+
 # Pull in the platform library (builds libwayland_qt_base.a)
 add_subdirectory(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../plugin-platform/wlx/wayland_qt_base
+    ${CMAKE_CURRENT_SOURCE_DIR}/../wayland_qt_base
     ${CMAKE_CURRENT_BINARY_DIR}/wayland_qt_base
 )
 
@@ -23,6 +52,8 @@ add_library(structview_qt6 SHARED
     src/XmlEngine.cpp
     src/IniEngine.cpp
     src/CborEngine.cpp
+    src/YamlEngine.cpp
+    src/TomlEngine.cpp
 )
 
 set_target_properties(structview_qt6 PROPERTIES
@@ -41,4 +72,6 @@ target_link_libraries(structview_qt6 PRIVATE
     Qt6::Gui
     Qt6::Core
     Qt6::Xml
+    yaml-cpp
+    tomlplusplus::tomlplusplus
 )

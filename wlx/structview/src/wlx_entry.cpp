@@ -138,5 +138,8 @@ int DCPCALL ListSearchText(HWND ListWin, char* SearchString, int SearchParameter
 void DCPCALL ListGetDetectString(char* DetectString, int maxlen)
 {
     snprintf(DetectString, maxlen - 1,
-        "EXT=\"JSON\" | EXT=\"XML\" | EXT=\"INI\" | EXT=\"CBOR\"");
+        "EXT=\"JSON\" | EXT=\"XML\" | EXT=\"INI\" | EXT=\"CBOR\" | "
+        "EXT=\"YAML\" | EXT=\"YML\" | EXT=\"TOML\" | "
+        "EXT=\"CFG\" | EXT=\"CONF\" | EXT=\"SVG\" | "
+        "EXT=\"XHTML\" | EXT=\"PLIST\" | EXT=\"DESKTOP\" | EXT=\"INF\"");
 }

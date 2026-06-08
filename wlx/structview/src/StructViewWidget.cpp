@@ -4,37 +4,32 @@
 #include <wayland_qt_base/PluginToolBar.h>
 #include <wayland_qt_base/EditableGridWidget.h>
 #include <wayland_qt_base/ScopedFindReplacePanel.h>
+#include <wayland_qt_base/FilterRowWidget.h>
+#include <wayland_qt_base/PluginStatusBar.h>
+#include <wayland_qt_base/PluginSplitView.h>
+#include <wayland_qt_base/ThemeManager.h>
 #include <wayland_qt_base/EncodingUtils.h>
 
 #include <QVBoxLayout>
-#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QTableView>
 #include <QFile>
 #include <QFileInfo>
 #include <QMessageBox>
-#include <QApplication>
-#include <QAbstractItemModel>
 
-// ---------------------------------------------------------------------------
-// Construction / destruction
-// ---------------------------------------------------------------------------
+using namespace QtWlPlugin;
 
 StructViewWidget::StructViewWidget(QWidget *parent)
     : QWidget(parent)
     , m_fm(nullptr)
-    , m_toolbar(nullptr)
-    , m_grid(nullptr)
-    , m_findReplace(nullptr)
-    , m_table(nullptr)
-    , m_splitter(nullptr)
-    , m_sectionList(nullptr)
 {
+    setupUi();
+
+    // Apply saved theme
+    ThemeManager::applyTheme(this, ThemeManager::currentTheme());
 }
 
 StructViewWidget::~StructViewWidget() = default;
-
-// ---------------------------------------------------------------------------
-// UI setup
-// ---------------------------------------------------------------------------
 
 void StructViewWidget::setupUi()
 {
@@ -42,166 +37,248 @@ void StructViewWidget::setupUi()
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
 
-    // Create QTableWidget and core platform components
-    m_table = new QTableWidget(this);
-    m_fm = new QtWlPlugin::FocusManager(this, m_table, this);
-    m_grid = new QtWlPlugin::EditableGridWidget(
-        m_table, QtWlPlugin::GridMode::MemoryDocument, m_fm, this);
-
+    // --- Toolbar ---
     setupToolbar();
     mainLayout->addWidget(m_toolbar);
 
-    // Check if engine needs section navigation
-    if (m_engine && m_engine->hasSectionNav()) {
-        m_splitter = new QSplitter(Qt::Horizontal, this);
-        m_sectionList = new QListWidget(this);
-        m_sectionList->setMaximumWidth(200);
-        m_sectionList->setMinimumWidth(100);
+    // --- Left panel: Tree view ---
+    m_treeView = new QTreeView;
+    m_treeModel = new QStandardItemModel(this);
+    m_treeView->setModel(m_treeModel);
+    m_treeView->setHeaderHidden(true);
+    m_treeView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_treeView->setMinimumWidth(120);
 
-        // Populate section list
-        QStringList sections = m_engine->sectionNames();
-        m_sectionList->addItems(sections);
+    // --- Right panel: Tabs ---
+    m_tabWidget = new QTabWidget;
 
-        connect(m_sectionList, &QListWidget::currentTextChanged,
-                this, &StructViewWidget::onSectionSelected);
+    // Grid tab
+    auto *gridContainer = new QWidget;
+    auto *gridLayout = new QVBoxLayout(gridContainer);
+    gridLayout->setContentsMargins(0, 0, 0, 0);
+    gridLayout->setSpacing(0);
 
-        m_splitter->addWidget(m_sectionList);
-        m_splitter->addWidget(m_grid);
-        m_splitter->setStretchFactor(0, 0);
-        m_splitter->setStretchFactor(1, 1);
-        mainLayout->addWidget(m_splitter, 1);
+    m_gridView = new QTableView;
+    m_gridModel = new QStandardItemModel(this);
+    m_filterProxy = new QSortFilterProxyModel(this);
+    m_filterProxy->setSourceModel(m_gridModel);
+    m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    m_gridView->setModel(m_filterProxy);
+    m_gridView->setSortingEnabled(true);
+    m_gridView->setAlternatingRowColors(true);
+    m_gridView->setSelectionBehavior(QAbstractItemView::SelectItems);
+    m_gridView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_gridView->horizontalHeader()->setStretchLastSection(true);
 
-        // Register section list as an input widget so focus works
-        m_fm->addInputWidget(m_sectionList);
+    m_fm = new FocusManager(this, m_gridView, this);
+    m_grid = new EditableGridWidget(m_gridView, GridMode::MemoryDocument, m_fm, this);
 
-        // Select first section
-        if (!sections.isEmpty())
-            m_sectionList->setCurrentRow(0);
-    } else {
-        mainLayout->addWidget(m_grid, 1);
-    }
+    // Filter row
+    m_filterRow = new FilterRowWidget(m_gridView, this);
+    m_grid->setFilterRow(m_filterRow);
+    m_grid->setThemeToggleEnabled(true);
 
+    gridLayout->addWidget(m_filterRow);
+    gridLayout->addWidget(m_grid);
+
+    m_tabWidget->addTab(gridContainer, QStringLiteral("Grid"));
+
+    // Text tab (read-only)
+    m_textView = new QPlainTextEdit;
+    m_textView->setReadOnly(true);
+    m_textView->setFont(QFont(QStringLiteral("monospace"), 10));
+    m_textView->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_tabWidget->addTab(m_textView, QStringLiteral("Text"));
+
+    // --- Split view ---
+    m_splitView = new PluginSplitView(m_treeView, m_tabWidget, this);
+    mainLayout->addWidget(m_splitView, 1);
+
+    // --- Find/replace ---
     setupFindReplace();
     mainLayout->addWidget(m_findReplace);
-    m_findReplace->setVisible(false);
+
+    // --- Status bar ---
+    m_statusBar = new PluginStatusBar(this);
+    mainLayout->addWidget(m_statusBar);
+
+    // --- Connect tree selection ---
+    connect(m_treeView->selectionModel(), &QItemSelectionModel::currentChanged,
+            this, &StructViewWidget::onTreeNodeSelected);
+
+    // Connect filter row to proxy model
+    connect(m_filterRow, &FilterRowWidget::filterChanged, this,
+            [this](int column, const QString &text) {
+        m_filterProxy->setFilterKeyColumn(column);
+        m_filterProxy->setFilterFixedString(text);
+        updateStatusBar();
+    });
 }
 
 void StructViewWidget::setupToolbar()
 {
-    m_toolbar = new QtWlPlugin::PluginToolBar(m_fm, this);
+    m_toolbar = new PluginToolBar(m_fm, this);
 
-    // Format label (read-only)
-    if (m_engine) {
-        auto *formatLabel = new QAction(m_engine->formatName(), m_toolbar);
-        formatLabel->setEnabled(false);
-        m_toolbar->addAction(formatLabel);
-        m_toolbar->addSeparator();
-    }
-
-    // Save
     auto *actSave = m_toolbar->addToolAction(
-        QStringLiteral("Save"),
-        QKeySequence(Qt::CTRL | Qt::Key_S),
-        QtWlPlugin::FocusManager::Always);
+        QStringLiteral("Save"), QKeySequence::Save, 0);
     connect(actSave, &QAction::triggered, this, &StructViewWidget::onSave);
 
-    m_toolbar->addSeparator();
-
-    // Word wrap toggle
     auto *actWrap = m_toolbar->addToolAction(
-        QStringLiteral("Word Wrap"),
-        QKeySequence(), QtWlPlugin::FocusManager::WhenNoInput);
+        QStringLiteral("Word Wrap"), QKeySequence(), 0);
     actWrap->setCheckable(true);
-    actWrap->setChecked(false);
-    connect(actWrap, &QAction::toggled, m_grid, &QtWlPlugin::EditableGridWidget::setWordWrap);
-
-    // Grid lines toggle
-    auto *actGrid = m_toolbar->addToolAction(
-        QStringLiteral("Grid Lines"),
-        QKeySequence(), QtWlPlugin::FocusManager::WhenNoInput);
-    actGrid->setCheckable(true);
-    actGrid->setChecked(true);
-    connect(actGrid, &QAction::toggled, m_grid, &QtWlPlugin::EditableGridWidget::setShowGrid);
-
-    m_toolbar->addSeparator();
-
-    // Find (Ctrl+F toggles panel)
-    auto *actFind = m_toolbar->addToolAction(
-        QStringLiteral("Find"),
-        QKeySequence(Qt::CTRL | Qt::Key_F),
-        QtWlPlugin::FocusManager::Always);
-    connect(actFind, &QAction::triggered, this, [this]() {
-        bool vis = !m_findReplace->isPanelVisible();
-        m_findReplace->showPanel(vis);
+    connect(actWrap, &QAction::toggled, this, [this](bool on) {
+        m_grid->setWordWrap(on);
     });
 
-    // Dirty indicator
-    connect(m_grid, &QtWlPlugin::EditableGridWidget::dirtyChanged,
-            this, [this](bool dirty) {
-        Q_UNUSED(dirty);
-        // Could update window title if parented appropriately
+    auto *actGrid = m_toolbar->addToolAction(
+        QStringLiteral("Grid Lines"), QKeySequence(), 0);
+    actGrid->setCheckable(true);
+    actGrid->setChecked(true);
+    connect(actGrid, &QAction::toggled, this, [this](bool on) {
+        m_grid->setShowGrid(on);
     });
 }
 
 void StructViewWidget::setupFindReplace()
 {
-    m_findReplace = new QtWlPlugin::ScopedFindReplacePanel(m_fm, this);
-    m_findReplace->setScopes({
-        QStringLiteral("All Cells"),
-        QStringLiteral("Current Column"),
-        QStringLiteral("Current Row")
+    m_findReplace = new ScopedFindReplacePanel(m_fm, this);
+    auto *actFind = m_toolbar->addToolAction(
+        QStringLiteral("Find"), QKeySequence::Find, 0);
+    connect(actFind, &QAction::triggered, m_findReplace, [this]() {
+        m_findReplace->showPanel(!m_findReplace->isPanelVisible());
     });
-    m_findReplace->setReplaceEnabled(true);
-
-    connect(m_findReplace, &QtWlPlugin::FindReplacePanel::findRequested,
-            this, &StructViewWidget::onFind);
+    connect(m_findReplace, &ScopedFindReplacePanel::findRequested, this,
+            &StructViewWidget::onFind);
 }
-
-// ---------------------------------------------------------------------------
-// File I/O
-// ---------------------------------------------------------------------------
 
 bool StructViewWidget::loadFile(const QString &filepath)
 {
-    m_filepath = filepath;
-
-    // Create engine from file extension
-    m_engine = TextFormatEngine::createForFile(filepath);
-    if (!m_engine)
-        return false;
-
-    // Read raw bytes
     QFile file(filepath);
     if (!file.open(QIODevice::ReadOnly))
         return false;
-    QByteArray rawData = file.readAll();
+
+    QByteArray data = file.readAll();
     file.close();
 
-    // Detect encoding and convert to UTF-8 if needed
-    QByteArray data = rawData;
-    if (!m_engine->hasSectionNav()) {
-        // INI uses QSettings which handles encoding internally
-        QString detected = QtWlPlugin::EncodingUtils::detectEncoding(rawData);
-        if (!detected.isEmpty() && detected.toUpper() != QStringLiteral("UTF-8")) {
-            data = QtWlPlugin::EncodingUtils::toUtf8(rawData, detected);
+    m_engine = TextFormatEngine::createForFile(filepath);
+    if (!m_engine) return false;
+
+    if (!m_engine->parse(data))
+        return false;
+
+    m_filepath = filepath;
+
+    // Populate tree
+    populateTree();
+
+    // Set text tab
+    m_textView->setPlainText(m_engine->rawText());
+
+    // Status bar
+    QFileInfo fi(filepath);
+    m_statusBar->setFormatInfo(m_engine->formatName());
+    m_statusBar->setEncoding(EncodingUtils::detectEncoding(data));
+
+    // Select root node
+    if (m_treeModel->rowCount() > 0) {
+        m_treeView->setCurrentIndex(m_treeModel->index(0, 0));
+        m_treeView->expandAll();
+    }
+
+    return true;
+}
+
+void StructViewWidget::populateTree()
+{
+    m_treeModel->clear();
+    DocumentNode *root = m_engine->rootNode();
+    if (!root) return;
+
+    auto *rootItem = new QStandardItem(root->name);
+    rootItem->setData(QVariant::fromValue(reinterpret_cast<quintptr>(root)),
+                      Qt::UserRole);
+    m_treeModel->appendRow(rootItem);
+
+    populateTreeNode(rootItem, root);
+}
+
+void StructViewWidget::populateTreeNode(QStandardItem *parentItem, DocumentNode *node)
+{
+    for (auto *child : node->children) {
+        auto *item = new QStandardItem(child->name);
+        item->setData(QVariant::fromValue(reinterpret_cast<quintptr>(child)),
+                      Qt::UserRole);
+        item->setEditable(false);
+
+        // Icon: folder for containers, document for leaves
+        if (child->isContainer()) {
+            item->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
+        } else {
+            item->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
+        }
+
+        parentItem->appendRow(item);
+        populateTreeNode(item, child);
+    }
+}
+
+void StructViewWidget::onTreeNodeSelected(const QModelIndex &current,
+                                           const QModelIndex & /*previous*/)
+{
+    if (!current.isValid()) return;
+
+    auto ptr = current.data(Qt::UserRole).value<quintptr>();
+    auto *node = reinterpret_cast<DocumentNode*>(ptr);
+    if (!node) return;
+
+    showNodeData(node);
+}
+
+void StructViewWidget::showNodeData(DocumentNode *node)
+{
+    m_currentNode = node;
+
+    m_gridModel->clear();
+
+    if (node->columnNames.isEmpty() && node->rows.isEmpty()) {
+        // No grid data — show message
+        m_gridModel->setHorizontalHeaderLabels({QStringLiteral("Info")});
+        auto *item = new QStandardItem(
+            QStringLiteral("Select a child node to view data."));
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        m_gridModel->appendRow(item);
+    } else {
+        // Set column headers
+        m_gridModel->setHorizontalHeaderLabels(node->columnNames);
+
+        // Populate rows
+        for (const auto &row : node->rows) {
+            QList<QStandardItem*> items;
+            for (const auto &val : row) {
+                auto *item = new QStandardItem(val.toString());
+                if (!node->editable)
+                    item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+                items.append(item);
+            }
+            m_gridModel->appendRow(items);
         }
     }
 
-    // Build UI (needs engine to be set first)
-    setupUi();
+    m_filterRow->syncToModel();
+    m_filterRow->clearFilters();
 
-    // Load data into grid
-    if (m_engine->hasSectionNav()) {
-        // INI: engine was pre-loaded via factory; first section selected by setupUi()
-    } else {
-        if (!m_engine->loadInto(m_table, data))
-            return false;
-    }
+    updateStatusBar();
 
-    // Mark undo stack as clean (initial state)
-    m_fm->undoStack()->setClean();
+    // Resize columns
+    m_gridView->horizontalHeader()->setStretchLastSection(true);
+    m_gridView->resizeColumnsToContents();
+}
 
-    return true;
+void StructViewWidget::updateStatusBar()
+{
+    int total = m_gridModel->rowCount();
+    int filtered = m_filterProxy->rowCount();
+    m_statusBar->setRowCount(filtered, total);
 }
 
 bool StructViewWidget::saveFile()
@@ -213,134 +290,76 @@ bool StructViewWidget::saveFileAs(const QString &path)
 {
     if (!m_engine) return false;
 
-    // Commit current section for INI
-    if (m_engine->hasSectionNav() && !m_currentSection.isEmpty())
-        m_engine->commitSection(m_table, m_currentSection);
+    // Sync current grid data back to the node
+    if (m_currentNode && !m_currentNode->columnNames.isEmpty()) {
+        m_currentNode->rows.clear();
+        for (int r = 0; r < m_gridModel->rowCount(); ++r) {
+            QVector<QVariant> row;
+            for (int c = 0; c < m_gridModel->columnCount(); ++c) {
+                auto *item = m_gridModel->item(r, c);
+                row.append(item ? item->data(Qt::DisplayRole) : QVariant());
+            }
+            m_currentNode->rows.append(std::move(row));
+        }
+    }
 
-    QByteArray data = m_engine->serialize(m_table);
+    QByteArray output = m_engine->serialize();
+    if (output.isEmpty()) return false;
 
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return false;
-    file.write(data);
-    file.close();
 
-    m_filepath = path;
-    m_fm->undoStack()->setClean();
+    file.write(output);
+    file.close();
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// Slots
-// ---------------------------------------------------------------------------
 
 void StructViewWidget::onSave()
 {
     if (!saveFile()) {
         QMessageBox::warning(this, QStringLiteral("Save Error"),
-            QStringLiteral("Failed to save file: %1").arg(m_filepath));
+                             QStringLiteral("Could not save file."));
     }
 }
 
 void StructViewWidget::onFind(bool forward)
 {
-    if (!m_findReplace || !m_table->model()) return;
+    // Delegate to grid search
+    if (!m_gridView->model()) return;
 
-    QString query = m_findReplace->findText();
-    if (query.isEmpty()) return;
+    QString searchText = m_findReplace->findText();
+    if (searchText.isEmpty()) return;
 
-    bool caseSensitive = m_findReplace->matchCase();
-    QString scope = m_findReplace->currentScope();
+    QModelIndex start = m_gridView->currentIndex();
+    if (!start.isValid())
+        start = m_gridView->model()->index(0, 0);
 
-    Qt::MatchFlags flags = Qt::MatchContains;
-    if (caseSensitive) flags |= Qt::MatchCaseSensitive;
-
-    QAbstractItemModel *model = m_table->model();
-    QModelIndex current = m_table->currentIndex();
-
-    // Determine search range
-    int startRow = current.isValid() ? current.row() : 0;
-    int startCol = current.isValid() ? current.column() : 0;
+    QAbstractItemModel *model = m_gridView->model();
     int rows = model->rowCount();
     int cols = model->columnCount();
+    int startRow = start.row();
+    int startCol = start.column();
 
-    // Advance past current cell
-    if (forward) {
-        startCol++;
-        if (startCol >= cols) { startCol = 0; startRow++; }
-    } else {
-        startCol--;
-        if (startCol < 0) { startCol = cols - 1; startRow--; }
-    }
-
-    // Search loop
+    // Search from current position
     for (int i = 0; i < rows * cols; ++i) {
-        int r = startRow, c = startCol;
-        if (forward) {
-            r = startRow + (startCol + i) / cols;
-            c = (startCol + i) % cols;
-        } else {
-            int total = startRow * cols + startCol;
-            int idx = total - i;
-            if (idx < 0) idx += rows * cols;
-            r = idx / cols;
-            c = idx % cols;
-        }
-        r = r % rows;
-        if (r < 0) r += rows;
-
-        // Apply scope filter
-        if (scope == QStringLiteral("Current Column") && c != current.column())
-            continue;
-        if (scope == QStringLiteral("Current Row") && r != current.row())
-            continue;
-
+        int offset = forward ? (i + 1) : (rows * cols - i - 1);
+        int r = (startRow + offset / cols) % rows;
+        int c = (startCol + offset % cols) % cols;
         QModelIndex idx = model->index(r, c);
-        QString cellText = model->data(idx, Qt::DisplayRole).toString();
-
-        bool match = caseSensitive
-            ? cellText.contains(query, Qt::CaseSensitive)
-            : cellText.contains(query, Qt::CaseInsensitive);
-
-        if (match) {
-            m_table->setCurrentIndex(idx);
-            m_table->scrollTo(idx);
+        QString text = model->data(idx, Qt::DisplayRole).toString();
+        if (text.contains(searchText, Qt::CaseInsensitive)) {
+            m_gridView->setCurrentIndex(idx);
+            m_gridView->scrollTo(idx);
             return;
         }
     }
-
-    QMessageBox::information(this, QString(),
-        QStringLiteral("\"%1\" not found.").arg(query));
 }
 
-void StructViewWidget::onSectionSelected(const QString &sectionName)
-{
-    if (!m_engine || sectionName.isEmpty()) return;
-
-    // Commit current section edits before switching
-    if (!m_currentSection.isEmpty())
-        m_engine->commitSection(m_table, m_currentSection);
-
-    m_currentSection = sectionName;
-    m_engine->loadSection(m_table, sectionName);
-
-    // Clear undo stack for section switch (section-level undo is complex)
-    m_fm->undoStack()->clear();
-}
-
-void StructViewWidget::populateGrid()
-{
-    // Called for non-section-nav engines after loadInto()
-}
-
-// ---------------------------------------------------------------------------
-// WLX bridge accessors
-// ---------------------------------------------------------------------------
-
-QtWlPlugin::FocusManager *StructViewWidget::focusManager() const { return m_fm; }
-QtWlPlugin::EditableGridWidget *StructViewWidget::grid() const { return m_grid; }
+FocusManager *StructViewWidget::focusManager() const { return m_fm; }
+EditableGridWidget *StructViewWidget::grid() const { return m_grid; }
 
 QString StructViewWidget::getSelectionAsText(char sep)
 {
-    return m_grid ? m_grid->getSelectionAsText(sep) : QString();
+    return m_grid->getSelectionAsText(sep);
 }

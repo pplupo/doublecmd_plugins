@@ -1,9 +1,12 @@
 #pragma once
 
 #include <QWidget>
-#include <QTableWidget>
-#include <QListWidget>
-#include <QSplitter>
+#include <QTreeView>
+#include <QTableView>
+#include <QTabWidget>
+#include <QPlainTextEdit>
+#include <QStandardItemModel>
+#include <QSortFilterProxyModel>
 #include <memory>
 
 #include "TextFormatEngine.h"
@@ -13,16 +16,24 @@ class FocusManager;
 class PluginToolBar;
 class EditableGridWidget;
 class ScopedFindReplacePanel;
+class FilterRowWidget;
+class PluginStatusBar;
+class PluginSplitView;
 }
 
 /// Main plugin widget for structured text file viewing/editing.
 ///
-/// Assembles the full UI: toolbar, grid (via EditableGridWidget), and
-/// find/replace panel.  Delegates format-specific parsing to a
-/// TextFormatEngine subclass.
-///
-/// For formats with section navigation (INI), creates a split layout
-/// with a section list on the left and the grid on the right.
+/// Layout:
+///   ┌────────────────────────────────────────────┐
+///   │  PluginToolBar                             │
+///   ├────────────┬───────────────────────────────┤
+///   │ QTreeView  │ QTabWidget (Grid | Text)      │
+///   │ (document  │  ┌ FilterRowWidget            │
+///   │  tree)     │  ├ QTableView (grid)          │
+///   │            │  │                            │
+///   ├────────────┴──┴────────────────────────────┤
+///   │  PluginStatusBar                           │
+///   └────────────────────────────────────────────┘
 class StructViewWidget : public QWidget {
     Q_OBJECT
 public:
@@ -41,24 +52,37 @@ public:
 private slots:
     void onSave();
     void onFind(bool forward);
-    void onSectionSelected(const QString &sectionName);
+    void onTreeNodeSelected(const QModelIndex &current, const QModelIndex &previous);
 
 private:
     void setupUi();
     void setupToolbar();
     void setupFindReplace();
-    void populateGrid();
+    void populateTree();
+    void populateTreeNode(QStandardItem *parentItem, DocumentNode *node);
+    void showNodeData(DocumentNode *node);
+    void updateStatusBar();
 
     QString m_filepath;
     std::unique_ptr<TextFormatEngine> m_engine;
     QtWlPlugin::FocusManager *m_fm;
     QtWlPlugin::PluginToolBar *m_toolbar;
-    QtWlPlugin::EditableGridWidget *m_grid;
     QtWlPlugin::ScopedFindReplacePanel *m_findReplace;
-    QTableWidget *m_table;
+    QtWlPlugin::PluginStatusBar *m_statusBar;
 
-    // Section navigation (INI)
-    QSplitter *m_splitter;
-    QListWidget *m_sectionList;
-    QString m_currentSection;
+    // Left panel: document tree
+    QtWlPlugin::PluginSplitView *m_splitView;
+    QTreeView *m_treeView;
+    QStandardItemModel *m_treeModel;
+
+    // Right panel: Grid + Text tabs
+    QTabWidget *m_tabWidget;
+    QtWlPlugin::EditableGridWidget *m_grid;
+    QTableView *m_gridView;
+    QStandardItemModel *m_gridModel;
+    QSortFilterProxyModel *m_filterProxy;
+    QtWlPlugin::FilterRowWidget *m_filterRow;
+    QPlainTextEdit *m_textView;
+
+    DocumentNode *m_currentNode = nullptr;
 };
