@@ -1,5 +1,7 @@
 #include <wayland_qt_base/EditableGridWidget.h>
 #include <wayland_qt_base/FocusManager.h>
+#include <wayland_qt_base/FilterRowWidget.h>
+#include <wayland_qt_base/ThemeManager.h>
 
 #include <QApplication>
 #include <QClipboard>
@@ -571,6 +573,15 @@ void EditableGridWidget::setWordWrap(bool wrap)
 bool EditableGridWidget::wordWrap() const { return m_wrapDelegate->wrapAnywhere(); }
 void EditableGridWidget::setShowGrid(bool show) { m_view->setShowGrid(show); }
 
+void EditableGridWidget::setFilterRow(FilterRowWidget *filterRow) { m_filterRow = filterRow; }
+void EditableGridWidget::setThemeToggleEnabled(bool enabled) { m_themeToggleEnabled = enabled; }
+
+void EditableGridWidget::setExtraContextMenuCallback(
+    std::function<void(QMenu*, const QModelIndex&)> callback)
+{
+    m_extraMenuCallback = std::move(callback);
+}
+
 void EditableGridWidget::onDataChanged(const QModelIndex &topLeft, const QModelIndex &bottomRight,
                                         const QList<int> &roles)
 {
@@ -975,6 +986,19 @@ void EditableGridWidget::showRowContextMenu(const QPoint &pos)
     if (!model) return;
 
     QMenu menu(this);
+
+    // --- Copy cell / Copy row ---
+    QModelIndex clickedIdx = m_view->indexAt(pos);
+    QAction *actCopyCell = nullptr;
+    QAction *actCopyRow = nullptr;
+
+    if (clickedIdx.isValid()) {
+        actCopyCell = menu.addAction(QStringLiteral("Copy cell"));
+        actCopyRow = menu.addAction(QStringLiteral("Copy row"));
+        menu.addSeparator();
+    }
+
+    // --- Selection-based actions ---
     QAction *actCopyTSV = nullptr, *actCopyCSV = nullptr, *actDelete = nullptr;
     QAction *actInsertAbove = nullptr, *actInsertBelow = nullptr;
     QAction *actPasteAbove = nullptr, *actPasteBelow = nullptr;
@@ -1010,17 +1034,55 @@ void EditableGridWidget::showRowContextMenu(const QPoint &pos)
         }
     }
 
+    // --- Extra callback (KV binary ops, etc.) ---
+    if (m_extraMenuCallback && clickedIdx.isValid()) {
+        menu.addSeparator();
+        m_extraMenuCallback(&menu, clickedIdx);
+    }
+
+    // --- Filters and Dark theme toggles ---
+    menu.addSeparator();
+
+    QAction *actFilters = nullptr;
+    if (m_filterRow) {
+        actFilters = menu.addAction(QStringLiteral("Filters"));
+        actFilters->setCheckable(true);
+        actFilters->setChecked(m_filterRow->isFilterVisible());
+    }
+
+    QAction *actDarkTheme = nullptr;
+    if (m_themeToggleEnabled) {
+        actDarkTheme = menu.addAction(QStringLiteral("Dark theme"));
+        actDarkTheme->setCheckable(true);
+        actDarkTheme->setChecked(ThemeManager::isDark());
+    }
+
     QAction *res = menu.exec(m_view->viewport()->mapToGlobal(pos));
     QTimer::singleShot(0, this, [this]() { m_fm->restoreViewFocus(); });
     if (!res) return;
 
-    if (res == actCopyTSV) copySelection('\t');
+    // Handle results
+    if (res == actCopyCell && clickedIdx.isValid()) {
+        QString text = model->data(clickedIdx, Qt::DisplayRole).toString();
+        QApplication::clipboard()->setText(text);
+    } else if (res == actCopyRow && clickedIdx.isValid()) {
+        int row = clickedIdx.row();
+        QStringList cells;
+        for (int c = 0; c < model->columnCount(); ++c)
+            cells << model->data(model->index(row, c), Qt::DisplayRole).toString();
+        QApplication::clipboard()->setText(cells.join(QChar('\t')));
+    } else if (res == actCopyTSV) copySelection('\t');
     else if (res == actCopyCSV) copySelection(',');
     else if (res == actDelete) deleteSelectedRows();
     else if (res == actInsertAbove) insertRows(numRows, minRow);
     else if (res == actInsertBelow) insertRows(numRows, maxRow + 1);
     else if (res == actPasteAbove) pasteSelectionAt(minRow);
     else if (res == actPasteBelow) pasteSelectionAt(maxRow + 1);
+    else if (res == actFilters && m_filterRow) {
+        m_filterRow->setFilterVisible(!m_filterRow->isFilterVisible());
+    } else if (res == actDarkTheme) {
+        ThemeManager::toggleTheme(window());
+    }
 }
 
 void EditableGridWidget::showColumnContextMenu(const QPoint &pos)

@@ -50,6 +50,10 @@ add_library(wayland_qt_base STATIC
     src/FindReplacePanel.cpp
     src/ScopedFindReplacePanel.cpp
     src/EncodingUtils.cpp
+    src/FilterRowWidget.cpp
+    src/PluginStatusBar.cpp
+    src/PluginSplitView.cpp
+    src/ThemeManager.cpp
 )
 
 target_include_directories(wayland_qt_base

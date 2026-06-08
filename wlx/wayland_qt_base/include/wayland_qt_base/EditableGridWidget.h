@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QPointer>
 #include <QSet>
+#include <functional>
 
 namespace QtWlPlugin {
 
@@ -88,6 +89,18 @@ public:
     bool wordWrap() const;
     void setShowGrid(bool show);
 
+    // --- Context menu integration ---
+    /// Set the filter row widget for Filters toggle in context menu.
+    void setFilterRow(class FilterRowWidget *filterRow);
+
+    /// Enable the Dark theme toggle in context menu.
+    void setThemeToggleEnabled(bool enabled);
+
+    /// Register additional context menu entries.
+    /// The callback receives the QMenu and the clicked QModelIndex.
+    void setExtraContextMenuCallback(
+        std::function<void(QMenu*, const QModelIndex&)> callback);
+
     // --- State ---
     bool isDirty() const;
 
@@ -131,6 +144,11 @@ private:
     QSet<int> m_dragSelectedSections;
     bool m_isDraggingSection;
     QTimer *m_moveDebounceTimer;
+
+    // Context menu integrations
+    FilterRowWidget *m_filterRow = nullptr;
+    bool m_themeToggleEnabled = false;
+    std::function<void(QMenu*, const QModelIndex&)> m_extraMenuCallback;
 };
 
 } // namespace QtWlPlugin
