@@ -1,11 +1,10 @@
 #pragma once
 
 #include <QWidget>
+#include <QListWidget>
+#include <QTableView>
 #include <memory>
 
-class QComboBox;
-class QLabel;
-class QTableView;
 class QAction;
 
 namespace QtWlPlugin {
@@ -13,6 +12,9 @@ class FocusManager;
 class PluginToolBar;
 class EditableGridWidget;
 class FindReplacePanel;
+class FilterRowWidget;
+class PluginStatusBar;
+class PluginSplitView;
 }
 
 class DbEngine;
@@ -20,13 +22,20 @@ class KeyValueModel;
 
 /// Main plugin widget for database file viewing/editing.
 ///
-/// Engine-agnostic: works with any DbEngine subclass (SQLite, DuckDB,
-/// LevelDB, RocksDB). Adapts the UI based on engine capabilities:
-///   - supportsMultipleTables(): show/hide table selector
-///   - supportsSubmitRevert(): show/hide Submit/Revert vs "Auto-save" label
+/// Layout:
+///   ┌────────────────────────────────────────────┐
+///   │  PluginToolBar                             │
+///   ├────────────┬───────────────────────────────┤
+///   │ QListWidget│ FilterRowWidget               │
+///   │ (tables/   ├───────────────────────────────┤
+///   │  views)    │ QTableView (grid)             │
+///   │            │                               │
+///   ├────────────┴───────────────────────────────┤
+///   │  PluginStatusBar                           │
+///   └────────────────────────────────────────────┘
 ///
-/// KV-specific context menu: hex view toggle, save value as file,
-/// load value from file.
+/// Engine-agnostic: works with any DbEngine subclass (SQLite, DuckDB,
+/// LevelDB, RocksDB). Adapts the UI based on engine capabilities.
 class DbViewWidget : public QWidget {
     Q_OBJECT
 public:
@@ -41,28 +50,31 @@ public:
     QString getSelectionAsText(char sep = '\t');
 
 private slots:
-    void onTableSelected(const QString &tableName);
+    void onTableSelected(QListWidgetItem *current, QListWidgetItem *previous);
     void onSubmitChanges();
     void onRevertChanges();
     void onFind(bool forward);
-    void onContextMenu(const QPoint &pos);
 
 private:
     void setupUi(const QString &firstTable);
     void setupToolbar();
     void setupFindReplace();
     void rebuildGrid(const QString &tableName);
-    void updateRowCount();
+    void updateStatusBar();
+    void populateTableList();
+    void setupKvContextMenu();
 
     std::unique_ptr<DbEngine> m_engine;
     QtWlPlugin::FocusManager *m_fm = nullptr;
     QtWlPlugin::PluginToolBar *m_toolbar = nullptr;
     QtWlPlugin::EditableGridWidget *m_grid = nullptr;
     QtWlPlugin::FindReplacePanel *m_findPanel = nullptr;
+    QtWlPlugin::FilterRowWidget *m_filterRow = nullptr;
+    QtWlPlugin::PluginStatusBar *m_statusBar = nullptr;
+    QtWlPlugin::PluginSplitView *m_splitView = nullptr;
+
     QTableView *m_tableView = nullptr;
-    QComboBox *m_tableSelector = nullptr;
-    QLabel *m_rowCountLabel = nullptr;
-    QLabel *m_engineLabel = nullptr;
+    QListWidget *m_tableList = nullptr;
     QAction *m_actSubmit = nullptr;
     QAction *m_actRevert = nullptr;
 };

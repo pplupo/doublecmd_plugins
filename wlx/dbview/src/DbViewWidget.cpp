@@ -6,17 +6,21 @@
 #include <wayland_qt_base/PluginToolBar.h>
 #include <wayland_qt_base/EditableGridWidget.h>
 #include <wayland_qt_base/FindReplacePanel.h>
+#include <wayland_qt_base/FilterRowWidget.h>
+#include <wayland_qt_base/PluginStatusBar.h>
+#include <wayland_qt_base/PluginSplitView.h>
+#include <wayland_qt_base/ThemeManager.h>
 
 #include <QVBoxLayout>
-#include <QComboBox>
-#include <QLabel>
-#include <QTableView>
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QAbstractItemModel>
 #include <QMenu>
 #include <QFileDialog>
 #include <QFile>
+#include <QSortFilterProxyModel>
+
+using namespace QtWlPlugin;
 
 // ---------------------------------------------------------------------------
 // Construction / destruction
@@ -48,6 +52,9 @@ bool DbViewWidget::loadFile(const QString &filepath)
     QString firstTable = tables.isEmpty() ? views.first() : tables.first();
     setupUi(firstTable);
 
+    // Apply saved theme
+    ThemeManager::applyTheme(this, ThemeManager::currentTheme());
+
     return true;
 }
 
@@ -61,117 +68,194 @@ void DbViewWidget::setupUi(const QString &firstTable)
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
 
-    // Create the QTableView and core components
-    m_tableView = new QTableView(this);
-    m_tableView->horizontalHeader()->setStretchLastSection(true);
-    m_tableView->setAlternatingRowColors(true);
-
-    // Enable context menu for KV binary value operations
-    m_tableView->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_tableView, &QTableView::customContextMenuRequested,
-            this, &DbViewWidget::onContextMenu);
-
-    m_fm = new QtWlPlugin::FocusManager(this, m_tableView, this);
-
-    // Build grid first — we need it before the toolbar connects to it
-    rebuildGrid(firstTable);
-
+    // --- Toolbar ---
     setupToolbar();
     mainLayout->addWidget(m_toolbar);
-    mainLayout->addWidget(m_grid, 1);
 
+    // --- Left panel: Table list ---
+    m_tableList = new QListWidget;
+    m_tableList->setMinimumWidth(120);
+    m_tableList->setMaximumWidth(250);
+    populateTableList();
+
+    connect(m_tableList, &QListWidget::currentItemChanged,
+            this, &DbViewWidget::onTableSelected);
+
+    // --- Right panel: Grid ---
+    auto *rightContainer = new QWidget;
+    auto *rightLayout = new QVBoxLayout(rightContainer);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
+    rightLayout->setSpacing(0);
+
+    m_tableView = new QTableView;
+    m_tableView->horizontalHeader()->setStretchLastSection(true);
+    m_tableView->setAlternatingRowColors(true);
+    m_tableView->setSortingEnabled(true);
+    m_tableView->setSelectionBehavior(QAbstractItemView::SelectItems);
+    m_tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
+    m_fm = new FocusManager(this, m_tableView, this);
+
+    // Build grid
+    rebuildGrid(firstTable);
+
+    m_filterRow = new FilterRowWidget(m_tableView, this);
+    m_grid->setFilterRow(m_filterRow);
+    m_grid->setThemeToggleEnabled(true);
+
+    // Setup KV context menu integration
+    setupKvContextMenu();
+
+    rightLayout->addWidget(m_filterRow);
+    rightLayout->addWidget(m_grid, 1);
+
+    // --- Split view (only show list if multi-table) ---
+    if (m_engine->supportsMultipleTables()) {
+        m_splitView = new PluginSplitView(m_tableList, rightContainer, this);
+        mainLayout->addWidget(m_splitView, 1);
+    } else {
+        m_tableList->hide();
+        mainLayout->addWidget(rightContainer, 1);
+    }
+
+    // --- Find/replace ---
     setupFindReplace();
     mainLayout->addWidget(m_findPanel);
     m_findPanel->setVisible(false);
+
+    // --- Status bar ---
+    m_statusBar = new PluginStatusBar(this);
+    m_statusBar->setFormatInfo(m_engine->engineName());
+    mainLayout->addWidget(m_statusBar);
+
+    updateStatusBar();
+
+    // Select first table in list
+    if (m_tableList->count() > 0)
+        m_tableList->setCurrentRow(0);
+}
+
+void DbViewWidget::populateTableList()
+{
+    m_tableList->clear();
+
+    QStringList tables = m_engine->tableNames();
+    QStringList views = m_engine->viewNames();
+
+    for (const auto &t : tables) {
+        auto *item = new QListWidgetItem(
+            style()->standardIcon(QStyle::SP_FileIcon), t, m_tableList);
+        item->setData(Qt::UserRole, t);
+    }
+    for (const auto &v : views) {
+        auto *item = new QListWidgetItem(
+            style()->standardIcon(QStyle::SP_FileDialogInfoView), v, m_tableList);
+        item->setData(Qt::UserRole, v);
+    }
 }
 
 void DbViewWidget::setupToolbar()
 {
-    m_toolbar = new QtWlPlugin::PluginToolBar(m_fm, this);
-
-    // Engine label
-    m_engineLabel = new QLabel(m_toolbar);
-    m_engineLabel->setText(QStringLiteral(" [%1] ").arg(m_engine->engineName()));
-    m_toolbar->addWidget(m_engineLabel);
-    m_toolbar->addSeparator();
-
-    // Table selector combo (only for multi-table engines)
-    if (m_engine->supportsMultipleTables()) {
-        m_tableSelector = new QComboBox(m_toolbar);
-        m_tableSelector->setMinimumWidth(150);
-
-        QStringList tables = m_engine->tableNames();
-        QStringList views = m_engine->viewNames();
-
-        for (const auto &t : tables)
-            m_tableSelector->addItem(QStringLiteral("\xF0\x9F\x93\x8B ") + t, t);
-        for (const auto &v : views)
-            m_tableSelector->addItem(QStringLiteral("\xF0\x9F\x91\x81 ") + v, v);
-
-        // Select current table
-        for (int i = 0; i < m_tableSelector->count(); ++i) {
-            if (m_tableSelector->itemData(i).toString() == m_engine->currentTableName()) {
-                m_tableSelector->setCurrentIndex(i);
-                break;
-            }
-        }
-
-        connect(m_tableSelector, &QComboBox::currentIndexChanged,
-                this, [this](int index) {
-            QString tableName = m_tableSelector->itemData(index).toString();
-            onTableSelected(tableName);
-        });
-
-        m_toolbar->addWidget(m_tableSelector);
-        m_toolbar->addSeparator();
-    }
+    m_toolbar = new PluginToolBar(m_fm, this);
 
     // Submit/Revert (only for engines that support it)
     if (m_engine->supportsSubmitRevert()) {
         m_actSubmit = m_toolbar->addToolAction(
             QStringLiteral("Submit"),
             QKeySequence(Qt::CTRL | Qt::Key_S),
-            QtWlPlugin::FocusManager::Always);
+            FocusManager::Always);
         connect(m_actSubmit, &QAction::triggered, this, &DbViewWidget::onSubmitChanges);
 
         m_actRevert = m_toolbar->addToolAction(
             QStringLiteral("Revert"),
             QKeySequence(Qt::CTRL | Qt::Key_Z),
-            QtWlPlugin::FocusManager::WhenNoInput);
+            FocusManager::WhenNoInput);
         connect(m_actRevert, &QAction::triggered, this, &DbViewWidget::onRevertChanges);
-    } else {
-        // KV engines: direct writes, show auto-save label
-        auto *autoLabel = new QLabel(QStringLiteral(" Auto-save "), m_toolbar);
-        m_toolbar->addWidget(autoLabel);
     }
 
-    m_toolbar->addSeparator();
+    // Word wrap toggle
+    auto *actWrap = m_toolbar->addToolAction(
+        QStringLiteral("Word Wrap"), QKeySequence(), 0);
+    actWrap->setCheckable(true);
+    connect(actWrap, &QAction::toggled, this, [this](bool on) {
+        if (m_grid) m_grid->setWordWrap(on);
+    });
 
-    // Row count label
-    m_rowCountLabel = new QLabel(m_toolbar);
-    m_toolbar->addWidget(m_rowCountLabel);
-    updateRowCount();
+    // Grid lines toggle
+    auto *actGrid = m_toolbar->addToolAction(
+        QStringLiteral("Grid Lines"), QKeySequence(), 0);
+    actGrid->setCheckable(true);
+    actGrid->setChecked(true);
+    connect(actGrid, &QAction::toggled, this, [this](bool on) {
+        if (m_grid) m_grid->setShowGrid(on);
+    });
 
-    m_toolbar->addSeparator();
-
-    // Find (Ctrl+F)
+    // Find
     auto *actFind = m_toolbar->addToolAction(
         QStringLiteral("Find"),
         QKeySequence(Qt::CTRL | Qt::Key_F),
-        QtWlPlugin::FocusManager::Always);
+        FocusManager::Always);
     connect(actFind, &QAction::triggered, this, [this]() {
-        bool vis = !m_findPanel->isPanelVisible();
-        m_findPanel->showPanel(vis);
+        if (m_findPanel)
+            m_findPanel->showPanel(!m_findPanel->isPanelVisible());
     });
 }
 
 void DbViewWidget::setupFindReplace()
 {
-    m_findPanel = new QtWlPlugin::FindReplacePanel(m_fm, this);
+    m_findPanel = new FindReplacePanel(m_fm, this);
     m_findPanel->setReplaceEnabled(false);
 
-    connect(m_findPanel, &QtWlPlugin::FindReplacePanel::findRequested,
+    connect(m_findPanel, &FindReplacePanel::findRequested,
             this, &DbViewWidget::onFind);
+}
+
+void DbViewWidget::setupKvContextMenu()
+{
+    m_grid->setExtraContextMenuCallback(
+        [this](QMenu *menu, const QModelIndex &idx) {
+        auto *kvModel = qobject_cast<KeyValueModel*>(m_tableView->model());
+        if (!kvModel || !idx.isValid()) return;
+
+        int row = idx.row();
+
+        // Hex toggle
+        bool isBinary = kvModel->isBinaryValue(row);
+        if (isBinary) {
+            QAction *hexAction = menu->addAction(QStringLiteral("Toggle Hex View"));
+            connect(hexAction, &QAction::triggered, this, [kvModel, row]() {
+                bool currentlyHex = kvModel->data(kvModel->index(row, 1), Qt::DisplayRole)
+                                        .toString().contains(QStringLiteral(" "));
+                kvModel->setHexMode(row, !currentlyHex);
+            });
+        }
+
+        // Save value as file
+        QAction *saveAction = menu->addAction(QStringLiteral("Save Value as File..."));
+        connect(saveAction, &QAction::triggered, this, [this, kvModel, row]() {
+            QByteArray data = kvModel->rawValue(row);
+            QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Save Value"));
+            if (path.isEmpty()) return;
+            QFile f(path);
+            if (f.open(QIODevice::WriteOnly)) {
+                f.write(data);
+                f.close();
+            }
+        });
+
+        // Load value from file
+        QAction *loadAction = menu->addAction(QStringLiteral("Load Value from File..."));
+        connect(loadAction, &QAction::triggered, this, [this, kvModel, row]() {
+            QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Load Value"));
+            if (path.isEmpty()) return;
+            QFile f(path);
+            if (f.open(QIODevice::ReadOnly)) {
+                QByteArray fileData = f.readAll();
+                f.close();
+                kvModel->loadValueFromFile(row, fileData);
+            }
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -192,37 +276,44 @@ void DbViewWidget::rebuildGrid(const QString &tableName)
         delete m_grid;
     }
 
-    m_grid = new QtWlPlugin::EditableGridWidget(
-        m_tableView, QtWlPlugin::GridMode::LiveDatabase, m_fm, this);
+    m_grid = new EditableGridWidget(
+        m_tableView, GridMode::LiveDatabase, m_fm, this);
 
-    updateRowCount();
+    updateStatusBar();
 }
 
-void DbViewWidget::onTableSelected(const QString &tableName)
+void DbViewWidget::onTableSelected(QListWidgetItem *current,
+                                    QListWidgetItem * /*previous*/)
 {
+    if (!current) return;
+
+    QString tableName = current->data(Qt::UserRole).toString();
     if (tableName.isEmpty() || tableName == m_engine->currentTableName())
         return;
 
     rebuildGrid(tableName);
 
-    // Re-insert grid into layout (after toolbar, before find panel)
-    auto *lay = qobject_cast<QVBoxLayout*>(layout());
-    if (lay) {
-        lay->insertWidget(1, m_grid, 1);
+    // Re-insert grid into the right-side layout
+    if (m_filterRow) {
+        m_filterRow->syncToModel();
+        m_filterRow->clearFilters();
     }
 
-    updateRowCount();
+    updateStatusBar();
 }
 
-void DbViewWidget::updateRowCount()
+void DbViewWidget::updateStatusBar()
 {
-    if (!m_rowCountLabel) return;
+    if (!m_statusBar) return;
 
     int rows = 0;
     if (m_tableView && m_tableView->model())
         rows = m_tableView->model()->rowCount();
 
-    m_rowCountLabel->setText(QStringLiteral("%1 rows").arg(rows));
+    m_statusBar->setRowCount(rows, rows);
+
+    if (m_engine)
+        m_statusBar->setEncoding(m_engine->currentTableName());
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +329,7 @@ void DbViewWidget::onSubmitChanges()
             QStringLiteral("Failed to submit changes:\n%1").arg(m_engine->lastError()));
         m_engine->revertAll();
     }
-    updateRowCount();
+    updateStatusBar();
 }
 
 void DbViewWidget::onRevertChanges()
@@ -246,65 +337,7 @@ void DbViewWidget::onRevertChanges()
     if (!m_engine || !m_engine->supportsSubmitRevert()) return;
 
     m_engine->revertAll();
-    updateRowCount();
-}
-
-// ---------------------------------------------------------------------------
-// Context menu (KV binary operations)
-// ---------------------------------------------------------------------------
-
-void DbViewWidget::onContextMenu(const QPoint &pos)
-{
-    QModelIndex idx = m_tableView->indexAt(pos);
-    if (!idx.isValid()) return;
-
-    auto *kvModel = qobject_cast<KeyValueModel*>(m_tableView->model());
-    if (!kvModel) return; // Not a KV engine, no special context menu
-
-    int row = idx.row();
-    QMenu menu(this);
-
-    // Hex toggle
-    bool isBinary = kvModel->isBinaryValue(row);
-    if (isBinary) {
-        QAction *hexAction = menu.addAction(QStringLiteral("Toggle Hex View"));
-        connect(hexAction, &QAction::triggered, this, [kvModel, row]() {
-            // Toggle: check current state
-            bool currentlyHex = kvModel->data(kvModel->index(row, 1), Qt::DisplayRole)
-                                    .toString().contains(QStringLiteral(" "));
-            kvModel->setHexMode(row, !currentlyHex);
-        });
-    }
-
-    // Save value as file
-    QAction *saveAction = menu.addAction(QStringLiteral("Save Value as File..."));
-    connect(saveAction, &QAction::triggered, this, [this, kvModel, row]() {
-        QByteArray data = kvModel->rawValue(row);
-        QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Save Value"));
-        if (path.isEmpty()) return;
-
-        QFile f(path);
-        if (f.open(QIODevice::WriteOnly)) {
-            f.write(data);
-            f.close();
-        }
-    });
-
-    // Load value from file
-    QAction *loadAction = menu.addAction(QStringLiteral("Load Value from File..."));
-    connect(loadAction, &QAction::triggered, this, [this, kvModel, row]() {
-        QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Load Value"));
-        if (path.isEmpty()) return;
-
-        QFile f(path);
-        if (f.open(QIODevice::ReadOnly)) {
-            QByteArray fileData = f.readAll();
-            f.close();
-            kvModel->loadValueFromFile(row, fileData);
-        }
-    });
-
-    menu.exec(m_tableView->viewport()->mapToGlobal(pos));
+    updateStatusBar();
 }
 
 // ---------------------------------------------------------------------------
@@ -367,8 +400,8 @@ void DbViewWidget::onFind(bool forward)
 // WLX bridge accessors
 // ---------------------------------------------------------------------------
 
-QtWlPlugin::FocusManager *DbViewWidget::focusManager() const { return m_fm; }
-QtWlPlugin::EditableGridWidget *DbViewWidget::grid() const { return m_grid; }
+FocusManager *DbViewWidget::focusManager() const { return m_fm; }
+EditableGridWidget *DbViewWidget::grid() const { return m_grid; }
 
 QString DbViewWidget::getSelectionAsText(char sep)
 {
