@@ -43,7 +43,10 @@ set_target_properties(enca_static PROPERTIES
 # ---------------------------------------------------------------------------
 # wayland_qt_base static library
 # ---------------------------------------------------------------------------
+file(GLOB BASE_HEADERS "include/wayland_qt_base/*.h")
+
 add_library(wayland_qt_base STATIC
+    ${BASE_HEADERS}
     src/FocusManager.cpp
     src/PluginToolBar.cpp
     src/EditableGridWidget.cpp
