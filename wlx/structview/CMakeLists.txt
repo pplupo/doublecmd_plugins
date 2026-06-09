@@ -45,10 +45,10 @@ add_subdirectory(
     ${CMAKE_CURRENT_BINARY_DIR}/wayland_qt_base
 )
 
-file(GLOB STRUCTVIEW_HEADERS "include/*.h")
-
+# NOTE: Headers with Q_OBJECT must be listed explicitly so AUTOMOC processes them.
 add_library(structview_qt6 SHARED
-    ${STRUCTVIEW_HEADERS}
+    include/StructViewWidget.h
+    include/TextFormatEngine.h
     src/wlx_entry.cpp
     src/StructViewWidget.cpp
     src/JsonEngine.cpp
