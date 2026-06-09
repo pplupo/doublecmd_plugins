@@ -70,7 +70,10 @@ endif()
 # ---------------------------------------------------------------------------
 # Plugin library
 # ---------------------------------------------------------------------------
+file(GLOB DBVIEW_HEADERS "include/*.h")
+
 set(DBVIEW_SOURCES
+    ${DBVIEW_HEADERS}
     src/wlx_entry.cpp
     src/DbEngine.cpp
     src/DbViewWidget.cpp
