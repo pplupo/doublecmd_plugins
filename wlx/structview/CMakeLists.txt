@@ -45,7 +45,10 @@ add_subdirectory(
     ${CMAKE_CURRENT_BINARY_DIR}/wayland_qt_base
 )
 
+file(GLOB STRUCTVIEW_HEADERS "include/*.h")
+
 add_library(structview_qt6 SHARED
+    ${STRUCTVIEW_HEADERS}
     src/wlx_entry.cpp
     src/StructViewWidget.cpp
     src/JsonEngine.cpp
