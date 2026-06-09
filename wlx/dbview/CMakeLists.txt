@@ -70,7 +70,18 @@ endif()
 # ---------------------------------------------------------------------------
 # Plugin library
 # ---------------------------------------------------------------------------
-file(GLOB DBVIEW_HEADERS "include/*.h")
+# NOTE: Headers must be listed explicitly so AUTOMOC processes them.
+# RocksDbEngine.h is excluded when ENABLE_ROCKSDB is OFF to prevent MOC
+# from generating code that references uncompiled RocksDbEngine symbols.
+set(DBVIEW_HEADERS
+    include/DbEngine.h
+    include/DbViewWidget.h
+    include/DuckDbEngine.h
+    include/DuckDbModel.h
+    include/KeyValueModel.h
+    include/LevelDbEngine.h
+    include/SqliteEngine.h
+)
 
 set(DBVIEW_SOURCES
     ${DBVIEW_HEADERS}
@@ -85,7 +96,7 @@ set(DBVIEW_SOURCES
 )
 
 if(ENABLE_ROCKSDB)
-    list(APPEND DBVIEW_SOURCES src/RocksDbEngine.cpp)
+    list(APPEND DBVIEW_SOURCES include/RocksDbEngine.h src/RocksDbEngine.cpp)
 endif()
 
 add_library(dbview_qt6 SHARED ${DBVIEW_SOURCES})
