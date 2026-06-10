@@ -281,6 +281,13 @@ void DbViewWidget::setupKvContextMenu()
 
 void DbViewWidget::rebuildGrid(const QString &tableName)
 {
+    // Detach the old model from the view BEFORE the engine deletes it.
+    // modelForTable() destroys the previous QSqlTableModel internally,
+    // so the view must not reference it during that window.
+    m_tableView->setModel(nullptr);
+    if (m_filterProxy)
+        m_filterProxy->setSourceModel(nullptr);
+
     QAbstractItemModel *model = m_engine->modelForTable(tableName);
     if (!model) return;
 
