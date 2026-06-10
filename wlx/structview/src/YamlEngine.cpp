@@ -126,16 +126,27 @@ void YamlEngine::buildTree(DocumentNode *node, const YAML::Node &yamlNode)
 bool YamlEngine::parse(const QByteArray &data)
 {
     try {
+        fprintf(stderr, "[structview/yaml] parse() called, data size=%d\n", data.size());
         m_rawText = QString::fromUtf8(data);
 
         YAML::Node yamlRoot = YAML::Load(data.toStdString());
+        fprintf(stderr, "[structview/yaml] YAML::Load OK, type=%d IsNull=%d\n",
+                static_cast<int>(yamlRoot.Type()), yamlRoot.IsNull());
         if (yamlRoot.IsNull()) return false;
 
         m_root = std::make_unique<DocumentNode>(QStringLiteral("root"));
         buildTree(m_root.get(), yamlRoot);
+        fprintf(stderr, "[structview/yaml] parse() succeeded\n");
         return true;
 
-    } catch (const YAML::Exception &) {
+    } catch (const YAML::Exception &e) {
+        fprintf(stderr, "[structview/yaml] YAML::Exception: %s\n", e.what());
+        return false;
+    } catch (const std::exception &e) {
+        fprintf(stderr, "[structview/yaml] std::exception: %s\n", e.what());
+        return false;
+    } catch (...) {
+        fprintf(stderr, "[structview/yaml] unknown exception\n");
         return false;
     }
 }
