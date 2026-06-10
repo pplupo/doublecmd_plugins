@@ -18,15 +18,25 @@ HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
 {
     WLX_TRY {
         Q_UNUSED(ShowFlags);
+        fprintf(stderr, "[structview] ListLoad called: %s\n", FileToLoad);
+        fflush(stderr);
+
         if (!QApplication::instance())
             return nullptr;
 
         auto *widget = new StructViewWidget(reinterpret_cast<QWidget*>(ParentWin));
+        fprintf(stderr, "[structview] Widget created, calling loadFile\n");
+        fflush(stderr);
+
         if (!widget->loadFile(QString::fromUtf8(FileToLoad))) {
+            fprintf(stderr, "[structview] loadFile FAILED for: %s\n", FileToLoad);
+            fflush(stderr);
             delete widget;
             return nullptr;
         }
 
+        fprintf(stderr, "[structview] loadFile OK, showing widget\n");
+        fflush(stderr);
         widget->show();
         return reinterpret_cast<HWND>(widget);
     } WLX_CATCH("ListLoad");
@@ -36,6 +46,8 @@ HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
 void DCPCALL ListCloseWindow(HWND ListWin)
 {
     WLX_TRY {
+        fprintf(stderr, "[structview] ListCloseWindow\n");
+        fflush(stderr);
         auto *widget = reinterpret_cast<StructViewWidget*>(ListWin);
         delete widget;
     } WLX_CATCH("ListCloseWindow");

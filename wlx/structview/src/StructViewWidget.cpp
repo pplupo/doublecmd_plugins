@@ -29,7 +29,21 @@ StructViewWidget::StructViewWidget(QWidget *parent)
     ThemeManager::applyTheme(this, ThemeManager::currentTheme());
 }
 
-StructViewWidget::~StructViewWidget() = default;
+StructViewWidget::~StructViewWidget()
+{
+    // Disconnect all signals BEFORE child widgets start being destroyed.
+    // Without this, Qt's arbitrary child destruction order can trigger
+    // callbacks (e.g. selectionChanged, dataChanged) on half-destroyed objects,
+    // causing crashes when the user navigates away with unsaved edits.
+    if (m_treeView && m_treeView->selectionModel())
+        disconnect(m_treeView->selectionModel(), nullptr, this, nullptr);
+    if (m_gridModel)
+        disconnect(m_gridModel, nullptr, this, nullptr);
+    if (m_filterProxy)
+        disconnect(m_filterProxy, nullptr, this, nullptr);
+    if (m_fm)
+        m_fm->setActive(false);
+}
 
 void StructViewWidget::setupUi()
 {
