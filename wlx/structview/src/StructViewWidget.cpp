@@ -37,6 +37,23 @@ void StructViewWidget::setupUi()
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
 
+    // --- Create the primary view and FocusManager FIRST ---
+    // (setupToolbar needs m_fm for shortcut registration)
+    m_gridView = new QTableView;
+    m_gridModel = new QStandardItemModel(this);
+    m_filterProxy = new QSortFilterProxyModel(this);
+    m_filterProxy->setSourceModel(m_gridModel);
+    m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    m_gridView->setModel(m_filterProxy);
+    m_gridView->setSortingEnabled(true);
+    m_gridView->setAlternatingRowColors(true);
+    m_gridView->setSelectionBehavior(QAbstractItemView::SelectItems);
+    m_gridView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_gridView->horizontalHeader()->setStretchLastSection(true);
+
+    m_fm = new FocusManager(this, m_gridView, this);
+    m_grid = new EditableGridWidget(m_gridView, GridMode::MemoryDocument, m_fm, this);
+
     // --- Toolbar ---
     setupToolbar();
     mainLayout->addWidget(m_toolbar);
@@ -57,21 +74,6 @@ void StructViewWidget::setupUi()
     auto *gridLayout = new QVBoxLayout(gridContainer);
     gridLayout->setContentsMargins(0, 0, 0, 0);
     gridLayout->setSpacing(0);
-
-    m_gridView = new QTableView;
-    m_gridModel = new QStandardItemModel(this);
-    m_filterProxy = new QSortFilterProxyModel(this);
-    m_filterProxy->setSourceModel(m_gridModel);
-    m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-    m_gridView->setModel(m_filterProxy);
-    m_gridView->setSortingEnabled(true);
-    m_gridView->setAlternatingRowColors(true);
-    m_gridView->setSelectionBehavior(QAbstractItemView::SelectItems);
-    m_gridView->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_gridView->horizontalHeader()->setStretchLastSection(true);
-
-    m_fm = new FocusManager(this, m_gridView, this);
-    m_grid = new EditableGridWidget(m_gridView, GridMode::MemoryDocument, m_fm, this);
 
     // Filter row
     m_filterRow = new FilterRowWidget(m_gridView, this);

@@ -27,9 +27,11 @@ QAction *PluginToolBar::addToolAction(const QString &text, const QKeySequence &s
     if (!shortcut.isEmpty()) {
         action->setToolTip(text + " (" + shortcut.toString(QKeySequence::NativeText) + ")");
 
-        m_fm->registerShortcut(
-            shortcut, static_cast<FocusManager::ShortcutContext>(ctx),
-            [action]() { action->trigger(); return true; });
+        if (m_fm) {
+            m_fm->registerShortcut(
+                shortcut, static_cast<FocusManager::ShortcutContext>(ctx),
+                [action]() { action->trigger(); return true; });
+        }
     } else {
         action->setToolTip(text);
     }
@@ -37,7 +39,8 @@ QAction *PluginToolBar::addToolAction(const QString &text, const QKeySequence &s
     // Restore focus to primary view after action trigger
     connect(action, &QAction::triggered, this, [this]() {
         QTimer::singleShot(0, this, [this]() {
-            m_fm->restoreViewFocus();
+            if (m_fm)
+                m_fm->restoreViewFocus();
         });
     });
 
