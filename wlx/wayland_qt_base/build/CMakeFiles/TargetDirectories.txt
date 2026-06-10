@@ -1,0 +1,5 @@
+/home/pplupo/repos/plugins/wlx/wayland_qt_base/build/CMakeFiles/wayland_qt_base.dir
+/home/pplupo/repos/plugins/wlx/wayland_qt_base/build/CMakeFiles/edit_cache.dir
+/home/pplupo/repos/plugins/wlx/wayland_qt_base/build/CMakeFiles/rebuild_cache.dir
+/home/pplupo/repos/plugins/wlx/wayland_qt_base/build/CMakeFiles/wayland_qt_base_autogen_timestamp_deps.dir
+/home/pplupo/repos/plugins/wlx/wayland_qt_base/build/CMakeFiles/wayland_qt_base_autogen.dir

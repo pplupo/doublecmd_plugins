@@ -12,7 +12,7 @@ class FocusManager;
 class PluginToolBar;
 class EditableGridWidget;
 class FindReplacePanel;
-class FilterRowWidget;
+class FilterableHeaderView;
 class PluginStatusBar;
 class PluginSplitView;
 }
@@ -27,7 +27,7 @@ class QSortFilterProxyModel;
 ///   ┌────────────────────────────────────────────┐
 ///   │  PluginToolBar                             │
 ///   ├────────────┬───────────────────────────────┤
-///   │ QListWidget│ FilterRowWidget               │
+///   │ QListWidget│ FilterableHeaderView          │
 ///   │ (tables/   ├───────────────────────────────┤
 ///   │  views)    │ QTableView (grid)             │
 ///   │            │                               │
@@ -70,7 +70,7 @@ private:
     QtWlPlugin::PluginToolBar *m_toolbar = nullptr;
     QtWlPlugin::EditableGridWidget *m_grid = nullptr;
     QtWlPlugin::FindReplacePanel *m_findPanel = nullptr;
-    QtWlPlugin::FilterRowWidget *m_filterRow = nullptr;
+    QtWlPlugin::FilterableHeaderView *m_filterHeader = nullptr;
     QtWlPlugin::PluginStatusBar *m_statusBar = nullptr;
     QtWlPlugin::PluginSplitView *m_splitView = nullptr;
 

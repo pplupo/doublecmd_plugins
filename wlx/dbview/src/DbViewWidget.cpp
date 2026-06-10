@@ -6,7 +6,7 @@
 #include <wayland_qt_base/PluginToolBar.h>
 #include <wayland_qt_base/EditableGridWidget.h>
 #include <wayland_qt_base/FindReplacePanel.h>
-#include <wayland_qt_base/FilterRowWidget.h>
+#include <wayland_qt_base/FilterableHeaderView.h>
 #include <wayland_qt_base/PluginStatusBar.h>
 #include <wayland_qt_base/PluginSplitView.h>
 #include <wayland_qt_base/ThemeManager.h>
@@ -91,7 +91,13 @@ void DbViewWidget::setupUi(const QString &firstTable)
     // --- Create the primary view and FocusManager FIRST ---
     // (setupToolbar needs m_fm for shortcut registration)
     m_tableView = new QTableView;
-    m_tableView->horizontalHeader()->setStretchLastSection(true);
+
+    // Install filterable header (must be before setModel)
+    m_filterHeader = new FilterableHeaderView(Qt::Horizontal, m_tableView);
+    m_filterHeader->setFilterEnabled(true);
+    m_filterHeader->setStretchLastSection(true);
+    m_tableView->setHorizontalHeader(m_filterHeader);
+
     m_tableView->setAlternatingRowColors(true);
     m_tableView->setSortingEnabled(true);
     m_tableView->setSelectionBehavior(QAbstractItemView::SelectItems);
@@ -125,11 +131,9 @@ void DbViewWidget::setupUi(const QString &firstTable)
     m_grid = new EditableGridWidget(
         m_tableView, GridMode::LiveDatabase, m_fm, this);
 
-    m_filterRow = new FilterRowWidget(m_tableView, this);
-    m_grid->setFilterRow(m_filterRow);
     m_grid->setThemeToggleEnabled(true);
 
-    connect(m_filterRow, &FilterRowWidget::filterChanged, this,
+    connect(m_filterHeader, &FilterableHeaderView::filterChanged, this,
             [this](int column, const QString &text) {
         if (m_filterProxy) {
             m_filterProxy->setFilterKeyColumn(column);
@@ -141,7 +145,6 @@ void DbViewWidget::setupUi(const QString &firstTable)
     // Setup KV context menu integration
     setupKvContextMenu();
 
-    rightLayout->addWidget(m_filterRow);
     rightLayout->addWidget(m_grid, 1);
 
     // --- Split view (only show list if multi-table) ---
@@ -342,10 +345,8 @@ void DbViewWidget::onTableSelected(QListWidgetItem *current,
     rebuildGrid(tableName);
 
     // Re-insert grid into the right-side layout
-    if (m_filterRow) {
-        m_filterRow->syncToModel();
-        m_filterRow->clearFilters();
-    }
+    if (m_filterHeader)
+        m_filterHeader->clearFilters();
 
     updateStatusBar();
 }

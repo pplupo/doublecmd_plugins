@@ -11,7 +11,7 @@ PluginStatusBar::PluginStatusBar(QWidget *parent)
     , m_layout(new QHBoxLayout(this))
 {
     m_layout->setContentsMargins(4, 2, 4, 2);
-    m_layout->setSpacing(4);
+    m_layout->setSpacing(0);
     setFixedHeight(22);
     setStyleSheet(QStringLiteral(
         "PluginStatusBar { border-top: 1px solid #c0c0c0; }"
@@ -108,7 +108,7 @@ void PluginStatusBar::setRowCount(int filtered, int total)
         m_rowLabel->setText(QStringLiteral(" Rows: %1 ").arg(total));
     else
         m_rowLabel->setText(QStringLiteral(" Rows: %1/%2 ").arg(filtered).arg(total));
-    rebuild();
+    // Don't rebuild — row count is always at the end
 }
 
 void PluginStatusBar::setExtraInfo(const QString &key, const QString &value)

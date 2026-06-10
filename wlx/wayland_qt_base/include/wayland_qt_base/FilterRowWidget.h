@@ -6,15 +6,13 @@
 class QLineEdit;
 class QHBoxLayout;
 class QTableView;
-class QSpacerItem;
 
 namespace QtWlPlugin {
 
 /// A row of QLineEdit widgets for per-column filtering of a QTableView.
 ///
 /// Sits between the column headers and the data. Each column gets its own
-/// filter input. Widths sync with column widths automatically, including
-/// a spacer for the vertical header (row number column).
+/// filter input. Widths sync with column widths automatically.
 ///
 /// Usage:
 ///   auto *filter = new FilterRowWidget(tableView, this);
@@ -43,10 +41,8 @@ private:
 
     QTableView *m_view;
     QHBoxLayout *m_layout;
-    QSpacerItem *m_verticalSpacer;
     QVector<QLineEdit*> m_inputs;
     bool m_visible = true;
 };
 
 } // namespace QtWlPlugin
-
