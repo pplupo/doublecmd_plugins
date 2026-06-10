@@ -68,6 +68,17 @@ void DbViewWidget::setupUi(const QString &firstTable)
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
 
+    // --- Create the primary view and FocusManager FIRST ---
+    // (setupToolbar needs m_fm for shortcut registration)
+    m_tableView = new QTableView;
+    m_tableView->horizontalHeader()->setStretchLastSection(true);
+    m_tableView->setAlternatingRowColors(true);
+    m_tableView->setSortingEnabled(true);
+    m_tableView->setSelectionBehavior(QAbstractItemView::SelectItems);
+    m_tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
+    m_fm = new FocusManager(this, m_tableView, this);
+
     // --- Toolbar ---
     setupToolbar();
     mainLayout->addWidget(m_toolbar);
@@ -86,15 +97,6 @@ void DbViewWidget::setupUi(const QString &firstTable)
     auto *rightLayout = new QVBoxLayout(rightContainer);
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(0);
-
-    m_tableView = new QTableView;
-    m_tableView->horizontalHeader()->setStretchLastSection(true);
-    m_tableView->setAlternatingRowColors(true);
-    m_tableView->setSortingEnabled(true);
-    m_tableView->setSelectionBehavior(QAbstractItemView::SelectItems);
-    m_tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
-
-    m_fm = new FocusManager(this, m_tableView, this);
 
     // Build grid
     rebuildGrid(firstTable);
