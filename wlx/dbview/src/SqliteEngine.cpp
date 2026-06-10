@@ -41,8 +41,13 @@ void SqliteEngine::close()
     if (m_db.isOpen())
         m_db.close();
 
-    if (QSqlDatabase::connectionNames().contains(m_connectionName))
-        QSqlDatabase::removeDatabase(m_connectionName);
+    // Release the QSqlDatabase reference BEFORE removing the connection,
+    // otherwise Qt warns "connection still in use".
+    QString connName = m_connectionName;
+    m_db = QSqlDatabase();
+
+    if (QSqlDatabase::connectionNames().contains(connName))
+        QSqlDatabase::removeDatabase(connName);
 }
 
 QStringList SqliteEngine::tableNames() const
