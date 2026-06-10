@@ -107,8 +107,12 @@ void DbViewWidget::setupUi(const QString &firstTable)
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(0);
 
-    // Build grid
+    // Load the first table's model into the view
     rebuildGrid(firstTable);
+
+    // Create the grid widget (wraps m_tableView — only done once)
+    m_grid = new EditableGridWidget(
+        m_tableView, GridMode::LiveDatabase, m_fm, this);
 
     m_filterRow = new FilterRowWidget(m_tableView, this);
     m_grid->setFilterRow(m_filterRow);
