@@ -33,6 +33,17 @@ DbViewWidget::DbViewWidget(QWidget *parent)
 
 DbViewWidget::~DbViewWidget()
 {
+    // Disconnect all signals BEFORE child widgets start being destroyed.
+    // Without this, Qt's arbitrary child destruction order can trigger
+    // callbacks (e.g. selectionChanged, dataChanged) on half-destroyed objects,
+    // causing crashes when the user navigates away with unsaved edits.
+    if (m_tableList)
+        disconnect(m_tableList, nullptr, this, nullptr);
+    if (m_filterProxy)
+        disconnect(m_filterProxy, nullptr, this, nullptr);
+    if (m_fm)
+        m_fm->setActive(false);
+
     // Detach model chain BEFORE m_engine (unique_ptr) is destroyed.
     // m_engine's destructor deletes the QSqlTableModel, so the view
     // and proxy must not reference it at that point.
