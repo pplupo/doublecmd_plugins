@@ -108,7 +108,7 @@ void PluginStatusBar::setRowCount(int filtered, int total)
         m_rowLabel->setText(QStringLiteral(" Rows: %1 ").arg(total));
     else
         m_rowLabel->setText(QStringLiteral(" Rows: %1/%2 ").arg(filtered).arg(total));
-    // Don't rebuild — row count is always at the end
+    rebuild();
 }
 
 void PluginStatusBar::setExtraInfo(const QString &key, const QString &value)

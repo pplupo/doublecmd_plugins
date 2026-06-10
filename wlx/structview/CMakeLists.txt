@@ -16,18 +16,9 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(FetchContent)
 
 # ---------------------------------------------------------------------------
-# yaml-cpp — YAML 1.2 parser
+# yaml-cpp — YAML 1.2 parser (using system package)
 # ---------------------------------------------------------------------------
-FetchContent_Declare(yaml-cpp
-    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-    GIT_TAG        master
-    GIT_SHALLOW    TRUE
-)
-set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
-set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(yaml-cpp)
+find_package(yaml-cpp REQUIRED)
 
 # ---------------------------------------------------------------------------
 # toml++ — header-only TOML parser (v3.4.0)
