@@ -57,6 +57,7 @@ add_library(wayland_qt_base STATIC
     src/PluginStatusBar.cpp
     src/PluginSplitView.cpp
     src/ThemeManager.cpp
+    src/CrashLogger.cpp
 )
 
 target_include_directories(wayland_qt_base
@@ -75,4 +76,5 @@ target_link_libraries(wayland_qt_base
     PRIVATE
         enca_static
         ${GLIB2_LIBRARIES}
+        ${CMAKE_DL_LIBS}
 )
