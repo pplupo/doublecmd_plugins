@@ -1,0 +1,2 @@
+set(__QT_DEPLOY_TARGET_wayland_qt_base_FILE /home/pplupo/repos/plugins/wlx/wayland_qt_base/build/libwayland_qt_base.a)
+set(__QT_DEPLOY_TARGET_wayland_qt_base_TYPE STATIC_LIBRARY)

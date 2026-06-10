@@ -4,7 +4,7 @@
 #include <wayland_qt_base/PluginToolBar.h>
 #include <wayland_qt_base/EditableGridWidget.h>
 #include <wayland_qt_base/ScopedFindReplacePanel.h>
-#include <wayland_qt_base/FilterRowWidget.h>
+#include <wayland_qt_base/FilterableHeaderView.h>
 #include <wayland_qt_base/PluginStatusBar.h>
 #include <wayland_qt_base/PluginSplitView.h>
 #include <wayland_qt_base/ThemeManager.h>
@@ -58,12 +58,27 @@ void StructViewWidget::setupUi()
     m_filterProxy = new QSortFilterProxyModel(this);
     m_filterProxy->setSourceModel(m_gridModel);
     m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
+
+    // Install filterable header (must be before setModel)
+    m_filterHeader = new FilterableHeaderView(Qt::Horizontal, m_gridView);
+    m_filterHeader->setFilterEnabled(true);
+    m_filterHeader->setStretchLastSection(true);
+    m_gridView->setHorizontalHeader(m_filterHeader);
+
     m_gridView->setModel(m_filterProxy);
     m_gridView->setSortingEnabled(true);
     m_gridView->setAlternatingRowColors(true);
     m_gridView->setSelectionBehavior(QAbstractItemView::SelectItems);
     m_gridView->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_gridView->horizontalHeader()->setStretchLastSection(true);
+
+    connect(m_filterHeader, &FilterableHeaderView::filterChanged, this,
+            [this](int column, const QString &text) {
+        if (m_filterProxy) {
+            m_filterProxy->setFilterKeyColumn(column);
+            m_filterProxy->setFilterFixedString(text);
+            updateStatusBar();
+        }
+    });
 
     m_fm = new FocusManager(this, m_gridView, this);
     m_grid = new EditableGridWidget(m_gridView, GridMode::MemoryDocument, m_fm, this);
@@ -89,12 +104,8 @@ void StructViewWidget::setupUi()
     gridLayout->setContentsMargins(0, 0, 0, 0);
     gridLayout->setSpacing(0);
 
-    // Filter row
-    m_filterRow = new FilterRowWidget(m_gridView, this);
-    m_grid->setFilterRow(m_filterRow);
     m_grid->setThemeToggleEnabled(true);
 
-    gridLayout->addWidget(m_filterRow);
     gridLayout->addWidget(m_grid);
 
     m_tabWidget->addTab(gridContainer, QStringLiteral("Grid"));
@@ -122,13 +133,6 @@ void StructViewWidget::setupUi()
     connect(m_treeView->selectionModel(), &QItemSelectionModel::currentChanged,
             this, &StructViewWidget::onTreeNodeSelected);
 
-    // Connect filter row to proxy model
-    connect(m_filterRow, &FilterRowWidget::filterChanged, this,
-            [this](int column, const QString &text) {
-        m_filterProxy->setFilterKeyColumn(column);
-        m_filterProxy->setFilterFixedString(text);
-        updateStatusBar();
-    });
 }
 
 void StructViewWidget::setupToolbar()
@@ -280,8 +284,7 @@ void StructViewWidget::showNodeData(DocumentNode *node)
         }
     }
 
-    m_filterRow->syncToModel();
-    m_filterRow->clearFilters();
+    m_filterHeader->clearFilters();
 
     updateStatusBar();
 

@@ -16,7 +16,7 @@ class FocusManager;
 class PluginToolBar;
 class EditableGridWidget;
 class ScopedFindReplacePanel;
-class FilterRowWidget;
+class FilterableHeaderView;
 class PluginStatusBar;
 class PluginSplitView;
 }
@@ -28,7 +28,7 @@ class PluginSplitView;
 ///   │  PluginToolBar                             │
 ///   ├────────────┬───────────────────────────────┤
 ///   │ QTreeView  │ QTabWidget (Grid | Text)      │
-///   │ (document  │  ┌ FilterRowWidget            │
+///   │ (document  │  ┌ FilterableHeaderView       │
 ///   │  tree)     │  ├ QTableView (grid)          │
 ///   │            │  │                            │
 ///   ├────────────┴──┴────────────────────────────┤
@@ -81,7 +81,7 @@ private:
     QTableView *m_gridView;
     QStandardItemModel *m_gridModel;
     QSortFilterProxyModel *m_filterProxy;
-    QtWlPlugin::FilterRowWidget *m_filterRow;
+    QtWlPlugin::FilterableHeaderView *m_filterHeader;
     QPlainTextEdit *m_textView;
 
     DocumentNode *m_currentNode = nullptr;

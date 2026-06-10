@@ -1,0 +1,40 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/wayland_qt_base_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/wayland_qt_base_autogen.dir/ParseCache.txt"
+  "wayland_qt_base_autogen"
+  "CMakeFiles/wayland_qt_base.dir/src/CrashLogger.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/CrashLogger.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/EditableGridWidget.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/EditableGridWidget.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/EncodingUtils.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/EncodingUtils.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/FilterRowWidget.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/FilterRowWidget.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/FilterableHeaderView.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/FilterableHeaderView.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/FindReplacePanel.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/FindReplacePanel.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/FocusManager.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/FocusManager.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/PluginSplitView.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/PluginSplitView.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/PluginStatusBar.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/PluginStatusBar.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/PluginToolBar.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/PluginToolBar.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/ScopedFindReplacePanel.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/ScopedFindReplacePanel.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/src/ThemeManager.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/src/ThemeManager.cpp.o.d"
+  "CMakeFiles/wayland_qt_base.dir/wayland_qt_base_autogen/mocs_compilation.cpp.o"
+  "CMakeFiles/wayland_qt_base.dir/wayland_qt_base_autogen/mocs_compilation.cpp.o.d"
+  "libwayland_qt_base.a"
+  "libwayland_qt_base.pdb"
+  "wayland_qt_base_autogen/mocs_compilation.cpp"
+  "wayland_qt_base_autogen/timestamp"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/wayland_qt_base.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()
