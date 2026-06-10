@@ -36,10 +36,6 @@ DbViewWidget::~DbViewWidget()
     // Detach model chain BEFORE m_engine (unique_ptr) is destroyed.
     // m_engine's destructor deletes the QSqlTableModel, so the view
     // and proxy must not reference it at that point.
-    if (m_grid) {
-        delete m_grid;
-        m_grid = nullptr;
-    }
     if (m_tableView)
         m_tableView->setModel(nullptr);
     if (m_filterProxy)
@@ -294,36 +290,27 @@ void DbViewWidget::setupKvContextMenu()
 
 void DbViewWidget::rebuildGrid(const QString &tableName)
 {
-    // 1. Delete the old grid FIRST — it may hold references to the model
-    if (m_grid) {
-        QLayout *lay = layout();
-        if (lay) lay->removeWidget(m_grid);
-        delete m_grid;
-        m_grid = nullptr;
-    }
-
-    // 2. Detach the old model from the view BEFORE the engine deletes it.
-    //    modelForTable() destroys the previous QSqlTableModel internally,
-    //    so the view and proxy must not reference it at that point.
+    // Detach the old model from the view BEFORE the engine deletes it.
+    // modelForTable() destroys the previous QSqlTableModel internally,
+    // so the view and proxy must not reference it during that window.
+    //
+    // NOTE: Do NOT delete m_grid here. EditableGridWidget reparents the
+    // QTableView to itself, so deleting the grid would destroy the view too.
     m_tableView->setModel(nullptr);
     if (m_filterProxy)
         m_filterProxy->setSourceModel(nullptr);
 
-    // 3. Now safe to request new model (engine deletes old one internally)
+    // Now safe to request new model (engine deletes old one internally)
     QAbstractItemModel *model = m_engine->modelForTable(tableName);
     if (!model) return;
 
-    // 4. Set up new model chain
+    // Set up new model chain
     if (!m_filterProxy) {
         m_filterProxy = new QSortFilterProxyModel(this);
         m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
     }
     m_filterProxy->setSourceModel(model);
     m_tableView->setModel(m_filterProxy);
-
-    // 5. Create new grid
-    m_grid = new EditableGridWidget(
-        m_tableView, GridMode::LiveDatabase, m_fm, this);
 
     updateStatusBar();
 }
