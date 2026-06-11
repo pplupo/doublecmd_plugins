@@ -1,6 +1,7 @@
 #include "DbViewWidget.h"
 #include "DbEngine.h"
 #include "KeyValueModel.h"
+#include "DuckDbModel.h"
 
 #include <wayland_qt_base/FocusManager.h>
 #include <wayland_qt_base/PluginToolBar.h>
@@ -19,8 +20,25 @@
 #include <QFileDialog>
 #include <QFile>
 #include <QSortFilterProxyModel>
+#include <iostream>
 
 using namespace QtWlPlugin;
+
+namespace {
+class DbSortFilterProxyModel : public QSortFilterProxyModel {
+public:
+    using QSortFilterProxyModel::QSortFilterProxyModel;
+
+    void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override {
+        if (auto *duckModel = qobject_cast<DuckDbModel*>(sourceModel())) {
+            duckModel->sort(column, order);
+        } else {
+            QSortFilterProxyModel::sort(column, order);
+        }
+    }
+};
+}
+
 
 // ---------------------------------------------------------------------------
 // Construction / destruction
@@ -324,7 +342,7 @@ void DbViewWidget::rebuildGrid(const QString &tableName)
 
     // Set up new model chain
     if (!m_filterProxy) {
-        m_filterProxy = new QSortFilterProxyModel(this);
+        m_filterProxy = new DbSortFilterProxyModel(this);
         m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
     }
     m_filterProxy->setSourceModel(model);

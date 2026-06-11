@@ -3,6 +3,7 @@
 #include "duckdb.hpp"
 
 #include <QDebug>
+#include <iostream>
 
 DuckDbModel::DuckDbModel(duckdb::Connection *conn, const QString &tableName, QObject *parent)
     : QAbstractTableModel(parent)
