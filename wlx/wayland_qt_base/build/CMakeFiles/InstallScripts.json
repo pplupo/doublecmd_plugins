@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/pplupo/repos/plugins/wlx/wayland_qt_base/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

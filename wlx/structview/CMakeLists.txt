@@ -30,10 +30,10 @@ FetchContent_Declare(tomlplusplus
 )
 FetchContent_MakeAvailable(tomlplusplus)
 
-# Pull in the platform library (builds libwayland_qt_base.a)
+# Pull in the platform library (builds libwlxbase_wlqt.a)
 add_subdirectory(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../wayland_qt_base
-    ${CMAKE_CURRENT_BINARY_DIR}/wayland_qt_base
+    ${CMAKE_CURRENT_SOURCE_DIR}/../wlxbase_wlqt
+    ${CMAKE_CURRENT_BINARY_DIR}/wlxbase_wlqt
 )
 
 # NOTE: Headers with Q_OBJECT must be listed explicitly so AUTOMOC processes them.
@@ -61,7 +61,7 @@ target_include_directories(structview_qt6 PRIVATE
 )
 
 target_link_libraries(structview_qt6 PRIVATE
-    wayland_qt_base
+    wlxbase_wlqt
     Qt6::Widgets
     Qt6::Gui
     Qt6::Core

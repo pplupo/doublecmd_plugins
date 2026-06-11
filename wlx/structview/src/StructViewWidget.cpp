@@ -1,15 +1,15 @@
 #include "StructViewWidget.h"
 
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/PluginToolBar.h>
-#include <wayland_qt_base/EditableGridWidget.h>
-#include <wayland_qt_base/ScopedFindReplacePanel.h>
-#include <wayland_qt_base/FilterableHeaderView.h>
-#include <wayland_qt_base/PluginStatusBar.h>
-#include <wayland_qt_base/PluginSplitView.h>
-#include <wayland_qt_base/ThemeManager.h>
-#include <wayland_qt_base/EncodingUtils.h>
-#include <wayland_qt_base/SequentialRowProxyModel.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/PluginToolBar.h>
+#include <wlxbase_wlqt/EditableGridWidget.h>
+#include <wlxbase_wlqt/ScopedFindReplacePanel.h>
+#include <wlxbase_wlqt/FilterableHeaderView.h>
+#include <wlxbase_wlqt/PluginStatusBar.h>
+#include <wlxbase_wlqt/PluginSplitView.h>
+#include <wlxbase_wlqt/ThemeManager.h>
+#include <wlxbase_wlqt/EncodingUtils.h>
+#include <wlxbase_wlqt/SequentialRowProxyModel.h>
 
 #include <QVBoxLayout>
 #include <QHeaderView>
