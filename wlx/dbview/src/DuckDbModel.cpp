@@ -15,11 +15,23 @@ bool DuckDbModel::select()
 {
     beginResetModel();
     m_data.clear();
+    m_rowIds.clear();
     m_columnNames.clear();
     m_totalRows = 0;
     m_allFetched = false;
 
     try {
+        // Check if rowid is queryable
+        m_hasRowId = false;
+        try {
+            auto testResult = m_conn->Query("SELECT rowid FROM \"" + m_tableName.toStdString() + "\" LIMIT 0");
+            if (testResult && !testResult->HasError()) {
+                m_hasRowId = true;
+            }
+        } catch (...) {
+            m_hasRowId = false;
+        }
+
         // Get column names
         auto colResult = m_conn->Query(
             "SELECT column_name FROM information_schema.columns "
@@ -54,9 +66,18 @@ bool DuckDbModel::select()
 void DuckDbModel::loadChunk(int offset, int limit)
 {
     try {
-        std::string sql = "SELECT * FROM \"" + m_tableName.toStdString() + "\" "
-                         "LIMIT " + std::to_string(limit) + " "
-                         "OFFSET " + std::to_string(offset);
+        std::string orderBy;
+        if (m_sortColumn >= 0 && m_sortColumn < m_columnNames.size()) {
+            std::string colName = m_columnNames[m_sortColumn].toStdString();
+            std::string orderStr = (m_sortOrder == Qt::AscendingOrder) ? "ASC" : "DESC";
+            orderBy = "ORDER BY \"" + colName + "\" " + orderStr + " ";
+        }
+
+        std::string selectFields = m_hasRowId ? "rowid, *" : "*";
+        std::string sql = "SELECT " + selectFields + " FROM \"" + m_tableName.toStdString() + "\" " +
+                          orderBy +
+                          "LIMIT " + std::to_string(limit) + " " +
+                          "OFFSET " + std::to_string(offset);
 
         auto result = m_conn->Query(sql);
         if (!result || result->HasError())
@@ -64,9 +85,13 @@ void DuckDbModel::loadChunk(int offset, int limit)
 
         int fetchedCount = 0;
         for (auto &row : *result) {
+            if (m_hasRowId) {
+                m_rowIds.append(row.GetValue<int64_t>(0));
+            }
             QVector<QVariant> rowData;
             rowData.reserve(m_columnNames.size());
-            for (int c = 0; c < m_columnNames.size(); ++c) {
+            int startCol = m_hasRowId ? 1 : 0;
+            for (int c = startCol; c < startCol + m_columnNames.size(); ++c) {
                 try {
                     auto val = row.GetValue<duckdb::Value>(c);
                     if (val.IsNull()) {
@@ -127,12 +152,15 @@ Qt::ItemFlags DuckDbModel::flags(const QModelIndex &index) const
 {
     if (!index.isValid())
         return Qt::NoItemFlags;
-    return Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable;
+    Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+    if (m_hasRowId)
+        f |= Qt::ItemIsEditable;
+    return f;
 }
 
 bool DuckDbModel::setData(const QModelIndex &index, const QVariant &value, int role)
 {
-    if (role != Qt::EditRole || !index.isValid())
+    if (role != Qt::EditRole || !index.isValid() || !m_hasRowId)
         return false;
 
     if (index.row() >= m_data.size() || index.column() >= m_columnNames.size())
@@ -141,11 +169,12 @@ bool DuckDbModel::setData(const QModelIndex &index, const QVariant &value, int r
     try {
         std::string colName = m_columnNames[index.column()].toStdString();
         std::string newVal = value.toString().toStdString();
+        int64_t rowId = m_rowIds[index.row()];
 
         // Use rowid-based UPDATE
         std::string sql = "UPDATE \"" + m_tableName.toStdString() + "\" SET \"" +
             colName + "\" = '" + newVal + "' WHERE rowid = " +
-            std::to_string(index.row() + 1);
+            std::to_string(rowId);
 
         auto result = m_conn->Query(sql);
         if (result && !result->HasError()) {
@@ -156,6 +185,22 @@ bool DuckDbModel::setData(const QModelIndex &index, const QVariant &value, int r
     } catch (...) {}
 
     return false;
+}
+
+void DuckDbModel::sort(int column, Qt::SortOrder order)
+{
+    if (m_sortColumn == column && m_sortOrder == order)
+        return;
+
+    m_sortColumn = column;
+    m_sortOrder = order;
+
+    beginResetModel();
+    m_data.clear();
+    m_rowIds.clear();
+    m_allFetched = false;
+    loadChunk(0, kChunkSize);
+    endResetModel();
 }
 
 void DuckDbModel::fetchMore(const QModelIndex &parent)

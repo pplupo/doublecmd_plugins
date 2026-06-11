@@ -28,6 +28,8 @@ public:
     void fetchMore(const QModelIndex &parent) override;
     bool canFetchMore(const QModelIndex &parent) const override;
 
+    void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override;
+
     bool select();
 
 private:
@@ -39,5 +41,9 @@ private:
     QVector<QVector<QVariant>> m_data;
     int m_totalRows = 0;
     bool m_allFetched = false;
+    int m_sortColumn = -1;
+    Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
+    bool m_hasRowId = false;
+    QVector<int64_t> m_rowIds;
     static constexpr int kChunkSize = 1000;
 };
