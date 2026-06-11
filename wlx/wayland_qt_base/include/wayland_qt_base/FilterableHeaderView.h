@@ -26,6 +26,10 @@ public:
     void setFilterEnabled(bool enabled);
     bool isFilterEnabled() const;
 
+    /// Enable or disable the header labels (if false, the header collapses to only show the filters).
+    void setHeaderVisible(bool visible);
+    bool isHeaderVisible() const;
+
     /// Clear all filter inputs.
     void clearFilters();
 
@@ -40,6 +44,7 @@ signals:
 
 protected:
     void updateGeometries() override;
+    void paintSection(QPainter *painter, const QRect &rect, int logicalIndex) const override;
 
 private slots:
     void adjustInputPositions();
@@ -48,6 +53,7 @@ private:
     void rebuildInputs();
 
     bool m_filterEnabled = false;
+    bool m_headerVisible = true;
     int m_filterRowHeight = 24;
     QVector<QLineEdit*> m_inputs;
 };

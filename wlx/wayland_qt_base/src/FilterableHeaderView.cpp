@@ -2,6 +2,8 @@
 
 #include <QLineEdit>
 #include <QAbstractItemModel>
+#include <QPainter>
+#include <QStyleOptionHeader>
 
 namespace QtWlPlugin {
 
@@ -51,26 +53,61 @@ QString FilterableHeaderView::filterText(int column) const
     return {};
 }
 
+void FilterableHeaderView::setHeaderVisible(bool visible)
+{
+    if (m_headerVisible == visible)
+        return;
+    m_headerVisible = visible;
+    updateGeometries();
+    viewport()->update();
+}
+
+bool FilterableHeaderView::isHeaderVisible() const
+{
+    return m_headerVisible;
+}
+
 QSize FilterableHeaderView::sizeHint() const
 {
-    QSize s = QHeaderView::sizeHint();
-    if (m_filterEnabled)
-        s.setHeight(s.height() + m_filterRowHeight);
-    return s;
+    int h = 0;
+    if (m_headerVisible) {
+        h += QHeaderView::sizeHint().height();
+    }
+    if (m_filterEnabled) {
+        h += m_filterRowHeight;
+    }
+    return QSize(QHeaderView::sizeHint().width(), h);
 }
 
 void FilterableHeaderView::updateGeometries()
 {
-    // Give the viewport enough room so the filter inputs are visible
-    if (m_filterEnabled)
-        setViewportMargins(0, 0, 0, m_filterRowHeight);
-    else
-        setViewportMargins(0, 0, 0, 0);
+    int bottomMargin = 0;
+    if (m_filterEnabled && m_headerVisible) {
+        bottomMargin = m_filterRowHeight;
+    }
+    setViewportMargins(0, 0, 0, bottomMargin);
 
     QHeaderView::updateGeometries();
 
     if (m_filterEnabled)
         adjustInputPositions();
+}
+
+void FilterableHeaderView::paintSection(QPainter *painter, const QRect &rect, int logicalIndex) const
+{
+    if (!m_headerVisible) {
+        painter->save();
+        QStyleOptionHeader opt;
+        initStyleOption(&opt);
+        opt.section = logicalIndex;
+        opt.rect = rect;
+        opt.text.clear();
+        opt.icon = QIcon();
+        style()->drawControl(QStyle::CE_HeaderSection, &opt, painter, this);
+        painter->restore();
+        return;
+    }
+    QHeaderView::paintSection(painter, rect, logicalIndex);
 }
 
 void FilterableHeaderView::adjustInputPositions()
@@ -84,7 +121,7 @@ void FilterableHeaderView::adjustInputPositions()
     if (m_inputs.size() != cols)
         rebuildInputs();
 
-    int headerHeight = QHeaderView::sizeHint().height();
+    int labelHeight = m_headerVisible ? QHeaderView::sizeHint().height() : 0;
 
     for (int i = 0; i < m_inputs.size() && i < cols; ++i) {
         int logicalIdx = logicalIndex(i);
@@ -94,7 +131,7 @@ void FilterableHeaderView::adjustInputPositions()
         int xPos = sectionViewportPosition(logicalIdx);
         int w = sectionSize(logicalIdx);
 
-        m_inputs[logicalIdx]->setGeometry(xPos, headerHeight, w, m_filterRowHeight);
+        m_inputs[logicalIdx]->setGeometry(xPos, labelHeight, w, m_filterRowHeight);
         m_inputs[logicalIdx]->setVisible(!isSectionHidden(logicalIdx));
     }
 }

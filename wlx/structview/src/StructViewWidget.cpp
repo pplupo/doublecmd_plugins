@@ -301,11 +301,8 @@ void StructViewWidget::showNodeData(DocumentNode *node)
         isVirtual = true;
     }
 
-    if (isVirtual) {
-        m_gridView->horizontalHeader()->hide();
-    } else {
-        m_gridView->horizontalHeader()->show();
-    }
+    m_gridView->horizontalHeader()->show();
+    m_filterHeader->setHeaderVisible(!isVirtual);
 
     // Resize columns
     m_gridView->horizontalHeader()->setStretchLastSection(true);
