@@ -98,8 +98,8 @@ target_link_libraries(my_plugin PRIVATE wayland_qt_base)
 The public include directory (`include/`) is automatically added, so you can include headers as:
 
 ```cpp
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/PluginToolBar.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/PluginToolBar.h>
 // etc.
 ```
 
@@ -110,8 +110,8 @@ The public include directory (`include/`) is automatically added, so you can inc
 A minimal plugin using this library:
 
 ```cpp
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/PluginToolBar.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/PluginToolBar.h>
 
 class MyPluginWidget : public QWidget {
     Q_OBJECT
@@ -150,7 +150,7 @@ private:
 
 ### FocusManager
 
-**Header:** `<wayland_qt_base/FocusManager.h>`
+**Header:** `<wlxbase_wlqt/FocusManager.h>`
 
 The core framework that every plugin using this library needs. It solves the fundamental problem of a Qt widget embedded in a non-Qt host application: focus activation, deactivation, bounce prevention, and keyboard shortcut dispatch.
 
@@ -267,7 +267,7 @@ The event filter handles five event types:
 
 ### PluginToolBar
 
-**Header:** `<wayland_qt_base/PluginToolBar.h>`
+**Header:** `<wlxbase_wlqt/PluginToolBar.h>`
 
 A `QToolBar` subclass that integrates with `FocusManager` to prevent focus issues caused by toolbar interaction.
 
@@ -296,7 +296,7 @@ QAction *addToolAction(const QString &text,
 
 ### EditableGridWidget
 
-**Header:** `<wayland_qt_base/EditableGridWidget.h>`
+**Header:** `<wlxbase_wlqt/EditableGridWidget.h>`
 
 A `QWidget` wrapping a caller-injected `QTableView` with full editing capabilities, undo/redo support, drag-to-move, and context menus. **Format-agnostic** — it provides no file I/O, no parsing, no encoding detection.
 
@@ -408,7 +408,7 @@ These are automatically registered with `FocusManager` (all `WhenNoInput`):
 
 ### FindReplacePanel
 
-**Header:** `<wayland_qt_base/FindReplacePanel.h>`
+**Header:** `<wlxbase_wlqt/FindReplacePanel.h>`
 
 The **base class** for find & replace UI. Provides inputs, match options, and action buttons but has **no scope concept** — scope is entirely the consumer's responsibility.
 
@@ -471,7 +471,7 @@ protected:
 
 ### ScopedFindReplacePanel
 
-**Header:** `<wayland_qt_base/ScopedFindReplacePanel.h>`
+**Header:** `<wlxbase_wlqt/ScopedFindReplacePanel.h>`
 
 Extends `FindReplacePanel` with a configurable scope combo box. The consumer provides scope labels and reads the current selection in their signal handlers.
 
@@ -502,7 +502,7 @@ connect(panel, &QtWlPlugin::FindReplacePanel::findRequested,
 
 ### EncodingUtils
 
-**Header:** `<wayland_qt_base/EncodingUtils.h>`
+**Header:** `<wlxbase_wlqt/EncodingUtils.h>`
 
 Static utility class for encoding detection (via [enca](https://cihar.com/software/enca/)) and encoding conversion (via GLib's `g_convert_with_fallback`). No instance needed — all methods are static.
 
@@ -579,9 +579,9 @@ Use `"__"` or an empty string to let enca auto-detect from the system locale.
 ### Plugin with toolbar + find/replace (no grid)
 
 ```cpp
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/PluginToolBar.h>
-#include <wayland_qt_base/ScopedFindReplacePanel.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/PluginToolBar.h>
+#include <wlxbase_wlqt/ScopedFindReplacePanel.h>
 
 class TextViewerWidget : public QWidget {
     Q_OBJECT
@@ -624,9 +624,9 @@ private:
 ### Plugin with editable grid + undo (QTableWidget)
 
 ```cpp
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/PluginToolBar.h>
-#include <wayland_qt_base/EditableGridWidget.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/PluginToolBar.h>
+#include <wlxbase_wlqt/EditableGridWidget.h>
 #include <QTableWidget>
 
 class DataEditorWidget : public QWidget {
@@ -680,9 +680,9 @@ private:
 ### Plugin with editable grid + SQL model (QTableView)
 
 ```cpp
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/PluginToolBar.h>
-#include <wayland_qt_base/EditableGridWidget.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/PluginToolBar.h>
+#include <wlxbase_wlqt/EditableGridWidget.h>
 #include <QTableView>
 #include <QSqlTableModel>
 
@@ -720,7 +720,7 @@ private:
 ### Encoding detection on file load
 
 ```cpp
-#include <wayland_qt_base/EncodingUtils.h>
+#include <wlxbase_wlqt/EncodingUtils.h>
 
 void MyPlugin::loadFile(const QString &path) {
     QFile file(path);
@@ -789,11 +789,11 @@ The encoding detection library [enca](https://cihar.com/software/enca/) is downl
 ## Directory Layout
 
 ```
-wlx/wayland_qt_base/
+wlx/wlxbase_wlqt/
 ├── CMakeLists.txt
 ├── README.md
 ├── include/
-│   └── wayland_qt_base/
+│   └── wlxbase_wlqt/
 │       ├── EditableGridWidget.h
 │       ├── EncodingUtils.h
 │       ├── FindReplacePanel.h

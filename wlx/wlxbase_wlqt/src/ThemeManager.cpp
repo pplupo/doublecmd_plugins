@@ -1,4 +1,4 @@
-#include <wayland_qt_base/ThemeManager.h>
+#include <wlxbase_wlqt/ThemeManager.h>
 
 #include <QSettings>
 

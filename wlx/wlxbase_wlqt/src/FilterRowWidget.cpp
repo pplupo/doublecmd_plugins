@@ -1,4 +1,4 @@
-#include <wayland_qt_base/FilterRowWidget.h>
+#include <wlxbase_wlqt/FilterRowWidget.h>
 
 #include <QLineEdit>
 #include <QHBoxLayout>

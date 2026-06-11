@@ -1,6 +1,6 @@
 #pragma once
 
-#include <wayland_qt_base/FindReplacePanel.h>
+#include <wlxbase_wlqt/FindReplacePanel.h>
 
 class QComboBox;
 

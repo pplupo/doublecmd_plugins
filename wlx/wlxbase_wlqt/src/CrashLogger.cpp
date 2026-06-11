@@ -1,4 +1,4 @@
-#include <wayland_qt_base/CrashLogger.h>
+#include <wlxbase_wlqt/CrashLogger.h>
 
 #include <cstdio>
 #include <cstring>

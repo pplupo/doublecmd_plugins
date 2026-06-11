@@ -1,4 +1,4 @@
-#include <wayland_qt_base/PluginSplitView.h>
+#include <wlxbase_wlqt/PluginSplitView.h>
 
 namespace QtWlPlugin {
 

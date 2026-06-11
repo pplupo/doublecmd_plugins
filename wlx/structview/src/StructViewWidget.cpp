@@ -1,14 +1,15 @@
 #include "StructViewWidget.h"
 
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/PluginToolBar.h>
-#include <wayland_qt_base/EditableGridWidget.h>
-#include <wayland_qt_base/ScopedFindReplacePanel.h>
-#include <wayland_qt_base/FilterRowWidget.h>
-#include <wayland_qt_base/PluginStatusBar.h>
-#include <wayland_qt_base/PluginSplitView.h>
-#include <wayland_qt_base/ThemeManager.h>
-#include <wayland_qt_base/EncodingUtils.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/PluginToolBar.h>
+#include <wlxbase_wlqt/EditableGridWidget.h>
+#include <wlxbase_wlqt/ScopedFindReplacePanel.h>
+#include <wlxbase_wlqt/FilterableHeaderView.h>
+#include <wlxbase_wlqt/PluginStatusBar.h>
+#include <wlxbase_wlqt/PluginSplitView.h>
+#include <wlxbase_wlqt/ThemeManager.h>
+#include <wlxbase_wlqt/EncodingUtils.h>
+#include <wlxbase_wlqt/SequentialRowProxyModel.h>
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -29,13 +30,59 @@ StructViewWidget::StructViewWidget(QWidget *parent)
     ThemeManager::applyTheme(this, ThemeManager::currentTheme());
 }
 
-StructViewWidget::~StructViewWidget() = default;
+StructViewWidget::~StructViewWidget()
+{
+    // Disconnect all signals BEFORE child widgets start being destroyed.
+    // Without this, Qt's arbitrary child destruction order can trigger
+    // callbacks (e.g. selectionChanged, dataChanged) on half-destroyed objects,
+    // causing crashes when the user navigates away with unsaved edits.
+    if (m_treeView && m_treeView->selectionModel())
+        disconnect(m_treeView->selectionModel(), nullptr, this, nullptr);
+    if (m_gridModel)
+        disconnect(m_gridModel, nullptr, this, nullptr);
+    if (m_filterProxy)
+        disconnect(m_filterProxy, nullptr, this, nullptr);
+    if (m_fm)
+        m_fm->setActive(false);
+}
 
 void StructViewWidget::setupUi()
 {
     auto *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
+
+    // --- Create the primary view and FocusManager FIRST ---
+    // (setupToolbar needs m_fm for shortcut registration)
+    m_gridView = new QTableView;
+    m_gridModel = new QStandardItemModel(this);
+    m_filterProxy = new SequentialRowProxyModel(this);
+    m_filterProxy->setSourceModel(m_gridModel);
+    m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
+
+    // Install filterable header (must be before setModel)
+    m_filterHeader = new FilterableHeaderView(Qt::Horizontal, m_gridView);
+    m_filterHeader->setFilterEnabled(true);
+    m_filterHeader->setStretchLastSection(true);
+    m_gridView->setHorizontalHeader(m_filterHeader);
+
+    m_gridView->setModel(m_filterProxy);
+    m_gridView->setSortingEnabled(true);
+    m_gridView->setAlternatingRowColors(true);
+    m_gridView->setSelectionBehavior(QAbstractItemView::SelectItems);
+    m_gridView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
+    connect(m_filterHeader, &FilterableHeaderView::filterChanged, this,
+            [this](int column, const QString &text) {
+        if (m_filterProxy) {
+            m_filterProxy->setFilterKeyColumn(column);
+            m_filterProxy->setFilterFixedString(text);
+            updateStatusBar();
+        }
+    });
+
+    m_fm = new FocusManager(this, m_gridView, this);
+    m_grid = new EditableGridWidget(m_gridView, GridMode::MemoryDocument, m_fm, this);
 
     // --- Toolbar ---
     setupToolbar();
@@ -58,27 +105,8 @@ void StructViewWidget::setupUi()
     gridLayout->setContentsMargins(0, 0, 0, 0);
     gridLayout->setSpacing(0);
 
-    m_gridView = new QTableView;
-    m_gridModel = new QStandardItemModel(this);
-    m_filterProxy = new QSortFilterProxyModel(this);
-    m_filterProxy->setSourceModel(m_gridModel);
-    m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-    m_gridView->setModel(m_filterProxy);
-    m_gridView->setSortingEnabled(true);
-    m_gridView->setAlternatingRowColors(true);
-    m_gridView->setSelectionBehavior(QAbstractItemView::SelectItems);
-    m_gridView->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_gridView->horizontalHeader()->setStretchLastSection(true);
-
-    m_fm = new FocusManager(this, m_gridView, this);
-    m_grid = new EditableGridWidget(m_gridView, GridMode::MemoryDocument, m_fm, this);
-
-    // Filter row
-    m_filterRow = new FilterRowWidget(m_gridView, this);
-    m_grid->setFilterRow(m_filterRow);
     m_grid->setThemeToggleEnabled(true);
 
-    gridLayout->addWidget(m_filterRow);
     gridLayout->addWidget(m_grid);
 
     m_tabWidget->addTab(gridContainer, QStringLiteral("Grid"));
@@ -106,13 +134,6 @@ void StructViewWidget::setupUi()
     connect(m_treeView->selectionModel(), &QItemSelectionModel::currentChanged,
             this, &StructViewWidget::onTreeNodeSelected);
 
-    // Connect filter row to proxy model
-    connect(m_filterRow, &FilterRowWidget::filterChanged, this,
-            [this](int column, const QString &text) {
-        m_filterProxy->setFilterKeyColumn(column);
-        m_filterProxy->setFilterFixedString(text);
-        updateStatusBar();
-    });
 }
 
 void StructViewWidget::setupToolbar()
@@ -264,10 +285,24 @@ void StructViewWidget::showNodeData(DocumentNode *node)
         }
     }
 
-    m_filterRow->syncToModel();
-    m_filterRow->clearFilters();
+    m_filterHeader->clearFilters();
 
     updateStatusBar();
+
+    // Hide header if virtual (e.g. Key/Value, Name/Value, or Value only)
+    bool isVirtual = false;
+    if (node->columnNames.isEmpty()) {
+        isVirtual = true;
+    } else if (node->columnNames.size() == 1 && node->columnNames[0] == QStringLiteral("Value")) {
+        isVirtual = true;
+    } else if (node->columnNames.size() == 2 &&
+               (node->columnNames[0] == QStringLiteral("Key") || node->columnNames[0] == QStringLiteral("Name")) &&
+               node->columnNames[1] == QStringLiteral("Value")) {
+        isVirtual = true;
+    }
+
+    m_gridView->horizontalHeader()->show();
+    m_filterHeader->setHeaderVisible(!isVirtual);
 
     // Resize columns
     m_gridView->horizontalHeader()->setStretchLastSection(true);

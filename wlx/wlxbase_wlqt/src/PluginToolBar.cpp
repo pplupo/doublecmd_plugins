@@ -1,5 +1,5 @@
-#include <wayland_qt_base/PluginToolBar.h>
-#include <wayland_qt_base/FocusManager.h>
+#include <wlxbase_wlqt/PluginToolBar.h>
+#include <wlxbase_wlqt/FocusManager.h>
 
 #include <QAction>
 #include <QActionEvent>

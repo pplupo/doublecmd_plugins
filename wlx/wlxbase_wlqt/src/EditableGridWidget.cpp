@@ -1,7 +1,7 @@
-#include <wayland_qt_base/EditableGridWidget.h>
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/FilterRowWidget.h>
-#include <wayland_qt_base/ThemeManager.h>
+#include <wlxbase_wlqt/EditableGridWidget.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/FilterRowWidget.h>
+#include <wlxbase_wlqt/ThemeManager.h>
 
 #include <QApplication>
 #include <QClipboard>

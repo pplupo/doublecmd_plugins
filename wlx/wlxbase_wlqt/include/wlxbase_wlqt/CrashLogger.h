@@ -5,7 +5,7 @@
 ///
 /// Usage in wlx_entry.cpp:
 /// @code
-///   #include <wayland_qt_base/CrashLogger.h>
+///   #include <wlxbase_wlqt/CrashLogger.h>
 ///
 ///   HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
 ///   {

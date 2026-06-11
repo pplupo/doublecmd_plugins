@@ -1,4 +1,4 @@
-#include <wayland_qt_base/EncodingUtils.h>
+#include <wlxbase_wlqt/EncodingUtils.h>
 
 #include <QFile>
 #include <locale.h>

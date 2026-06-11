@@ -1,5 +1,5 @@
-#include <wayland_qt_base/FindReplacePanel.h>
-#include <wayland_qt_base/FocusManager.h>
+#include <wlxbase_wlqt/FindReplacePanel.h>
+#include <wlxbase_wlqt/FocusManager.h>
 
 #include <QLineEdit>
 #include <QCheckBox>

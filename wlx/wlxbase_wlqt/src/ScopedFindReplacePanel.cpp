@@ -1,5 +1,5 @@
-#include <wayland_qt_base/ScopedFindReplacePanel.h>
-#include <wayland_qt_base/FocusManager.h>
+#include <wlxbase_wlqt/ScopedFindReplacePanel.h>
+#include <wlxbase_wlqt/FocusManager.h>
 
 #include <QComboBox>
 #include <QLabel>

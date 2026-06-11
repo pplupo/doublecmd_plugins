@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(wayland_qt_base LANGUAGES C CXX)
+project(wlxbase_wlqt LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,11 +41,11 @@ set_target_properties(enca_static PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
-# wayland_qt_base static library
+# wlxbase_wlqt static library
 # ---------------------------------------------------------------------------
-file(GLOB BASE_HEADERS "include/wayland_qt_base/*.h")
+file(GLOB BASE_HEADERS "include/wlxbase_wlqt/*.h")
 
-add_library(wayland_qt_base STATIC
+add_library(wlxbase_wlqt STATIC
     ${BASE_HEADERS}
     src/FocusManager.cpp
     src/PluginToolBar.cpp
@@ -59,9 +59,10 @@ add_library(wayland_qt_base STATIC
     src/PluginSplitView.cpp
     src/ThemeManager.cpp
     src/CrashLogger.cpp
+    src/SequentialRowProxyModel.cpp
 )
 
-target_include_directories(wayland_qt_base
+target_include_directories(wlxbase_wlqt
     PUBLIC
         include
     PRIVATE
@@ -69,7 +70,7 @@ target_include_directories(wayland_qt_base
         ${GLIB2_INCLUDE_DIRS}
 )
 
-target_link_libraries(wayland_qt_base
+target_link_libraries(wlxbase_wlqt
     PUBLIC
         Qt6::Core
         Qt6::Gui
