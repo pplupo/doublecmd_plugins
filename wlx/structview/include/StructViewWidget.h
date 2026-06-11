@@ -19,6 +19,7 @@ class ScopedFindReplacePanel;
 class FilterableHeaderView;
 class PluginStatusBar;
 class PluginSplitView;
+class SequentialRowProxyModel;
 }
 
 /// Main plugin widget for structured text file viewing/editing.
@@ -80,7 +81,7 @@ private:
     QtWlPlugin::EditableGridWidget *m_grid;
     QTableView *m_gridView;
     QStandardItemModel *m_gridModel;
-    QSortFilterProxyModel *m_filterProxy;
+    QtWlPlugin::SequentialRowProxyModel *m_filterProxy;
     QtWlPlugin::FilterableHeaderView *m_filterHeader;
     QPlainTextEdit *m_textView;
 

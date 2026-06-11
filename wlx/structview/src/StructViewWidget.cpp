@@ -9,6 +9,7 @@
 #include <wayland_qt_base/PluginSplitView.h>
 #include <wayland_qt_base/ThemeManager.h>
 #include <wayland_qt_base/EncodingUtils.h>
+#include <wayland_qt_base/SequentialRowProxyModel.h>
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -55,7 +56,7 @@ void StructViewWidget::setupUi()
     // (setupToolbar needs m_fm for shortcut registration)
     m_gridView = new QTableView;
     m_gridModel = new QStandardItemModel(this);
-    m_filterProxy = new QSortFilterProxyModel(this);
+    m_filterProxy = new SequentialRowProxyModel(this);
     m_filterProxy->setSourceModel(m_gridModel);
     m_filterProxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
@@ -287,6 +288,24 @@ void StructViewWidget::showNodeData(DocumentNode *node)
     m_filterHeader->clearFilters();
 
     updateStatusBar();
+
+    // Hide header if virtual (e.g. Key/Value, Name/Value, or Value only)
+    bool isVirtual = false;
+    if (node->columnNames.isEmpty()) {
+        isVirtual = true;
+    } else if (node->columnNames.size() == 1 && node->columnNames[0] == QStringLiteral("Value")) {
+        isVirtual = true;
+    } else if (node->columnNames.size() == 2 &&
+               (node->columnNames[0] == QStringLiteral("Key") || node->columnNames[0] == QStringLiteral("Name")) &&
+               node->columnNames[1] == QStringLiteral("Value")) {
+        isVirtual = true;
+    }
+
+    if (isVirtual) {
+        m_gridView->horizontalHeader()->hide();
+    } else {
+        m_gridView->horizontalHeader()->show();
+    }
 
     // Resize columns
     m_gridView->horizontalHeader()->setStretchLastSection(true);

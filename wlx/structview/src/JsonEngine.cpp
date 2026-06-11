@@ -9,7 +9,7 @@
 ///
 /// - Objects → child nodes for nested objects/arrays, grid rows for scalars
 /// - Arrays of objects with shared keys → tabular grid on parent
-/// - Arrays of primitives → Index | Value grid
+/// - Arrays of primitives → 1-column Value grid
 class JsonEngine : public TextFormatEngine {
 public:
     bool parse(const QByteArray &data) override;
@@ -159,10 +159,10 @@ void JsonEngine::buildTree(DocumentNode *node, const QJsonValue &value)
             }
 
             if (allPrimitive) {
-                // Index | Value grid
-                node->columnNames = {QStringLiteral("Index"), QStringLiteral("Value")};
+                // Value grid
+                node->columnNames = {QStringLiteral("Value")};
                 for (int i = 0; i < arr.size(); ++i) {
-                    node->rows.append({QVariant(i), QVariant(valueToString(arr[i]))});
+                    node->rows.append({QVariant(valueToString(arr[i]))});
                 }
             } else {
                 // Mixed: child nodes for each element
@@ -259,10 +259,19 @@ QJsonValue JsonEngine::treeToJson(const DocumentNode *node) const
     }
 
     // Leaf node with tabular grid → array of objects
-    if (node->columnNames.size() > 2
-        || (node->columnNames.size() == 2
-            && node->columnNames[0] != QStringLiteral("Key")
-            && node->columnNames[0] != QStringLiteral("Index"))) {
+    bool isTabular = false;
+    if (node->columnNames.size() > 2) {
+        isTabular = true;
+    } else if (node->columnNames.size() == 2
+               && node->columnNames[0] != QStringLiteral("Key")
+               && node->columnNames[0] != QStringLiteral("Index")) {
+        isTabular = true;
+    } else if (node->columnNames.size() == 1
+               && node->columnNames[0] != QStringLiteral("Value")) {
+        isTabular = true;
+    }
+
+    if (isTabular) {
         QJsonArray arr;
         for (const auto &row : node->rows) {
             QJsonObject obj;
@@ -309,12 +318,12 @@ QJsonValue JsonEngine::treeToJson(const DocumentNode *node) const
         return obj;
     }
 
-    // Index | Value → array
-    if (node->columnNames.size() == 2
-        && node->columnNames[0] == QStringLiteral("Index")) {
+    // Value only → array
+    if (node->columnNames.size() == 1
+        && node->columnNames[0] == QStringLiteral("Value")) {
         QJsonArray arr;
         for (const auto &row : node->rows) {
-            QString val = row[1].toString();
+            QString val = row[0].toString();
             if (val == QStringLiteral("null"))
                 arr.append(QJsonValue::Null);
             else if (val == QStringLiteral("true"))

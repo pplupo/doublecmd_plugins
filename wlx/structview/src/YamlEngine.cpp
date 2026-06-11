@@ -105,12 +105,12 @@ void YamlEngine::buildTree(DocumentNode *node, const YAML::Node &yamlNode)
             }
 
             if (allScalar) {
-                node->columnNames = {QStringLiteral("Index"), QStringLiteral("Value")};
+                node->columnNames = {QStringLiteral("Value")};
                 for (size_t i = 0; i < yamlNode.size(); ++i) {
                     QString val = yamlNode[i].IsNull()
                         ? QStringLiteral("null")
                         : QString::fromStdString(yamlNode[i].as<std::string>());
-                    node->rows.append({QVariant(static_cast<int>(i)), QVariant(val)});
+                    node->rows.append({QVariant(val)});
                 }
             } else {
                 // Mixed: numbered children
@@ -169,12 +169,12 @@ YAML::Node YamlEngine::treeToYaml(const DocumentNode *node) const
         return map;
     }
 
-    // Index | Value → sequence
-    if (node->columnNames.size() == 2
-        && node->columnNames[0] == QStringLiteral("Index")) {
+    // Value only → sequence
+    if (node->columnNames.size() == 1
+        && node->columnNames[0] == QStringLiteral("Value")) {
         YAML::Node seq(YAML::NodeType::Sequence);
         for (const auto &row : node->rows) {
-            seq.push_back(row[1].toString().toStdString());
+            seq.push_back(row[0].toString().toStdString());
         }
         return seq;
     }

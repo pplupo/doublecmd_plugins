@@ -59,6 +59,7 @@ add_library(wayland_qt_base STATIC
     src/PluginSplitView.cpp
     src/ThemeManager.cpp
     src/CrashLogger.cpp
+    src/SequentialRowProxyModel.cpp
 )
 
 target_include_directories(wayland_qt_base
