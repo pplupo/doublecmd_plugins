@@ -77,6 +77,8 @@ void FocusManager::setActive(bool active)
     if (!active) {
         m_activeInput = nullptr;
         m_pluginRoot->clearFocus();
+        if (m_pluginRoot->parentWidget())
+            m_pluginRoot->parentWidget()->setFocus(Qt::OtherFocusReason);
         emit deactivated();
     } else {
         emit activated();
