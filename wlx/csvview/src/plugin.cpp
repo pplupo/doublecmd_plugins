@@ -654,7 +654,7 @@ bool CsvViewerWidget::loadFile(const QString& filePath)
 		QString msg = isCsvExt
 			? "This .csv file appears to use tab separators instead of commas."
 			: "This .tsv file appears to use comma separators instead of tabs.";
-		QMessageBox box(QMessageBox::Warning, "Separator Mismatch", msg, QMessageBox::NoButton, this);
+		QMessageBox box(QMessageBox::Warning, "Separator Mismatch", msg, QMessageBox::NoButton, nullptr);
 		QPushButton *btnIgnore = box.addButton("Ignore", QMessageBox::RejectRole);
 		QPushButton *btnFixSep = box.addButton("Fix Separator", QMessageBox::AcceptRole);
 		QPushButton *btnRename = box.addButton("Rename Extension", QMessageBox::AcceptRole);
@@ -766,7 +766,7 @@ void CsvViewerWidget::onSaveAs()
 	QString tsvFilter = "TSV - Tab Separated (*.tsv)";
 	QString selectedFilter;
 	QString filter = (m_separator == '\t') ? (tsvFilter + ";;" + csvFilter) : (csvFilter + ";;" + tsvFilter);
-	QString path = QFileDialog::getSaveFileName(this, "Save As", m_currentFile, filter, &selectedFilter);
+	QString path = QFileDialog::getSaveFileName(nullptr, "Save As", m_currentFile, filter, &selectedFilter);
 	if (!path.isEmpty()) {
 		char oldSep = m_separator;
 		if (selectedFilter == csvFilter)
@@ -791,7 +791,7 @@ void CsvViewerWidget::saveFile(const QString& filePath)
 {
 	QFile file(filePath);
 	if (!file.open(QFile::WriteOnly | QFile::Text)) {
-		QMessageBox::warning(this, "Error", "Could not open file for writing.");
+		QMessageBox::warning(nullptr, "Error", "Could not open file for writing.");
 		return;
 	}
 
@@ -1211,7 +1211,7 @@ int DCPCALL ListSearchText(HWND ListWin, char* SearchString, int SearchParameter
 			return LISTPLUGIN_OK;
 		}
 	}
-	QMessageBox::information(widget, "", QString::asprintf(_("\"%s\" not found!"), SearchString));
+	QMessageBox::information(nullptr, "", QString::asprintf(_("\"%s\" not found!"), SearchString));
 	return LISTPLUGIN_ERROR;
 }
 
