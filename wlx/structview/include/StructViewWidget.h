@@ -21,6 +21,7 @@ class PluginStatusBar;
 class PluginSplitView;
 class SequentialRowProxyModel;
 }
+class QUndoStack;
 
 /// Main plugin widget for structured text file viewing/editing.
 ///
@@ -52,6 +53,10 @@ public:
 
 private slots:
     void onSave();
+    void onSaveAs();
+    void onReload();
+    void onPrint();
+    void onOpenExternally();
     void onFind(bool forward);
     void onTreeNodeSelected(const QModelIndex &current, const QModelIndex &previous);
 
@@ -63,6 +68,8 @@ private:
     void populateTreeNode(QStandardItem *parentItem, DocumentNode *node);
     void showNodeData(DocumentNode *node);
     void updateStatusBar();
+    void updateTextTab();
+    void syncGridToNode();
 
     QString m_filepath;
     std::unique_ptr<TextFormatEngine> m_engine;
@@ -70,6 +77,7 @@ private:
     QtWlPlugin::PluginToolBar *m_toolbar;
     QtWlPlugin::ScopedFindReplacePanel *m_findReplace;
     QtWlPlugin::PluginStatusBar *m_statusBar;
+    QAction *m_actShowText = nullptr;
 
     // Left panel: document tree
     QtWlPlugin::PluginSplitView *m_splitView;
@@ -86,4 +94,5 @@ private:
     QPlainTextEdit *m_textView;
 
     DocumentNode *m_currentNode = nullptr;
+    QUndoStack *m_undoStack = nullptr;
 };

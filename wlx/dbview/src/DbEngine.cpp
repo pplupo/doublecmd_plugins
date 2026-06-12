@@ -22,9 +22,20 @@ std::unique_ptr<DbEngine> DbEngine::createForFile(const QString &filepath)
     if (ext == QStringLiteral("sqlite") || ext == QStringLiteral("sqlite3")
         || ext == QStringLiteral("db") || ext == QStringLiteral("db3")) {
         auto engine = std::make_unique<SqliteEngine>();
-        if (engine->open(filepath))
-            return engine;
+        if (engine->open(filepath)) {
+            if (!engine->tableNames().isEmpty() || !engine->viewNames().isEmpty())
+                return engine;
+        }
         // Fallback: might be a DuckDB file with .db extension
+        auto duckEngine = std::make_unique<DuckDbEngine>();
+        if (duckEngine->open(filepath)) {
+            if (!duckEngine->tableNames().isEmpty() || !duckEngine->viewNames().isEmpty())
+                return duckEngine;
+        }
+        // If neither has tables, return SQLite anyway as default
+        auto fallbackEngine = std::make_unique<SqliteEngine>();
+        if (fallbackEngine->open(filepath))
+            return fallbackEngine;
     }
 
     // DuckDB

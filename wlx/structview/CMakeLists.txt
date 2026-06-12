@@ -8,7 +8,7 @@ set(CMAKE_AUTOMOC ON)
 # Allow older cmake_minimum_required in FetchContent dependencies
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Xml)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Xml PrintSupport)
 # Ensure the platform static library is built with -fPIC
 # (required because we link it into a shared .wlx library)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -66,6 +66,7 @@ target_link_libraries(structview_qt6 PRIVATE
     Qt6::Gui
     Qt6::Core
     Qt6::Xml
+    Qt6::PrintSupport
     yaml-cpp
     tomlplusplus::tomlplusplus
 )

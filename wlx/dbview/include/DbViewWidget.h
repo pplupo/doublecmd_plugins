@@ -20,6 +20,7 @@ class PluginSplitView;
 class DbEngine;
 class KeyValueModel;
 class QSortFilterProxyModel;
+class QUndoStack;
 
 /// Main plugin widget for database file viewing/editing.
 ///
@@ -63,7 +64,8 @@ private:
     void rebuildGrid(const QString &tableName);
     void updateStatusBar();
     void populateTableList();
-    void setupKvContextMenu();
+    void setupGridContextMenu();
+    void openValueInspector(const QModelIndex &index);
 
     std::unique_ptr<DbEngine> m_engine;
     QtWlPlugin::FocusManager *m_fm = nullptr;
@@ -79,4 +81,6 @@ private:
     QAction *m_actSubmit = nullptr;
     QAction *m_actRevert = nullptr;
     QSortFilterProxyModel *m_filterProxy = nullptr;
+    QUndoStack *m_undoStack = nullptr;
+    QString m_filepath;
 };

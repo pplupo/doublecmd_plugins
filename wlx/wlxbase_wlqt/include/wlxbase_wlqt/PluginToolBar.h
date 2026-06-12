@@ -7,6 +7,17 @@ namespace QtWlPlugin {
 
 class FocusManager;
 
+enum class ButtonDisplay {
+    IconOnly,
+    TextOnly,
+    Both
+};
+
+enum class IconMode {
+    System,
+    Unicode
+};
+
 /// A QToolBar subclass that automatically integrates with FocusManager.
 ///
 /// All action widgets are set to Qt::NoFocus, and focus is restored to the
@@ -20,7 +31,11 @@ public:
     /// Add an action and optionally register a shortcut through FocusManager.
     QAction *addToolAction(const QString &text,
                            const QKeySequence &shortcut = {},
-                           int ctx = 0 /* FocusManager::WhenNoInput */);
+                           int ctx = 0 /* FocusManager::WhenNoInput */,
+                           const QString &systemIconName = {},
+                           const QString &unicodeIcon = {},
+                           ButtonDisplay display = ButtonDisplay::Both,
+                           IconMode iconMode = IconMode::System);
 
 protected:
     void actionEvent(QActionEvent *event) override;

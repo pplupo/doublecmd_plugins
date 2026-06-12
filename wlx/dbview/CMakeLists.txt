@@ -16,10 +16,10 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Sql)
 # Ensure the platform static library is built with -fPIC
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Pull in the platform library (builds libwayland_qt_base.a)
+# Pull in the platform library (builds libwlxbase_wlqt.a)
 add_subdirectory(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../wayland_qt_base
-    ${CMAKE_CURRENT_BINARY_DIR}/wayland_qt_base
+    ${CMAKE_CURRENT_SOURCE_DIR}/../wlxbase_wlqt
+    ${CMAKE_CURRENT_BINARY_DIR}/wlxbase_wlqt
 )
 
 # ---------------------------------------------------------------------------
@@ -124,7 +124,7 @@ if(ENABLE_ROCKSDB)
 endif()
 
 set(DBVIEW_LINK_LIBS
-    wayland_qt_base
+    wlxbase_wlqt
     Qt6::Widgets
     Qt6::Gui
     Qt6::Core

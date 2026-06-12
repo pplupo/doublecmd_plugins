@@ -4,9 +4,9 @@
 #include <QTableView>
 #include <QAbstractItemModel>
 
-#include <wayland_qt_base/FocusManager.h>
-#include <wayland_qt_base/EditableGridWidget.h>
-#include <wayland_qt_base/CrashLogger.h>
+#include <wlxbase_wlqt/FocusManager.h>
+#include <wlxbase_wlqt/EditableGridWidget.h>
+#include <wlxbase_wlqt/CrashLogger.h>
 
 #include "wlxplugin.h"
 #include "DbViewWidget.h"

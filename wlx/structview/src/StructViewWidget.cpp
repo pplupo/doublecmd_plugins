@@ -11,6 +11,22 @@
 #include <wlxbase_wlqt/EncodingUtils.h>
 #include <wlxbase_wlqt/SequentialRowProxyModel.h>
 
+#include <QUndoStack>
+#include <QUndoCommand>
+#include <QStyledItemDelegate>
+#include <QPrinter>
+#include <QPrintDialog>
+#include <QTextDocument>
+#include <QDesktopServices>
+#include <QIcon>
+#include <QStyle>
+#include <QUrl>
+#include <QFileDialog>
+#include <QCborValue>
+#include <QJsonDocument>
+#include <QJsonValue>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <QVBoxLayout>
 #include <QHeaderView>
 #include <QTableView>
@@ -20,10 +36,96 @@
 
 using namespace QtWlPlugin;
 
+namespace {
+class StructEditCommand : public QUndoCommand {
+public:
+    StructEditCommand(QStandardItemModel *model,
+                      int rowId,
+                      int col,
+                      const QVariant &oldVal,
+                      const QVariant &newVal)
+        : m_model(model), m_rowId(rowId), m_col(col)
+        , m_oldVal(oldVal), m_newVal(newVal)
+    {
+        setText(QStringLiteral("Edit cell"));
+    }
+
+    void undo() override {
+        applyValue(m_oldVal);
+    }
+
+    void redo() override {
+        applyValue(m_newVal);
+    }
+
+private:
+    void applyValue(const QVariant &value) {
+        int visualRow = -1;
+        for (int r = 0; r < m_model->rowCount(); ++r) {
+            if (m_model->data(m_model->index(r, 0), Qt::UserRole + 100).toInt() == m_rowId) {
+                visualRow = r;
+                break;
+            }
+        }
+
+        if (visualRow >= 0) {
+            QModelIndex idx = m_model->index(visualRow, m_col);
+            m_model->setData(idx, value, Qt::EditRole);
+        }
+    }
+
+    QStandardItemModel *m_model;
+    int m_rowId;
+    int m_col;
+    QVariant m_oldVal;
+    QVariant m_newVal;
+};
+
+class StructEditDelegate : public QStyledItemDelegate {
+public:
+    StructEditDelegate(QUndoStack *undoStack, QObject *parent = nullptr)
+        : QStyledItemDelegate(parent), m_undoStack(undoStack) {}
+
+    void setModelData(QWidget *editor, QAbstractItemModel *model, const QModelIndex &index) const override {
+        QModelIndex srcIndex = index;
+        QStandardItemModel *srcModel = qobject_cast<QStandardItemModel*>(model);
+        if (auto *proxy = qobject_cast<const QAbstractProxyModel*>(model)) {
+            srcIndex = proxy->mapToSource(index);
+            srcModel = qobject_cast<QStandardItemModel*>(proxy->sourceModel());
+        }
+
+        if (!srcModel) {
+            QStyledItemDelegate::setModelData(editor, model, index);
+            return;
+        }
+
+        QVariant oldValue = srcModel->data(srcIndex, Qt::EditRole);
+
+        // Let default delegate set the model data
+        QStyledItemDelegate::setModelData(editor, model, index);
+
+        QVariant newValue = srcModel->data(srcIndex, Qt::EditRole);
+
+        if (oldValue != newValue) {
+            int rowId = srcModel->data(srcModel->index(srcIndex.row(), 0), Qt::UserRole + 100).toInt();
+
+            // Revert temporarily so push can apply it cleanly
+            srcModel->setData(srcIndex, oldValue, Qt::EditRole);
+
+            m_undoStack->push(new StructEditCommand(srcModel, rowId, srcIndex.column(), oldValue, newValue));
+        }
+    }
+
+private:
+    QUndoStack *m_undoStack;
+};
+}
+
 StructViewWidget::StructViewWidget(QWidget *parent)
     : QWidget(parent)
     , m_fm(nullptr)
 {
+    m_undoStack = new QUndoStack(this);
     setupUi();
 
     // Apply saved theme
@@ -71,6 +173,7 @@ void StructViewWidget::setupUi()
     m_gridView->setAlternatingRowColors(true);
     m_gridView->setSelectionBehavior(QAbstractItemView::SelectItems);
     m_gridView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_gridView->setItemDelegate(new StructEditDelegate(m_undoStack, this));
 
     connect(m_filterHeader, &FilterableHeaderView::filterChanged, this,
             [this](int column, const QString &text) {
@@ -134,38 +237,114 @@ void StructViewWidget::setupUi()
     connect(m_treeView->selectionModel(), &QItemSelectionModel::currentChanged,
             this, &StructViewWidget::onTreeNodeSelected);
 
+    // --- Connect tab widget changes ---
+    connect(m_tabWidget, &QTabWidget::currentChanged, this, [this](int index) {
+        if (index == 1) {
+            updateTextTab();
+        }
+        if (m_actShowText) {
+            QSignalBlocker blocker(m_actShowText);
+            m_actShowText->setChecked(index == 1);
+        }
+    });
 }
 
 void StructViewWidget::setupToolbar()
 {
     m_toolbar = new PluginToolBar(m_fm, this);
 
+    // Save (Ctrl+S)
     auto *actSave = m_toolbar->addToolAction(
-        QStringLiteral("Save"), QKeySequence::Save, 0);
+        QStringLiteral("Save"),
+        QKeySequence::Save,
+        FocusManager::Always,
+        QStringLiteral("document-save"));
     connect(actSave, &QAction::triggered, this, &StructViewWidget::onSave);
 
+    // Save As (Ctrl+Shift+S)
+    auto *actSaveAs = m_toolbar->addToolAction(
+        QStringLiteral("Save As"),
+        QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S),
+        FocusManager::Always,
+        QStringLiteral("document-save-as"));
+    connect(actSaveAs, &QAction::triggered, this, &StructViewWidget::onSaveAs);
+
+    // Undo (Ctrl+Z)
+    auto *actUndo = m_toolbar->addToolAction(
+        QStringLiteral("Undo"),
+        QKeySequence::Undo,
+        FocusManager::Always,
+        QStringLiteral("edit-undo"));
+    connect(actUndo, &QAction::triggered, m_undoStack, &QUndoStack::undo);
+
+    // Redo (Ctrl+Y, Ctrl+Shift+Z)
+    auto *actRedo = m_toolbar->addToolAction(
+        QStringLiteral("Redo"),
+        QKeySequence::Redo,
+        FocusManager::Always,
+        QStringLiteral("edit-redo"));
+    actRedo->setShortcuts({QKeySequence::Redo, QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z)});
+    connect(actRedo, &QAction::triggered, m_undoStack, &QUndoStack::redo);
+
+    // Print (Ctrl+P)
+    auto *actPrint = m_toolbar->addToolAction(
+        QStringLiteral("Print"),
+        QKeySequence::Print,
+        FocusManager::Always,
+        QStringLiteral("document-print"));
+    connect(actPrint, &QAction::triggered, this, &StructViewWidget::onPrint);
+
+    // Reload (F5)
+    auto *actReload = m_toolbar->addToolAction(
+        QStringLiteral("Reload"),
+        QKeySequence(Qt::Key_F5),
+        FocusManager::Always,
+        QStringLiteral("view-refresh"));
+    connect(actReload, &QAction::triggered, this, &StructViewWidget::onReload);
+
+    // Show Text
+    m_actShowText = m_toolbar->addToolAction(
+        QStringLiteral("Show Text"),
+        QKeySequence(),
+        FocusManager::Always,
+        QStringLiteral("visibility"));
+    m_actShowText->setCheckable(true);
+    connect(m_actShowText, &QAction::toggled, this, [this](bool on) {
+        m_tabWidget->setCurrentIndex(on ? 1 : 0);
+    });
+
+    // Word Wrap / Line Wrap
     auto *actWrap = m_toolbar->addToolAction(
-        QStringLiteral("Word Wrap"), QKeySequence(), 0);
+        QStringLiteral("Word Wrap"),
+        QKeySequence(),
+        FocusManager::Always,
+        QStringLiteral("format-text-direction-ltr"));
     actWrap->setCheckable(true);
     connect(actWrap, &QAction::toggled, this, [this](bool on) {
         m_grid->setWordWrap(on);
+        if (m_textView) {
+            m_textView->setLineWrapMode(on ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
+        }
     });
 
-    auto *actGrid = m_toolbar->addToolAction(
-        QStringLiteral("Grid Lines"), QKeySequence(), 0);
-    actGrid->setCheckable(true);
-    actGrid->setChecked(true);
-    connect(actGrid, &QAction::toggled, this, [this](bool on) {
-        m_grid->setShowGrid(on);
-    });
+    // Open Externally (Ctrl+O)
+    auto *actOpen = m_toolbar->addToolAction(
+        QStringLiteral("Open Externally"),
+        QKeySequence(Qt::CTRL | Qt::Key_O),
+        FocusManager::Always,
+        QStringLiteral("document-open"));
+    connect(actOpen, &QAction::triggered, this, &StructViewWidget::onOpenExternally);
 }
 
 void StructViewWidget::setupFindReplace()
 {
     m_findReplace = new ScopedFindReplacePanel(m_fm, this);
     auto *actFind = m_toolbar->addToolAction(
-        QStringLiteral("Find"), QKeySequence::Find, 0);
-    connect(actFind, &QAction::triggered, m_findReplace, [this]() {
+        QStringLiteral("Find"),
+        QKeySequence::Find,
+        0,
+        QStringLiteral("edit-find"));
+    connect(actFind, &QAction::triggered, this, [this]() {
         m_findReplace->showPanel(!m_findReplace->isPanelVisible());
     });
     connect(m_findReplace, &ScopedFindReplacePanel::findRequested, this,
@@ -260,6 +439,8 @@ void StructViewWidget::showNodeData(DocumentNode *node)
     m_currentNode = node;
 
     m_gridModel->clear();
+    if (m_undoStack)
+        m_undoStack->clear();
 
     if (node->columnNames.isEmpty() && node->rows.isEmpty()) {
         // No grid data — show message
@@ -273,6 +454,7 @@ void StructViewWidget::showNodeData(DocumentNode *node)
         m_gridModel->setHorizontalHeaderLabels(node->columnNames);
 
         // Populate rows
+        int rowId = 0;
         for (const auto &row : node->rows) {
             QList<QStandardItem*> items;
             for (const auto &val : row) {
@@ -280,6 +462,9 @@ void StructViewWidget::showNodeData(DocumentNode *node)
                 if (!node->editable)
                     item->setFlags(item->flags() & ~Qt::ItemIsEditable);
                 items.append(item);
+            }
+            if (!items.isEmpty()) {
+                items.first()->setData(rowId++, Qt::UserRole + 100);
             }
             m_gridModel->appendRow(items);
         }
@@ -316,16 +501,8 @@ void StructViewWidget::updateStatusBar()
     m_statusBar->setRowCount(filtered, total);
 }
 
-bool StructViewWidget::saveFile()
+void StructViewWidget::syncGridToNode()
 {
-    return saveFileAs(m_filepath);
-}
-
-bool StructViewWidget::saveFileAs(const QString &path)
-{
-    if (!m_engine) return false;
-
-    // Sync current grid data back to the node
     if (m_currentNode && !m_currentNode->columnNames.isEmpty()) {
         m_currentNode->rows.clear();
         for (int r = 0; r < m_gridModel->rowCount(); ++r) {
@@ -337,6 +514,19 @@ bool StructViewWidget::saveFileAs(const QString &path)
             m_currentNode->rows.append(std::move(row));
         }
     }
+}
+
+bool StructViewWidget::saveFile()
+{
+    return saveFileAs(m_filepath);
+}
+
+bool StructViewWidget::saveFileAs(const QString &path)
+{
+    if (!m_engine) return false;
+
+    // Sync current grid data back to the node
+    syncGridToNode();
 
     QByteArray output = m_engine->serialize();
     if (output.isEmpty()) return false;
@@ -347,6 +537,24 @@ bool StructViewWidget::saveFileAs(const QString &path)
 
     file.write(output);
     file.close();
+
+    // Update m_textView so it matches the saved content
+    if (m_engine->formatName() == QStringLiteral("CBOR")) {
+        QCborParserError err;
+        QCborValue cbor = QCborValue::fromCbor(output, &err);
+        if (err.error == QCborError::NoError) {
+            QJsonValue jsonVal = cbor.toJsonValue();
+            QJsonDocument doc;
+            if (jsonVal.isObject())
+                doc = QJsonDocument(jsonVal.toObject());
+            else if (jsonVal.isArray())
+                doc = QJsonDocument(jsonVal.toArray());
+            m_textView->setPlainText(QString::fromUtf8(doc.toJson(QJsonDocument::Indented)));
+        }
+    } else {
+        m_textView->setPlainText(QString::fromUtf8(output));
+    }
+
     return true;
 }
 
@@ -355,6 +563,123 @@ void StructViewWidget::onSave()
     if (!saveFile()) {
         QMessageBox::warning(this, QStringLiteral("Save Error"),
                              QStringLiteral("Could not save file."));
+    }
+}
+
+void StructViewWidget::onSaveAs()
+{
+    QString filter;
+    if (m_engine) {
+        if (m_engine->formatName() == QStringLiteral("JSON")) {
+            filter = QStringLiteral("JSON Files (*.json);;All Files (*)");
+        } else if (m_engine->formatName() == QStringLiteral("XML")) {
+            filter = QStringLiteral("XML Files (*.xml);;All Files (*)");
+        } else if (m_engine->formatName() == QStringLiteral("YAML")) {
+            filter = QStringLiteral("YAML Files (*.yaml *.yml);;All Files (*)");
+        } else if (m_engine->formatName() == QStringLiteral("TOML")) {
+            filter = QStringLiteral("TOML Files (*.toml);;All Files (*)");
+        } else if (m_engine->formatName() == QStringLiteral("INI")) {
+            filter = QStringLiteral("INI Files (*.ini);;All Files (*)");
+        } else if (m_engine->formatName() == QStringLiteral("CBOR")) {
+            filter = QStringLiteral("CBOR Files (*.cbor);;All Files (*)");
+        }
+    }
+    if (filter.isEmpty()) {
+        filter = QStringLiteral("All Files (*)");
+    }
+    QString filePath = QFileDialog::getSaveFileName(this, QStringLiteral("Save As"), m_filepath, filter);
+    if (!filePath.isEmpty()) {
+        if (saveFileAs(filePath)) {
+            m_filepath = filePath;
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Save Error"),
+                                 QStringLiteral("Could not save file."));
+        }
+    }
+}
+
+void StructViewWidget::onReload()
+{
+    if (!m_filepath.isEmpty()) {
+        if (loadFile(m_filepath)) {
+            m_undoStack->clear();
+        } else {
+            QMessageBox::warning(this, QStringLiteral("Reload Error"),
+                                 QStringLiteral("Could not reload file."));
+        }
+    }
+}
+
+void StructViewWidget::onPrint()
+{
+    if (!m_engine) return;
+
+    // Sync and serialize so raw text is up to date
+    syncGridToNode();
+    QByteArray output = m_engine->serialize();
+
+    QString printText;
+    if (m_engine->formatName() == QStringLiteral("CBOR")) {
+        QCborParserError err;
+        QCborValue cbor = QCborValue::fromCbor(output, &err);
+        if (err.error == QCborError::NoError) {
+            QJsonValue jsonVal = cbor.toJsonValue();
+            QJsonDocument doc;
+            if (jsonVal.isObject())
+                doc = QJsonDocument(jsonVal.toObject());
+            else if (jsonVal.isArray())
+                doc = QJsonDocument(jsonVal.toArray());
+            printText = QString::fromUtf8(doc.toJson(QJsonDocument::Indented));
+        } else {
+            printText = QStringLiteral("<Failed to parse CBOR to JSON>");
+        }
+    } else {
+        printText = QString::fromUtf8(output);
+    }
+
+    QPrinter printer(QPrinter::HighResolution);
+    QPrintDialog dialog(&printer, this);
+    dialog.setWindowTitle(QStringLiteral("Print Document"));
+    
+    if (dialog.exec() == QDialog::Accepted) {
+        QTextDocument doc;
+        doc.setPlainText(printText);
+        doc.print(&printer);
+    }
+}
+
+void StructViewWidget::onOpenExternally()
+{
+    if (!m_filepath.isEmpty()) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(m_filepath));
+    }
+}
+
+void StructViewWidget::updateTextTab()
+{
+    if (!m_engine) return;
+    
+    // Sync current grid data
+    syncGridToNode();
+    
+    QByteArray output = m_engine->serialize();
+    if (m_engine->formatName() == QStringLiteral("CBOR")) {
+        // CBOR should show indented JSON
+        QCborParserError err;
+        QCborValue cbor = QCborValue::fromCbor(output, &err);
+        if (err.error == QCborError::NoError) {
+            QJsonValue jsonVal = cbor.toJsonValue();
+            QJsonDocument doc;
+            if (jsonVal.isObject())
+                doc = QJsonDocument(jsonVal.toObject());
+            else if (jsonVal.isArray())
+                doc = QJsonDocument(jsonVal.toArray());
+            m_textView->setPlainText(QString::fromUtf8(doc.toJson(QJsonDocument::Indented)));
+        } else {
+            m_textView->setPlainText(QStringLiteral("<Failed to parse CBOR to JSON>"));
+        }
+    } else {
+        m_textView->setPlainText(QString::fromUtf8(output));
     }
 }
 

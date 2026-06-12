@@ -32,6 +32,9 @@ public:
 
     bool select();
 
+    int64_t rowId(int row) const { return m_rowIds[row]; }
+    bool hasRowId() const { return m_hasRowId; }
+
 private:
     void loadChunk(int offset, int limit);
 
