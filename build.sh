@@ -74,8 +74,9 @@ install -m 644 wdx/translitwdx/readme.txt      release/wdx/translitwdx/
 
 # csvview
 mkdir -p release/wlx/csvview
-make -C wlx/csvview/src clean all
-install -m 644 wlx/csvview/csvview_qt6.wlx release/wlx/csvview/
+mkdir -p wlx/csvview/build
+(cd wlx/csvview/build && cmake .. && make)
+install -m 644 wlx/csvview/build/csvview_qt6.wlx release/wlx/csvview/
 cp -r wlx/csvview/langs release/wlx/csvview/
 install -m 644 wlx/csvview/*.md release/wlx/csvview/
 install -m 644 wlx/csvview/*.png release/wlx/csvview/
