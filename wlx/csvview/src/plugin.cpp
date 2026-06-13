@@ -270,7 +270,25 @@ CsvViewerWidget::CsvViewerWidget(QWidget *parent)
 
 CsvViewerWidget::~CsvViewerWidget()
 {
-	delete m_fm;
+	// Disconnect all signals BEFORE child widgets start being destroyed.
+	// Without this, Qt's arbitrary child destruction order can trigger
+	// callbacks on half-destroyed objects, causing crashes when navigating away with unsaved edits.
+	if (m_grid && m_grid->undoStack()) {
+		disconnect(m_grid->undoStack(), nullptr, this, nullptr);
+	}
+	if (m_view) {
+		if (m_view->model()) {
+			disconnect(m_view->model(), nullptr, nullptr, nullptr);
+		}
+		if (m_view->selectionModel()) {
+			disconnect(m_view->selectionModel(), nullptr, nullptr, nullptr);
+		}
+		disconnect(m_view, nullptr, nullptr, nullptr);
+	}
+	if (m_fm) {
+		m_fm->setActive(false);
+		delete m_fm;
+	}
 }
 
 void CsvViewerWidget::setupToolbar()
@@ -748,10 +766,6 @@ bool CsvViewerWidget::loadFile(const QString& filePath)
 	m_isProgrammaticChange = false;
 
 	m_findReplace->setStatusText(QString());
-
-	if (!m_isActive) {
-		QTimer::singleShot(0, this, [this]() { m_fm->restoreViewFocus(); });
-	}
 	return true;
 }
 
