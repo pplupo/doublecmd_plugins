@@ -82,7 +82,7 @@ void FocusManager::setActive(bool active, QWidget *nextFocus, bool redirect)
             bool shouldRedirect = redirect;
             if (shouldRedirect) {
                 if (nextFocus) {
-                    if (nextFocus->window() != m_pluginRoot->window()) {
+                    if (nextFocus != m_pluginRoot->parentWidget()) {
                         shouldRedirect = false;
                     }
                 } else {
