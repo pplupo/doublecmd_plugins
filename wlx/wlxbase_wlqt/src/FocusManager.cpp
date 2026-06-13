@@ -28,7 +28,7 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
 
         if (m_isActive) {
             if (oldInside && !nowInside) {
-                setActive(false);
+                setActive(false, now, true);
             }
         } else {
             if (nowInside && !oldInside) {
@@ -68,7 +68,7 @@ FocusManager::~FocusManager()
 
 bool FocusManager::isActive() const { return m_isActive; }
 
-void FocusManager::setActive(bool active)
+void FocusManager::setActive(bool active, QWidget *nextFocus, bool redirect)
 {
     if (m_isActive == active)
         return;
@@ -79,12 +79,21 @@ void FocusManager::setActive(bool active)
         m_activeInput = nullptr;
         m_pluginRoot->clearFocus();
         if (m_pluginRoot->parentWidget()) {
-            QPointer<QWidget> parent(m_pluginRoot->parentWidget());
-            QTimer::singleShot(0, m_pluginRoot, [parent]() {
-                if (parent) {
-                    parent->setFocus(Qt::OtherFocusReason);
+            bool shouldRedirect = redirect;
+            if (shouldRedirect) {
+                if (nextFocus) {
+                    if (nextFocus->window() != m_pluginRoot->window()) {
+                        shouldRedirect = false;
+                    }
+                } else {
+                    if (QApplication::activeWindow() != m_pluginRoot->window()) {
+                        shouldRedirect = false;
+                    }
                 }
-            });
+            }
+            if (shouldRedirect) {
+                m_pluginRoot->parentWidget()->setFocus(Qt::OtherFocusReason);
+            }
         }
         emit deactivated();
     } else {
@@ -238,7 +247,7 @@ bool FocusManager::eventFilter(QObject *obj, QEvent *event)
 
         if (m_isActive && !gr.contains(gp)) {
             // Click outside plugin — deactivate
-            setActive(false);
+            setActive(false, nullptr, false);
             return false;
         } else if (!m_isActive && gr.contains(gp)) {
             // Click inside plugin — activate

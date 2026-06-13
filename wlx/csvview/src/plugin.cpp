@@ -270,6 +270,7 @@ CsvViewerWidget::CsvViewerWidget(QWidget *parent)
 
 CsvViewerWidget::~CsvViewerWidget()
 {
+	delete m_fm;
 }
 
 void CsvViewerWidget::setupToolbar()
@@ -1165,7 +1166,7 @@ int DCPCALL ListSendCommand(HWND ListWin, int Command, int Parameter)
 			widget->focusManager()->setActive(true);
 			view->setFocus(Qt::OtherFocusReason);
 		} else {
-			widget->focusManager()->setActive(false);
+			widget->focusManager()->setActive(false, nullptr, false);
 			if (QWidget *fw = QApplication::focusWidget()) {
 				if (fw == widget || widget->isAncestorOf(fw))
 					fw->clearFocus();

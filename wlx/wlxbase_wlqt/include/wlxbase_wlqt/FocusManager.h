@@ -25,7 +25,7 @@ public:
 
     // --- Activation ---
     bool isActive() const;
-    void setActive(bool active);
+    void setActive(bool active, QWidget *nextFocus = nullptr, bool redirect = true);
 
     // --- Input widget tracking ---
     void addInputWidget(QWidget *w);
