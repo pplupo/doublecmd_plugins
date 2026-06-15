@@ -28,8 +28,8 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
         if (QApplication::activeModalWidget())
             return;
 
-        bool oldInside = old && (old == m_pluginRoot || m_pluginRoot->isAncestorOf(old));
-        bool nowInside = now && (now == m_pluginRoot || m_pluginRoot->isAncestorOf(now));
+        bool oldInside = old && m_pluginRoot && (old == m_pluginRoot || m_pluginRoot->isAncestorOf(old));
+        bool nowInside = now && m_pluginRoot && (now == m_pluginRoot || m_pluginRoot->isAncestorOf(now));
 
         if (m_isActive) {
             if (oldInside && !nowInside) {
@@ -126,12 +126,14 @@ QWidget *FocusManager::activeInput() const { return m_activeInput.data(); }
 
 void FocusManager::setFocusProxy(QWidget *proxy)
 {
-    m_pluginRoot->setFocusProxy(proxy);
+    if (m_pluginRoot)
+        m_pluginRoot->setFocusProxy(proxy);
 }
 
 void FocusManager::resetFocusProxy()
 {
-    m_pluginRoot->setFocusProxy(m_primaryView);
+    if (m_pluginRoot && m_primaryView)
+        m_pluginRoot->setFocusProxy(m_primaryView);
 }
 
 // --- Shortcut registration ---
@@ -205,14 +207,15 @@ QWidget *FocusManager::primaryView() const { return m_primaryView; }
 
 void FocusManager::restoreViewFocus()
 {
-    m_primaryView->setFocus(Qt::OtherFocusReason);
+    if (m_primaryView)
+        m_primaryView->setFocus(Qt::OtherFocusReason);
 }
 
 void FocusManager::restoreFocusToDC()
 {
     if (m_savedFocusWidget) {
         m_savedFocusWidget->setFocus(Qt::OtherFocusReason);
-    } else {
+    } else if (m_pluginRoot) {
         if (QWidget *fw = QApplication::focusWidget()) {
             if (fw == m_pluginRoot || fw->isAncestorOf(m_pluginRoot) ||
                 m_pluginRoot->isAncestorOf(fw))
@@ -225,7 +228,8 @@ void FocusManager::installFocusGuard()
 {
     if (qApp)
         qApp->installEventFilter(this);
-    m_pluginRoot->setFocusProxy(m_primaryView);
+    if (m_pluginRoot && m_primaryView)
+        m_pluginRoot->setFocusProxy(m_primaryView);
 }
 
 // --- Event filter (the critical focus/shortcut engine) ---
@@ -236,6 +240,8 @@ bool FocusManager::eventFilter(QObject *obj, QEvent *event)
 
     // --- Geometry-based click detection ---
     if (event->type() == QEvent::MouseButtonPress) {
+        if (!m_pluginRoot) return false;
+
         auto *me = static_cast<QMouseEvent *>(event);
         const QPoint gp = me->globalPosition().toPoint();
         const QRect gr(m_pluginRoot->mapToGlobal(QPoint(0, 0)), m_pluginRoot->size());
@@ -250,7 +256,7 @@ bool FocusManager::eventFilter(QObject *obj, QEvent *event)
             emit activated();
             if (w && (w->focusPolicy() & Qt::ClickFocus)) {
                 w->setFocus(Qt::MouseFocusReason);
-            } else {
+            } else if (m_primaryView) {
                 m_primaryView->setFocus(Qt::MouseFocusReason);
             }
         }
@@ -258,7 +264,7 @@ bool FocusManager::eventFilter(QObject *obj, QEvent *event)
 
     // --- FocusIn tracking ---
     if (event->type() == QEvent::FocusIn) {
-        if (w && (w == m_pluginRoot || m_pluginRoot->isAncestorOf(w))) {
+        if (w && m_pluginRoot && (w == m_pluginRoot || m_pluginRoot->isAncestorOf(w))) {
             auto *fe = static_cast<QFocusEvent *>(event);
             if (!m_isActive && fe->reason() == Qt::OtherFocusReason) {
                 // Programmatic focus entry while inactive — don't activate
@@ -297,7 +303,7 @@ bool FocusManager::eventFilter(QObject *obj, QEvent *event)
 
     // --- ChildAdded: NoFocus enforcement ---
     if (event->type() == QEvent::ChildAdded) {
-        if (w && (w == m_pluginRoot || m_pluginRoot->isAncestorOf(w))) {
+        if (w && m_pluginRoot && (w == m_pluginRoot || m_pluginRoot->isAncestorOf(w))) {
             auto *ce = static_cast<QChildEvent *>(event);
             if (auto *childWidget = qobject_cast<QWidget *>(ce->child())) {
                 if (!isInputWidget(childWidget))

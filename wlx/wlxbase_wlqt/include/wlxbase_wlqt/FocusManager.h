@@ -76,8 +76,8 @@ private:
     void installFocusGuard();
     void restoreFocusToDC();
 
-    QWidget *m_pluginRoot;
-    QWidget *m_primaryView;
+    QPointer<QWidget> m_pluginRoot;
+    QPointer<QWidget> m_primaryView;
     bool m_isActive;
     QPointer<QWidget> m_savedFocusWidget;
     QPointer<QWidget> m_activeInput;
