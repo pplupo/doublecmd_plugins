@@ -60,11 +60,20 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
 
 FocusManager::~FocusManager()
 {
-    if (qApp)
-        qApp->removeEventFilter(this);
+    shutdown();
 }
 
 // --- Activation ---
+
+void FocusManager::shutdown()
+{
+    if (qApp) {
+        disconnect(qApp, nullptr, this, nullptr);  // disconnect focusChanged
+        qApp->removeEventFilter(this);
+    }
+    m_isActive = false;
+    m_activeInput = nullptr;
+}
 
 bool FocusManager::isActive() const { return m_isActive; }
 

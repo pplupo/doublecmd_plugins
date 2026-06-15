@@ -27,6 +27,11 @@ public:
     bool isActive() const;
     void setActive(bool active);
 
+    /// Call from the plugin widget destructor BEFORE child widgets are destroyed.
+    /// Disconnects all signal/event machinery to prevent re-entrant focus
+    /// callbacks during teardown.
+    void shutdown();
+
     // --- Input widget tracking ---
     void addInputWidget(QWidget *w);
     void removeInputWidget(QWidget *w);

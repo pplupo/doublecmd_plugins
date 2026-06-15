@@ -285,10 +285,9 @@ CsvViewerWidget::~CsvViewerWidget()
 		}
 		disconnect(m_view, nullptr, nullptr, nullptr);
 	}
-	if (m_fm) {
-		m_fm->setActive(false);
-		delete m_fm;
-	}
+	    if (m_fm) {
+            m_fm->shutdown();
+    }
 }
 
 void CsvViewerWidget::setupToolbar()
