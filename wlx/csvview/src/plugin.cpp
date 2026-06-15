@@ -772,6 +772,10 @@ void CsvViewerWidget::onSave()
 {
 	saveFile(m_currentFile);
 	m_grid->undoStack()->setClean();
+	QTimer::singleShot(0, this, [this]() {
+		m_fm->setActive(true);
+		m_fm->restoreViewFocus();
+	});
 }
 
 void CsvViewerWidget::onSaveAs()
@@ -797,6 +801,10 @@ void CsvViewerWidget::onSaveAs()
 		if (m_separator != oldSep)
 			updateTextView();
 	}
+	QTimer::singleShot(0, this, [this]() {
+		m_fm->setActive(true);
+		m_fm->restoreViewFocus();
+	});
 }
 
 void CsvViewerWidget::onReload()
