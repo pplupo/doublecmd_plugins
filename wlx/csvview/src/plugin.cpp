@@ -277,6 +277,7 @@ CsvViewerWidget::~CsvViewerWidget()
 		disconnect(m_grid->undoStack(), nullptr, this, nullptr);
 	}
 	if (m_view) {
+		m_view->blockSignals(true);
 		if (m_view->model()) {
 			disconnect(m_view->model(), nullptr, nullptr, nullptr);
 		}
@@ -285,10 +286,6 @@ CsvViewerWidget::~CsvViewerWidget()
 		}
 		disconnect(m_view, nullptr, nullptr, nullptr);
 	}
-	    if (m_fm) {
-            m_fm->setActive(false);
-            delete m_fm;
-    }
 }
 
 void CsvViewerWidget::setupToolbar()
@@ -781,7 +778,11 @@ void CsvViewerWidget::onSaveAs()
 	QString tsvFilter = "TSV - Tab Separated (*.tsv)";
 	QString selectedFilter;
 	QString filter = (m_separator == '\t') ? (tsvFilter + ";;" + csvFilter) : (csvFilter + ";;" + tsvFilter);
-	QString path = QFileDialog::getSaveFileName(nullptr, "Save As", m_currentFile, filter, &selectedFilter);
+	
+	m_fm->setIgnoreFocusLoss(true);
+	QString path = QFileDialog::getSaveFileName(this, "Save As", m_currentFile, filter, &selectedFilter);
+	m_fm->setIgnoreFocusLoss(false);
+
 	if (!path.isEmpty()) {
 		char oldSep = m_separator;
 		if (selectedFilter == csvFilter)
