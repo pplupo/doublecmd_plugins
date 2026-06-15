@@ -23,6 +23,11 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
 
     // Detect focus entering/leaving the plugin hierarchy
     connect(qApp, &QApplication::focusChanged, this, [this](QWidget *old, QWidget *now) {
+        // Skip focus management when a modal dialog (save dialog, message box)
+        // is active — calling setActive(false) during a modal causes crashes.
+        if (QApplication::activeModalWidget())
+            return;
+
         bool oldInside = old && (old == m_pluginRoot || m_pluginRoot->isAncestorOf(old));
         bool nowInside = now && (now == m_pluginRoot || m_pluginRoot->isAncestorOf(now));
 
@@ -60,20 +65,11 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
 
 FocusManager::~FocusManager()
 {
-    shutdown();
+    if (qApp)
+        qApp->removeEventFilter(this);
 }
 
 // --- Activation ---
-
-void FocusManager::shutdown()
-{
-    if (qApp) {
-        disconnect(qApp, nullptr, this, nullptr);  // disconnect focusChanged
-        qApp->removeEventFilter(this);
-    }
-    m_isActive = false;
-    m_activeInput = nullptr;
-}
 
 bool FocusManager::isActive() const { return m_isActive; }
 
