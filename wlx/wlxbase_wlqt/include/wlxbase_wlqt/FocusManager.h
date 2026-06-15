@@ -27,6 +27,9 @@ public:
     bool isActive() const;
     void setActive(bool active);
 
+    // --- Focus Guard ---
+    void setIgnoreFocusLoss(bool ignore);
+
     // --- Input widget tracking ---
     void addInputWidget(QWidget *w);
     void removeInputWidget(QWidget *w);
@@ -80,8 +83,9 @@ private:
     QPointer<QWidget> m_activeInput;
     QSet<QWidget *> m_extraInputWidgets;
 
-    QUndoStack *m_undoStack;
+    QPointer<QUndoStack> m_undoStack;
     QVector<ShortcutId> m_undoShortcutIds;
+    bool m_ignoreFocusLoss = false;
 
     struct RegisteredShortcut {
         ShortcutId id;

@@ -33,6 +33,7 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
 
         if (m_isActive) {
             if (oldInside && !nowInside) {
+                if (m_ignoreFocusLoss) return;
                 setActive(false);
             }
         } else {
@@ -73,6 +74,8 @@ FocusManager::~FocusManager()
 
 bool FocusManager::isActive() const { return m_isActive; }
 
+void FocusManager::setIgnoreFocusLoss(bool ignore) { m_ignoreFocusLoss = ignore; }
+
 void FocusManager::setActive(bool active)
 {
     if (m_isActive == active)
@@ -82,9 +85,11 @@ void FocusManager::setActive(bool active)
 
     if (!active) {
         m_activeInput = nullptr;
-        m_pluginRoot->clearFocus();
-        if (m_pluginRoot->parentWidget())
-            m_pluginRoot->parentWidget()->setFocus(Qt::OtherFocusReason);
+        if (m_pluginRoot) {
+            m_pluginRoot->clearFocus();
+            if (m_pluginRoot->parentWidget())
+                m_pluginRoot->parentWidget()->setFocus(Qt::OtherFocusReason);
+        }
         emit deactivated();
     } else {
         emit activated();
@@ -115,7 +120,7 @@ bool FocusManager::isInputWidget(QWidget *w) const
     return w != m_primaryView && m_primaryView->isAncestorOf(w);
 }
 
-QWidget *FocusManager::activeInput() const { return m_activeInput; }
+QWidget *FocusManager::activeInput() const { return m_activeInput.data(); }
 
 // --- Focus proxy ---
 
