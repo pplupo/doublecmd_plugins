@@ -270,22 +270,24 @@ CsvViewerWidget::CsvViewerWidget(QWidget *parent)
 
 CsvViewerWidget::~CsvViewerWidget()
 {
-	// Disconnect all signals BEFORE child widgets start being destroyed.
-	// Without this, Qt's arbitrary child destruction order can trigger
-	// callbacks on half-destroyed objects, causing crashes when navigating away with unsaved edits.
-	if (m_grid && m_grid->undoStack()) {
-		disconnect(m_grid->undoStack(), nullptr, this, nullptr);
+	// Neutralize FocusManager FIRST — it has a global event filter on qApp
+	// and a connection to qApp::focusChanged. If these fire during child
+	// destruction (when focus shifts as widgets die), they access
+	// half-destroyed objects and crash.
+	if (m_fm) {
+		if (qApp) {
+			qApp->removeEventFilter(m_fm);
+			disconnect(qApp, nullptr, m_fm, nullptr);
+		}
 	}
-	if (m_view) {
+
+	// Block signals on the view and undo stack so that Qt's arbitrary
+	// child destruction order cannot trigger dataChanged/cleanChanged
+	// callbacks on dead objects. This mirrors the working original csvview.
+	if (m_view)
 		m_view->blockSignals(true);
-		if (m_view->model()) {
-			disconnect(m_view->model(), nullptr, nullptr, nullptr);
-		}
-		if (m_view->selectionModel()) {
-			disconnect(m_view->selectionModel(), nullptr, nullptr, nullptr);
-		}
-		disconnect(m_view, nullptr, nullptr, nullptr);
-	}
+	if (m_grid && m_grid->undoStack())
+		m_grid->undoStack()->blockSignals(true);
 }
 
 void CsvViewerWidget::setupToolbar()
