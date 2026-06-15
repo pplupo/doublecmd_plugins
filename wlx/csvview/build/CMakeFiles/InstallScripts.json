@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/pplupo/repos/plugins/wlx/csvview/build/cmake_install.cmake",
+		"/home/pplupo/repos/plugins/wlx/csvview/build/wlxbase_wlqt/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

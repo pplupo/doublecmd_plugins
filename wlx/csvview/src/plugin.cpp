@@ -1180,7 +1180,7 @@ int DCPCALL ListSendCommand(HWND ListWin, int Command, int Parameter)
 			widget->focusManager()->setActive(true);
 			view->setFocus(Qt::OtherFocusReason);
 		} else {
-			widget->focusManager()->setActive(false, nullptr, false);
+			widget->focusManager()->setActive(false);
 			if (QWidget *fw = QApplication::focusWidget()) {
 				if (fw == widget || widget->isAncestorOf(fw))
 					fw->clearFocus();
