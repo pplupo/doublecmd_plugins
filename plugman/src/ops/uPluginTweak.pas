@@ -61,14 +61,11 @@ end;
 procedure TWcxTweakWork.Execute;
 var
   XmlDoc: TDcXmlDocument;
-  I: Integer;
 begin
   XmlDoc := TDcXmlDocument.Create;
   try
     XmlDoc.LoadFromFile(DcPaths.DoubleCmdXmlPath);
-    for I := 0 to FExtensions.Count - 1 do
-      if I <= High(FFlags) then
-        XmlDoc.UpdateWcxFlags(FPath, FExtensions[I], FFlags[I]);
+    XmlDoc.UpdateWcxExtensions(FPath, FExtensions, FFlags);
     XmlDoc.SaveToFile(DcPaths.DoubleCmdXmlPath);
   finally
     XmlDoc.Free;

@@ -9,14 +9,11 @@ object frmTweakPacker: TfrmTweakPacker
   OnCreate = FormCreate
   Position = poScreenCenter
   LCLVersion = '4.8.0.0'
-  object sgExts: TStringGrid
+  object edtExts: TEdit
     Left = 8
-    Height = 120
+    Height = 28
     Top = 8
     Width = 464
-    ColCount = 2
-    FixedCols = 0
-    RowCount = 1
     TabOrder = 0
   end
   object pnlFlags: TPanel

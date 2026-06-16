@@ -64,6 +64,7 @@ type
     procedure RestoreDisabledFromSerialized(const SerializedXml, OriginalCategory: string);
     procedure RemoveNodesByPathPrefix(const PathPrefix: string);
     procedure UpdateWcxFlags(const Path: string; ArchiveExt: string; Flags: Integer);
+    procedure UpdateWcxExtensions(const Path: string; Extensions: TStrings; Flags: array of Integer);
     procedure UpdateDetectString(APluginType: TPluginType; const Path, DetectString: string);
     procedure UpdateName(APluginType: TPluginType; const Path, Name: string);
     property Document: TXMLDocument read FDoc;
@@ -633,6 +634,48 @@ begin
     if SameText(DcPaths.ExpandDcPath(Entries[I].Path), DcPaths.ExpandDcPath(Path)) and
        SameText(Entries[I].ArchiveExt, ArchiveExt) then
       SetChildInt(Entries[I].Node, 'Flags', Flags);
+end;
+
+procedure TDcXmlDocument.UpdateWcxExtensions(const Path: string; Extensions: TStrings; Flags: array of Integer);
+var
+  Entries: TPluginXmlEntryArray;
+  I, J: Integer;
+  Sec: TDOMNode;
+  Found: Boolean;
+  ExpandedTarget: string;
+  ExtStr: string;
+begin
+  ExpandedTarget := DcPaths.ExpandDcPath(Path);
+  Entries := EnumerateActive(ptWCX);
+  Sec := GetOrCreateSection(ptWCX);
+  
+  for I := 0 to High(Entries) do
+  begin
+    if SameText(DcPaths.ExpandDcPath(Entries[I].Path), ExpandedTarget) then
+    begin
+      Found := False;
+      for J := 0 to Extensions.Count - 1 do
+      begin
+        if SameText(Entries[I].ArchiveExt, Extensions[J]) then
+        begin
+          SetChildInt(Entries[I].Node, 'Flags', Flags[J]);
+          Found := True;
+          Extensions[J] := ''; 
+          Break;
+        end;
+      end;
+      
+      if not Found then
+        RemoveNode(Entries[I]);
+    end;
+  end;
+
+  for J := 0 to Extensions.Count - 1 do
+  begin
+    ExtStr := Trim(Extensions[J]);
+    if ExtStr <> '' then
+      AppendWcx(ExtStr, Path, Flags[J], True);
+  end;
 end;
 
 procedure TDcXmlDocument.UpdateDetectString(APluginType: TPluginType;

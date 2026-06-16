@@ -18,6 +18,7 @@ object frmMain: TfrmMain
     ButtonHeight = 26
     ButtonWidth = 70
     Caption = 'ToolBar'
+    ShowCaptions = True
     TabOrder = 0
     object btnInstall: TToolButton
       Left = 1

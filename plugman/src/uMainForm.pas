@@ -99,12 +99,13 @@ end;
 
 procedure TfrmMain.InitListColumns;
 begin
-  with lvPlugins.Columns.Add do Caption := 'Name';
-  with lvPlugins.Columns.Add do Caption := 'Type';
-  with lvPlugins.Columns.Add do Caption := 'Status';
-  with lvPlugins.Columns.Add do Caption := 'Path';
-  with lvPlugins.Columns.Add do Caption := 'URL';
-  with lvPlugins.Columns.Add do Caption := 'Update';
+  with lvPlugins.Columns.Add do begin Caption := 'Name'; Width := 150; end;
+  with lvPlugins.Columns.Add do begin Caption := 'Type'; Width := 80; end;
+  with lvPlugins.Columns.Add do begin Caption := 'Status'; Width := 80; end;
+  with lvPlugins.Columns.Add do begin Caption := 'Path'; Width := 300; end;
+  with lvPlugins.Columns.Add do begin Caption := 'URL'; Width := 200; end;
+  with lvPlugins.Columns.Add do begin Caption := 'Update'; Width := 100; end;
+  with lvPlugins.Columns.Add do begin Caption := 'Exts/Detect'; Width := 200; end;
 end;
 
 procedure TfrmMain.SetStatus(const Msg: string);
@@ -132,7 +133,30 @@ var
   Pt: TPluginType;
 
   procedure AddEntry(const Entry: TPluginXmlEntry);
+  var
+    J: Integer;
+    ExtStr: string;
   begin
+    if Entry.PluginType = ptWCX then
+      ExtStr := 'EXT="' + UpperCase(Entry.ArchiveExt) + '"'
+    else
+      ExtStr := Entry.DetectString;
+
+    for J := 0 to lvPlugins.Items.Count - 1 do
+    begin
+      if SameText(lvPlugins.Items[J].SubItems[2], Entry.Path) then
+      begin
+        if Entry.PluginType = ptWCX then
+        begin
+          if lvPlugins.Items[J].SubItems.Count > 5 then
+            lvPlugins.Items[J].SubItems[5] := lvPlugins.Items[J].SubItems[5] + ' | ' + ExtStr
+          else
+            lvPlugins.Items[J].SubItems.Add(ExtStr);
+        end;
+        Exit;
+      end;
+    end;
+
     Item := lvPlugins.Items.Add;
     Data := TListItemData.Create;
     Data.XmlEntry := Entry;
@@ -156,6 +180,7 @@ var
     else
       Item.SubItems.Add('');
     Item.SubItems.Add('');
+    Item.SubItems.Add(ExtStr);
   end;
 
 begin

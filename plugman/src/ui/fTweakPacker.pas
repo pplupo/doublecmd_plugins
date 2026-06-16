@@ -10,7 +10,7 @@ uses
 
 type
   TfrmTweakPacker = class(TForm)
-    sgExts: TStringGrid;
+    edtExts: TEdit;
     pnlFlags: TPanel;
     lblFlags: TLabel;
     btnOk: TButton;
@@ -49,11 +49,6 @@ end;
 
 procedure TfrmTweakPacker.FormCreate(Sender: TObject);
 begin
-  sgExts.ColCount := 2;
-  sgExts.RowCount := 1;
-  sgExts.FixedRows := 1;
-  sgExts.Cells[0, 0] := 'Extension';
-  sgExts.Cells[1, 0] := 'Flags';
   BuildFlagCheckboxes;
 end;
 
@@ -80,25 +75,25 @@ var
   Doc: TDcXmlDocument;
   Entries: TPluginXmlEntryArray;
   I, J, Flags: Integer;
+  ExtStr: string;
 begin
   Doc := TDcXmlDocument.Create;
+  ExtStr := '';
   try
     Doc.LoadFromFile(DcPaths.DoubleCmdXmlPath);
     Entries := Doc.EnumerateActive(ptWCX);
-    sgExts.RowCount := 1;
     for I := 0 to High(Entries) do
       if SameText(DcPaths.ExpandDcPath(Entries[I].Path), DcPaths.ExpandDcPath(FPath)) then
       begin
-        sgExts.RowCount := sgExts.RowCount + 1;
-        sgExts.Cells[0, sgExts.RowCount - 1] := Entries[I].ArchiveExt;
-        sgExts.Cells[1, sgExts.RowCount - 1] := IntToStr(Entries[I].Flags);
-        if sgExts.RowCount = 2 then
-        begin
-          Flags := Entries[I].Flags;
-          for J := 0 to High(FCheckBoxes) do
-            FCheckBoxes[J].Checked := (Flags and FCheckBoxes[J].Tag) <> 0;
-        end;
+        if ExtStr <> '' then
+          ExtStr := ExtStr + ' | ';
+        ExtStr := ExtStr + 'EXT="' + UpperCase(Entries[I].ArchiveExt) + '"';
+        
+        Flags := Entries[I].Flags;
+        for J := 0 to High(FCheckBoxes) do
+          FCheckBoxes[J].Checked := (Flags and FCheckBoxes[J].Tag) <> 0;
       end;
+    edtExts.Text := ExtStr;
   finally
     Doc.Free;
   end;
@@ -119,6 +114,8 @@ var
   Exts: TStringList;
   FlagsArr: array of Integer;
   R, I: Integer;
+  Parts: TStringArray;
+  S, ExtValue: string;
 begin
   FPath := Path;
   LoadFromXml;
@@ -127,12 +124,22 @@ begin
   begin
     Exts := TStringList.Create;
     try
-      SetLength(FlagsArr, sgExts.RowCount - 1);
-      for R := 1 to sgExts.RowCount - 1 do
+      Parts := edtExts.Text.Split(['|']);
+      for I := 0 to High(Parts) do
       begin
-        Exts.Add(sgExts.Cells[0, R]);
-        FlagsArr[R - 1] := CurrentFlags;
+        S := Trim(Parts[I]);
+        if S = '' then Continue;
+        if (Pos('EXT="', S) = 1) and (S[Length(S)] = '"') then
+          ExtValue := Copy(S, 6, Length(S) - 6)
+        else
+          ExtValue := S;
+        Exts.Add(ExtValue);
       end;
+      
+      SetLength(FlagsArr, Exts.Count);
+      for R := 0 to Exts.Count - 1 do
+        FlagsArr[R] := CurrentFlags;
+        
       ApplyWcxTweak(FPath, Exts, FlagsArr);
     finally
       Exts.Free;
