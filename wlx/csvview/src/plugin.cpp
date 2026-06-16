@@ -770,15 +770,17 @@ bool CsvViewerWidget::loadFile(const QString& filePath)
 
 void CsvViewerWidget::onSave()
 {
+	m_fm->setIgnoreFocusLoss(true);
 	saveFile(m_currentFile);
 	m_grid->undoStack()->setClean();
-	QTimer::singleShot(100, this, [this]() {
+	QTimer::singleShot(500, this, [this]() {
 		if (auto *tlw = window()) {
 			tlw->raise();
 			tlw->activateWindow();
 		}
 		m_fm->setActive(true);
 		m_fm->restoreViewFocus();
+		m_fm->setIgnoreFocusLoss(false);
 	});
 }
 
@@ -791,7 +793,6 @@ void CsvViewerWidget::onSaveAs()
 	
 	m_fm->setIgnoreFocusLoss(true);
 	QString path = QFileDialog::getSaveFileName(this, "Save As", m_currentFile, filter, &selectedFilter);
-	m_fm->setIgnoreFocusLoss(false);
 
 	if (!path.isEmpty()) {
 		char oldSep = m_separator;
@@ -804,15 +805,18 @@ void CsvViewerWidget::onSaveAs()
 		m_grid->undoStack()->setClean();
 		if (m_separator != oldSep)
 			updateTextView();
+		QTimer::singleShot(500, this, [this]() {
+			if (auto *tlw = window()) {
+				tlw->raise();
+				tlw->activateWindow();
+			}
+			m_fm->setActive(true);
+			m_fm->restoreViewFocus();
+			m_fm->setIgnoreFocusLoss(false);
+		});
+	} else {
+		m_fm->setIgnoreFocusLoss(false);
 	}
-	QTimer::singleShot(100, this, [this]() {
-		if (auto *tlw = window()) {
-			tlw->raise();
-			tlw->activateWindow();
-		}
-		m_fm->setActive(true);
-		m_fm->restoreViewFocus();
-	});
 }
 
 void CsvViewerWidget::onReload()
