@@ -13,6 +13,7 @@
 #include <QWidget>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <iostream>
 #include <QLineEdit>
 #include <QTimer>
 #include <QMenu>
@@ -57,6 +58,8 @@ bool gResize = true;
 bool gEnca = true;
 bool gReadAll = false;
 QString gLang = "ru";
+
+static bool g_reloadFocusTarget = false;
 
 static const int WasQuotedRole = Qt::UserRole + 2;
 
@@ -270,6 +273,7 @@ CsvViewerWidget::CsvViewerWidget(QWidget *parent)
 
 CsvViewerWidget::~CsvViewerWidget()
 {
+	std::cerr << "CsvViewerWidget::~CsvViewerWidget() called (" << this << ")" << std::endl;
 	// Neutralize FocusManager FIRST — it has a global event filter on qApp
 	// and a connection to qApp::focusChanged. If these fire during child
 	// destruction (when focus shifts as widgets die), they access
@@ -770,12 +774,14 @@ bool CsvViewerWidget::loadFile(const QString& filePath)
 
 void CsvViewerWidget::onSave()
 {
-	saveFile(m_currentFile);
-	m_grid->undoStack()->setClean();
-	QTimer::singleShot(100, this, [this]() {
-		m_fm->setActive(true);
-		m_fm->restoreViewFocus();
+	std::cerr << "CsvViewerWidget::onSave() called" << std::endl;
+	g_reloadFocusTarget = true;
+	QTimer::singleShot(1000, []() {
+		g_reloadFocusTarget = false;
 	});
+	saveFile(m_currentFile);
+	std::cerr << "CsvViewerWidget::onSave() after saveFile" << std::endl;
+	m_grid->undoStack()->setClean();
 }
 
 void CsvViewerWidget::onSaveAs()
@@ -813,8 +819,10 @@ void CsvViewerWidget::onReload()
 
 void CsvViewerWidget::saveFile(const QString& filePath)
 {
+	std::cerr << "CsvViewerWidget::saveFile() called for path: " << filePath.toStdString() << std::endl;
 	QFile file(filePath);
 	if (!file.open(QFile::WriteOnly | QFile::Text)) {
+		std::cerr << "CsvViewerWidget::saveFile() failed to open file" << std::endl;
 		QMessageBox::warning(nullptr, "Error", "Could not open file for writing.");
 		return;
 	}
@@ -1154,16 +1162,30 @@ void CsvViewerWidget::doReplaceAll()
 
 HANDLE DCPCALL ListLoad(HANDLE ParentWin, char* FileToLoad, int ShowFlags)
 {
+	std::cerr << "ListLoad called for file: " << FileToLoad << ", ParentWin: " << ParentWin << std::endl;
 	Q_UNUSED(ShowFlags);
 	if (!QApplication::instance()) return nullptr;
 	CsvViewerWidget *widget = new CsvViewerWidget((QWidget*)ParentWin);
 	if (!widget->loadFile(FileToLoad)) { delete widget; return nullptr; }
 	widget->show();
+	std::cerr << "ListLoad created widget: " << widget << std::endl;
+
+	if (g_reloadFocusTarget) {
+		std::cerr << "ListLoad: reload detected, scheduling focus redirection" << std::endl;
+		g_reloadFocusTarget = false;
+		QTimer::singleShot(50, widget, [widget]() {
+			std::cerr << "ListLoad focus timer fired, focusing new widget" << std::endl;
+			widget->focusManager()->setActive(true);
+			widget->view()->setFocus(Qt::OtherFocusReason);
+		});
+	}
+
 	return widget;
 }
 
 void DCPCALL ListCloseWindow(HANDLE ListWin)
 {
+	std::cerr << "ListCloseWindow called for ListWin: " << ListWin << std::endl;
 	CsvViewerWidget *widget = (CsvViewerWidget*)ListWin;
 	delete widget;
 }
