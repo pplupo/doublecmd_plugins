@@ -124,7 +124,8 @@ begin
   begin
     Exts := TStringList.Create;
     try
-      Parts := edtExts.Text.Split(['|']);
+      S := edtExts.Text;
+      Parts := S.Split(['|']);
       for I := 0 to High(Parts) do
       begin
         S := Trim(Parts[I]);
