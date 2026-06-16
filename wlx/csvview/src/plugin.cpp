@@ -773,6 +773,10 @@ void CsvViewerWidget::onSave()
 	saveFile(m_currentFile);
 	m_grid->undoStack()->setClean();
 	QTimer::singleShot(100, this, [this]() {
+		if (auto *tlw = window()) {
+			tlw->raise();
+			tlw->activateWindow();
+		}
 		m_fm->setActive(true);
 		m_fm->restoreViewFocus();
 	});
@@ -802,6 +806,10 @@ void CsvViewerWidget::onSaveAs()
 			updateTextView();
 	}
 	QTimer::singleShot(100, this, [this]() {
+		if (auto *tlw = window()) {
+			tlw->raise();
+			tlw->activateWindow();
+		}
 		m_fm->setActive(true);
 		m_fm->restoreViewFocus();
 	});
