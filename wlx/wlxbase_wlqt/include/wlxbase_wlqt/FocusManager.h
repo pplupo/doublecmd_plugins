@@ -59,6 +59,7 @@ public:
 
     // --- Focus restoration ---
     void restoreViewFocus();
+    static void expectReloadFocus();
 
 signals:
     void activated();
@@ -91,6 +92,7 @@ private:
     };
     QVector<RegisteredShortcut> m_shortcuts;
     ShortcutId m_nextShortcutId;
+    static bool s_reloadFocusTarget;
 };
 
 } // namespace QtWlPlugin

@@ -12,6 +12,8 @@
 
 namespace QtWlPlugin {
 
+bool FocusManager::s_reloadFocusTarget = false;
+
 FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *parent)
     : QObject(parent)
     , m_pluginRoot(pluginRoot)
@@ -24,11 +26,6 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
 
     // Detect focus entering/leaving the plugin hierarchy
     connect(qApp, &QApplication::focusChanged, this, [this](QWidget *old, QWidget *now) {
-        std::cerr << "FocusManager::focusChanged - old: " 
-                  << (old ? old->metaObject()->className() : "null") << " (" << old << "), now: "
-                  << (now ? now->metaObject()->className() : "null") << " (" << now << "), m_isActive: "
-                  << m_isActive << ", activeModal: " << QApplication::activeModalWidget() << std::endl;
-
         // Skip focus management when a modal dialog (save dialog, message box)
         // is active — calling setActive(false) during a modal causes crashes.
         if (QApplication::activeModalWidget())
@@ -39,7 +36,6 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
 
         if (m_isActive) {
             if (oldInside && !nowInside) {
-                std::cerr << "FocusManager::focusChanged -> calling setActive(false) because focus left plugin" << std::endl;
                 setActive(false);
             }
         } else {
@@ -47,7 +43,6 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
                 // Focus entering while inactive — bounce it back to the host
                 if (old) {
                     QPointer<QWidget> pOld(old);
-                    std::cerr << "FocusManager::focusChanged -> focus entering while inactive, bouncing back to old: " << old << std::endl;
                     QTimer::singleShot(0, this, [this, pOld]() {
                         if (pOld) {
                             QWidget *currentFocus = QApplication::focusWidget();
@@ -58,7 +53,6 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
                         }
                     });
                 } else {
-                    std::cerr << "FocusManager::focusChanged -> focus entering while inactive, bouncing back to DC" << std::endl;
                     QTimer::singleShot(0, this, [this]() {
                         QWidget *currentFocus = QApplication::focusWidget();
                         if (currentFocus && (currentFocus == m_pluginRoot ||
@@ -70,6 +64,14 @@ FocusManager::FocusManager(QWidget *pluginRoot, QWidget *primaryView, QObject *p
             }
         }
     });
+
+    if (s_reloadFocusTarget) {
+        s_reloadFocusTarget = false;
+        QTimer::singleShot(50, this, [this]() {
+            setActive(true);
+            restoreViewFocus();
+        });
+    }
 }
 
 FocusManager::~FocusManager()
@@ -84,7 +86,6 @@ bool FocusManager::isActive() const { return m_isActive; }
 
 void FocusManager::setActive(bool active)
 {
-    std::cerr << "FocusManager::setActive(" << active << "), current m_isActive: " << m_isActive << std::endl;
     if (m_isActive == active)
         return;
 
@@ -93,10 +94,8 @@ void FocusManager::setActive(bool active)
     if (!active) {
         m_activeInput = nullptr;
         m_pluginRoot->clearFocus();
-        if (m_pluginRoot->parentWidget()) {
-            std::cerr << "FocusManager::setActive(false) -> focusing parentWidget: " << m_pluginRoot->parentWidget() << std::endl;
+        if (m_pluginRoot->parentWidget())
             m_pluginRoot->parentWidget()->setFocus(Qt::OtherFocusReason);
-        }
         emit deactivated();
     } else {
         emit activated();
@@ -216,6 +215,14 @@ void FocusManager::restoreViewFocus()
 {
     if (m_primaryView)
         m_primaryView->setFocus(Qt::OtherFocusReason);
+}
+
+void FocusManager::expectReloadFocus()
+{
+    s_reloadFocusTarget = true;
+    QTimer::singleShot(1000, []() {
+        s_reloadFocusTarget = false;
+    });
 }
 
 void FocusManager::restoreFocusToDC()
