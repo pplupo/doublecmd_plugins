@@ -72,6 +72,13 @@ install -m 644 wdx/mediainfo/luajit/*.lua      release/wdx/mediainfo/
 install -m 644 wdx/translitwdx/translitwdx.lua release/wdx/translitwdx/
 install -m 644 wdx/translitwdx/readme.txt      release/wdx/translitwdx/
 
+# jsonview
+mkdir -p release/wlx/jsonview
+make -C wlx/jsonview/src clean all
+install -m 644 wlx/jsonview/jsonview_qt6.wlx release/wlx/jsonview/
+cp -r wlx/jsonview/langs release/wlx/jsonview/
+install -m 644 wlx/jsonview/*.md release/wlx/jsonview/
+install -m 644 wlx/jsonview/*.png release/wlx/jsonview/
 # logview
 mkdir -p release/wlx/logview
 mkdir -p wlx/logview/build
@@ -87,6 +94,14 @@ mkdir -p wlx/mpv_wayland/build
 install -m 644 wlx/mpv_wayland/build/mpv_wayland.wlx release/wlx/mpv_wayland/
 install -m 644 wlx/mpv_wayland/*.md release/wlx/mpv_wayland/
 install -m 644 wlx/mpv_wayland/*.png release/wlx/mpv_wayland/
+
+# kate
+mkdir -p release/wlx/kate
+mkdir -p wlx/kate/build
+(cd wlx/kate/build && cmake .. && make)
+install -m 644 wlx/kate/build/rich_editor_qt.wlx release/wlx/kate/
+install -m 644 wlx/kate/*.md release/wlx/kate/
+install -m 644 wlx/kate/*.png release/wlx/kate/
 
 pushd release
 tar -czpf ../plugins-$(date +%y.%m.%d)-$ARCH.tar.gz *
