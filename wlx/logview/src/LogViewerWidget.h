@@ -13,6 +13,8 @@
 #include <QMenu>
 #include <QAction>
 #include <QPointer>
+#include <QFileDialog>
+#include <QFileInfo>
 
 #include "LogModel.h"
 
@@ -59,6 +61,9 @@ private slots:
     void onTailUpdated();
     void onTimeRangeChanged();
     void copySelectedLines();
+    void deleteSelectedLines();
+    void clearLogFile();
+    void extractSelectedLines();
     void onSettingsClicked();
     std::vector<HighlightRule> loadHighlightRules();
     void saveHighlightRules(const std::vector<HighlightRule>& rules);
@@ -74,6 +79,8 @@ private:
     QLineEdit *searchEdit;
     QPushButton *btnSearchStart;
     QPushButton *btnSearchStop;
+    QPushButton *btnClearLog;
+    QPushButton *btnExtract;
     QPushButton *btnSettings;
     QDateTimeEdit *timeStart;
     QDateTimeEdit *timeEnd;

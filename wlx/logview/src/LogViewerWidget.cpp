@@ -16,6 +16,7 @@
 #include <QMessageBox>
 #include <QLabel>
 #include <QDir>
+#include <QStyle>
 #include <re2/re2.h>
 
 extern QString g_iniPath;
@@ -37,11 +38,13 @@ public:
         QVBoxLayout *fgLayout = new QVBoxLayout();
         fgLayout->addWidget(new QLabel("Foreground", this));
         m_fgButton = new QPushButton(this);
+        m_fgButton->setFixedHeight(26);
         fgLayout->addWidget(m_fgButton);
         
         QVBoxLayout *bgLayout = new QVBoxLayout();
         bgLayout->addWidget(new QLabel("Background", this));
         m_bgButton = new QPushButton(this);
+        m_bgButton->setFixedHeight(26);
         bgLayout->addWidget(m_bgButton);
         
         colorLayout->addLayout(fgLayout);
@@ -67,6 +70,8 @@ public:
         QHBoxLayout *buttonsLayout = new QHBoxLayout();
         QPushButton *btnOk = new QPushButton("OK", this);
         QPushButton *btnCancel = new QPushButton("Cancel", this);
+        btnOk->setFixedHeight(26);
+        btnCancel->setFixedHeight(26);
         buttonsLayout->addWidget(btnOk);
         buttonsLayout->addWidget(btnCancel);
         layout->addLayout(buttonsLayout);
@@ -131,12 +136,17 @@ public:
 
         // Control Buttons
         QVBoxLayout *btnLayout = new QVBoxLayout();
-        QPushButton *btnAdd = new QPushButton("Add", this);
-        QPushButton *btnEdit = new QPushButton("Edit", this);
-        QPushButton *btnDelete = new QPushButton("Delete", this);
-        QPushButton *btnDefault = new QPushButton("Add Default Rules", this);
-        QPushButton *btnUp = new QPushButton("Move Up", this);
-        QPushButton *btnDown = new QPushButton("Move Down", this);
+        QPushButton *btnAdd = new QPushButton(QString::fromUtf8(u8"\u271A Add"), this);
+        QPushButton *btnEdit = new QPushButton(QString::fromUtf8(u8"\u270E Edit"), this);
+        QPushButton *btnDelete = new QPushButton(QString::fromUtf8(u8"\u2715 Delete"), this);
+        QPushButton *btnDefault = new QPushButton(QString::fromUtf8(u8"\u2295 Add Default Rules"), this);
+        QPushButton *btnUp = new QPushButton(QString::fromUtf8(u8"\u25B2 Move Up"), this);
+        QPushButton *btnDown = new QPushButton(QString::fromUtf8(u8"\u25BC Move Down"), this);
+
+        for (auto* btn : {btnAdd, btnEdit, btnDelete, btnDefault, btnUp, btnDown}) {
+            btn->setFixedHeight(26);
+        }
+
         btnLayout->addWidget(btnAdd);
         btnLayout->addWidget(btnEdit);
         btnLayout->addWidget(btnDelete);
@@ -150,6 +160,8 @@ public:
         QHBoxLayout *okCancelLayout = new QHBoxLayout();
         QPushButton *btnOk = new QPushButton("OK", this);
         QPushButton *btnCancel = new QPushButton("Cancel", this);
+        btnOk->setFixedHeight(26);
+        btnCancel->setFixedHeight(26);
         okCancelLayout->addWidget(btnOk);
         okCancelLayout->addWidget(btnCancel);
         
@@ -417,7 +429,8 @@ bool LogFilterProxy::filterAcceptsRow(int sourceRow,
     auto *src = qobject_cast<LogModel*>(sourceModel());
     if (!src) return true;
 
-    if (m_regexActive && !src->isMatch(sourceRow))
+    // Only filter by regex if the regex filter is active AND there is an active search with matches
+    if (m_regexActive && src->matchCount() > 0 && !src->isMatch(sourceRow))
         return false;
 
     if (m_timeActive && m_timeStart.isValid() && m_timeEnd.isValid()) {
@@ -448,33 +461,79 @@ LogViewerWidget::LogViewerWidget(QWidget *parent)
     mainLayout->setContentsMargins(0, 0, 0, 0);
 
     // ── Top Header ─────────────────────────────────────────────────────
-    QHBoxLayout *headerLayout = new QHBoxLayout();
+    QWidget *headerContainer = new QWidget(this);
+    QHBoxLayout *headerLayout = new QHBoxLayout(headerContainer);
+    headerLayout->setContentsMargins(4, 4, 4, 4);
+    headerLayout->setSpacing(4);
 
-    searchEdit = new QLineEdit(this);
+    searchEdit = new QLineEdit(headerContainer);
     searchEdit->setPlaceholderText("Regex search...");
+    searchEdit->setClearButtonEnabled(true);
     headerLayout->addWidget(searchEdit);
 
-    btnSearchStart = new QPushButton("Search / Next", this);
-    btnSearchStop  = new QPushButton("Stop", this);
+    btnSearchStart = new QPushButton(QString::fromUtf8(u8"\u2315 Search / Next"), headerContainer);
+    btnSearchStop  = new QPushButton(QString::fromUtf8(u8"\u25A0 Stop"), headerContainer);
     btnSearchStop->setEnabled(false);
     headerLayout->addWidget(btnSearchStart);
     headerLayout->addWidget(btnSearchStop);
 
-    timeStart = new QDateTimeEdit(this);
-    timeEnd   = new QDateTimeEdit(this);
-    headerLayout->addWidget(new QLabel("From:"));
+    timeStart = new QDateTimeEdit(headerContainer);
+    timeEnd   = new QDateTimeEdit(headerContainer);
+    timeStart->setFixedWidth(175);
+    timeEnd->setFixedWidth(175);
+    timeStart->setDisplayFormat("yyyy-MM-dd HH:mm:ss");
+    timeEnd->setDisplayFormat("yyyy-MM-dd HH:mm:ss");
+
+    headerLayout->addWidget(new QLabel("From:", headerContainer));
     headerLayout->addWidget(timeStart);
-    headerLayout->addWidget(new QLabel("To:"));
+    headerLayout->addWidget(new QLabel("To:", headerContainer));
     headerLayout->addWidget(timeEnd);
 
-    chkFollow     = new QCheckBox("Follow", this);
-    chkFilterMode = new QCheckBox("Filter", this);
-    btnSettings   = new QPushButton("⚙ Settings", this);
+    chkFollow     = new QCheckBox("Follow", headerContainer);
+    chkFilterMode = new QCheckBox("Filter", headerContainer);
+    btnClearLog   = new QPushButton(QString::fromUtf8(u8"\u239A\uFE0E Clean"), headerContainer);
+    btnClearLog->setToolTip("Clean log file (delete all contents, keep the file)");
+    btnExtract    = new QPushButton(QString::fromUtf8(u8"\U0001F5AB Extract..."), headerContainer);
+    btnExtract->setToolTip("Extract selected lines to a new file");
+    btnSettings   = new QPushButton(QString::fromUtf8(u8"\u2699 Settings"), headerContainer);
     headerLayout->addWidget(chkFollow);
     headerLayout->addWidget(chkFilterMode);
+    headerLayout->addWidget(btnClearLog);
+    headerLayout->addWidget(btnExtract);
     headerLayout->addWidget(btnSettings);
 
-    mainLayout->addLayout(headerLayout);
+    // Reactive search clearing
+    connect(searchEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
+        if (text.isEmpty()) {
+            onSearchStartClicked();
+        }
+    });
+
+    // Normalize height and vertical alignment for all widgets in the header.
+    // Use a fixed height that is large enough for all symbols and matches the search box.
+    const int headerHeight = 32;
+    
+    headerContainer->setStyleSheet(
+        "QPushButton, QLineEdit, QDateTimeEdit { "
+        "  padding: 0px 8px; "
+        "  margin: 0px; "
+        "} "
+        "QPushButton { text-align: center; } "
+        "QLabel { padding: 0px 4px; }"
+    );
+
+    // Targeted fixes for buttons that tend to align higher due to symbol metrics
+    btnSearchStop->setStyleSheet(btnSearchStop->styleSheet() + "QPushButton { padding-top: 1px; }");
+    btnExtract->setStyleSheet(btnExtract->styleSheet() + "QPushButton { padding-top: 5px; }");
+
+    for (int i = 0; i < headerLayout->count(); ++i) {
+        if (QWidget *w = headerLayout->itemAt(i)->widget()) {
+            w->setFixedHeight(headerHeight);
+            headerLayout->setAlignment(w, Qt::AlignVCenter);
+        }
+    }
+
+    mainLayout->addWidget(headerContainer);
 
     // ── Filter proxy ───────────────────────────────────────────────────
     filterProxy = new LogFilterProxy(this);
@@ -493,8 +552,22 @@ LogViewerWidget::LogViewerWidget(QWidget *parent)
     listView->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(listView, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
         QMenu menu(this);
-        QAction *copyAct = menu.addAction("Copy");
+
+        QAction *copyAct = menu.addAction(QString::fromUtf8(u8"\u29C9 Copy"));
         connect(copyAct, &QAction::triggered, this, &LogViewerWidget::copySelectedLines);
+
+        QAction *deleteAct = menu.addAction(QString::fromUtf8(u8"\u2715 Delete Selected Lines"));
+        connect(deleteAct, &QAction::triggered, this, &LogViewerWidget::deleteSelectedLines);
+
+        menu.addSeparator();
+
+        QAction *extractAct = menu.addAction(QString::fromUtf8(u8"\U0001F5AB Extract..."));
+        connect(extractAct, &QAction::triggered, this, &LogViewerWidget::extractSelectedLines);
+
+        bool hasSelection = !listView->selectionModel()->selectedIndexes().isEmpty();
+        deleteAct->setEnabled(hasSelection);
+        extractAct->setEnabled(hasSelection);
+
         menu.exec(listView->viewport()->mapToGlobal(pos));
     });
 
@@ -529,6 +602,10 @@ LogViewerWidget::LogViewerWidget(QWidget *parent)
             this, &LogViewerWidget::onTimeRangeChanged);
     connect(timeEnd, &QDateTimeEdit::dateTimeChanged,
             this, &LogViewerWidget::onTimeRangeChanged);
+    connect(btnClearLog, &QPushButton::clicked,
+            this, &LogViewerWidget::clearLogFile);
+    connect(btnExtract, &QPushButton::clicked,
+            this, &LogViewerWidget::extractSelectedLines);
     connect(btnSettings, &QPushButton::clicked,
             this, &LogViewerWidget::onSettingsClicked);
 
@@ -645,6 +722,12 @@ bool LogViewerWidget::eventFilter(QObject *obj, QEvent *event) {
             copySelectedLines();
             return true;
         }
+
+        // Delete key in list view: delete selected lines
+        if (obj == listView && ke->key() == Qt::Key_Delete && !m_activeInput) {
+            deleteSelectedLines();
+            return true;
+        }
     }
 
     // ── MousePress on input widgets: activate them temporarily ─────────
@@ -699,16 +782,24 @@ void LogViewerWidget::triggerSearch(const QString& searchString, int) {
 
 void LogViewerWidget::onSearchStartClicked() {
     const QString query = searchEdit->text();
-    if (query.isEmpty()) return;
 
     if (query != m_lastSearchQuery) {
         m_lastMatchRow = -1;
         m_lastSearchQuery = query;
+
+        if (query.isEmpty()) {
+            btnSearchStop->setEnabled(false);
+            model->startSearch("");
+            return;
+        }
+
         btnSearchStop->setEnabled(true);
         statusLabel->setText("Searching...");
         model->startSearch(query);
         return;
     }
+
+    if (query.isEmpty()) return;
 
     // Same query — jump to next match
     if (model->matchCount() > 0) {
@@ -781,14 +872,14 @@ void LogViewerWidget::onTimeRangeChanged() {
     if (m_timestampsLoading) return;
 
     QDateTime start = timeStart->dateTime();
-    QDateTime end   = timeEnd->dateTime();
+    QDateTime end   = timeEnd->dateTime().addMSecs(-1);
 
     if (start.isValid() && end.isValid() && start < end) {
         filterProxy->setTimeRange(start, end);
         filterProxy->setTimeFilterActive(true);
         statusLabel->setText(QString("Time filter: %1 — %2")
-            .arg(start.toString("yyyy-MM-dd hh:mm:ss"))
-            .arg(end.toString("yyyy-MM-dd hh:mm:ss")));
+            .arg(start.toString("yyyy-MM-dd HH:mm:ss"))
+            .arg(timeEnd->dateTime().toString("yyyy-MM-dd HH:mm:ss")));
     }
 }
 
@@ -824,6 +915,89 @@ void LogViewerWidget::copySelectedLines() {
 
     QApplication::clipboard()->setText(lines.join('\n'));
     statusLabel->setText(QString("Copied %1 line(s)").arg(lines.size()));
+}
+
+// ─── Delete selected lines ─────────────────────────────────────────────
+
+void LogViewerWidget::deleteSelectedLines() {
+    QModelIndexList selected = listView->selectionModel()->selectedIndexes();
+    if (selected.isEmpty()) return;
+
+    // Map proxy indices to source indices
+    std::vector<int> sourceRows;
+    for (const QModelIndex &idx : selected) {
+        QModelIndex srcIdx = filterProxy->mapToSource(idx);
+        if (srcIdx.isValid())
+            sourceRows.push_back(srcIdx.row());
+    }
+
+    if (sourceRows.empty()) return;
+
+    int count = static_cast<int>(sourceRows.size());
+    model->deleteRows(sourceRows);
+    statusLabel->setText(QString("Deleted %1 line(s)").arg(count));
+}
+
+// ─── Clean log file ────────────────────────────────────────────────────
+
+void LogViewerWidget::clearLogFile() {
+    if (currentFile.isEmpty()) return;
+
+    auto reply = QMessageBox::question(this, "Clean Log",
+        QString("This will delete all contents of:\n%1\n\nThe file will be kept but emptied. Continue?")
+            .arg(currentFile),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+
+    if (reply != QMessageBox::Yes) return;
+
+    model->clearFile();
+    statusLabel->setText(QString("Log cleaned: %1").arg(currentFile));
+}
+
+// ─── Extract selected lines ────────────────────────────────────────────
+
+void LogViewerWidget::extractSelectedLines() {
+    QModelIndexList selected = listView->selectionModel()->selectedIndexes();
+    if (selected.isEmpty()) {
+        statusLabel->setText("No lines selected for extraction");
+        return;
+    }
+
+    std::sort(selected.begin(), selected.end(),
+              [](const QModelIndex &a, const QModelIndex &b) {
+                  return a.row() < b.row();
+              });
+
+    QStringList lines;
+    for (const QModelIndex &idx : selected)
+        lines << idx.data(Qt::DisplayRole).toString();
+
+    // Suggest the same extension as the current log file
+    QFileInfo fi(currentFile);
+    QString suffix = fi.suffix();
+    QString filter;
+    if (!suffix.isEmpty())
+        filter = QString("%1 files (*.%2);;All files (*)").arg(suffix.toUpper()).arg(suffix);
+    else
+        filter = "Log files (*.log);;All files (*)";
+
+    // Default to the same directory as the original file
+    QString defaultPath = fi.absolutePath() + "/extracted." + (suffix.isEmpty() ? "log" : suffix);
+
+    QString savePath = QFileDialog::getSaveFileName(this, "Extract Lines",
+                                                     defaultPath, filter);
+    if (savePath.isEmpty()) return;
+
+    QFile file(savePath);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        file.write(lines.join('\n').toUtf8());
+        file.write("\n");
+        file.close();
+        statusLabel->setText(QString("Extracted %1 line(s) to %2").arg(lines.size()).arg(savePath));
+    } else {
+        QMessageBox::warning(this, "Extract Error",
+            QString("Could not write to:\n%1").arg(savePath));
+    }
 }
 
 void LogViewerWidget::onSettingsClicked() {
