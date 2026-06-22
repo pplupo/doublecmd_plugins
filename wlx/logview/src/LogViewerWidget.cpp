@@ -1025,12 +1025,12 @@ std::vector<HighlightRule> LogViewerWidget::loadHighlightRules() {
             QString fg;
             QString bg;
         } defaults[] = {
-            { ".*TRACE.*", "#9CA3AF", "#000000" },
-            { ".*DEBUG.*", "#60A5FA", "#000000" },
-            { ".*INFO.*", "#4ADE80", "#000000" },
-            { ".*WARN.*", "#FBBF24", "#000000" },
-            { ".*ERROR.*", "#F87171", "#000000" },
-            { ".*FATAL.*", "#C084FC", "#000000" }
+            { "(?i).*TRACE.*", "#9CA3AF", "#000000" },
+            { "(?i).*DEBUG.*", "#60A5FA", "#000000" },
+            { "(?i).*INFO.*", "#4ADE80", "#000000" },
+            { "(?i).*WARN.*", "#FBBF24", "#000000" },
+            { "(?i).*ERROR.*", "#F87171", "#000000" },
+            { "(?i).*FATAL.*", "#C084FC", "#000000" }
         };
         for (const auto &d : defaults) {
             HighlightRule rule;
