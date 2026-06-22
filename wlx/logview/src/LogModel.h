@@ -33,6 +33,8 @@ public:
 
 
     void loadFile(const QString& filePath);
+    void clearFile();
+    void deleteRows(const std::vector<int>& sourceRows);
 
     // Search — returns match count
     void startSearch(const QString& query);
@@ -58,18 +60,20 @@ public:
 
     // Timestamp parsing for external use (filter proxy)
     static QDateTime parseTimestampFromLine(const QString &line);
+    QDateTime getInterpolatedTimestamp(int row) const;
 
-signals:
+    signals:
     void searchFinished(int matchCount);
     void timestampsDetected(const QDateTime &first, const QDateTime &last);
     void tailUpdated();
 
-private slots:
+    private slots:
     void onFileChanged(const QString &path);
 
-private:
+    private:
     void cleanup();
-    void parseTimestamps();
+    void buildTimestampIndex();
+    std::vector<QDateTime> m_interpolatedTimestamps;
     static QDateTime tryParseTimestamp(const char *data, int len);
 
     QString m_filePath;

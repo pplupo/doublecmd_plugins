@@ -18,18 +18,18 @@ find_package(re2 REQUIRED)
 # For inotify, it's native linux.
 
 # Build the shared library (WLX plugin)
-add_library(logviewer_wlx SHARED
+add_library(logviewer SHARED
     src/wlx_plugin.cpp
     src/LogViewerWidget.cpp
     src/LogModel.cpp
 )
 
-set_target_properties(logviewer_wlx PROPERTIES
+set_target_properties(logviewer PROPERTIES
     PREFIX ""
     SUFFIX ".wlx"
 )
 
-target_link_libraries(logviewer_wlx PRIVATE
+target_link_libraries(logviewer PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets

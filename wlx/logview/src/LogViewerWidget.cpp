@@ -581,13 +581,37 @@ LogViewerWidget::LogViewerWidget(QWidget *parent)
     mainLayout->addLayout(statusLayout);
 
     // ────────────────────────────────────────────────────────────────────
-    // FOCUS LAYER 2: Set Qt::NoFocus on ALL child widgets.
-    // This prevents Tab traversal and click-to-focus from pulling keyboard
-    // focus away from Double Commander's file panel.
-    // We install ourselves as an event filter on every child to catch
-    // any FocusIn events that bypass the policy (programmatic setFocus).
+    // FOCUS: Install event filter on qApp for geometry-based activation.
+    // Uses the FocusManager pattern from wlxbase_wlqt: click inside the
+    // plugin activates it (gives listView focus); click outside deactivates
+    // it (returns focus to DC).  Shortcuts only fire when active.
     // ────────────────────────────────────────────────────────────────────
-    installFocusGuard();
+    setFocusProxy(listView);
+    qApp->installEventFilter(this);
+
+    // Detect focus leaving the plugin hierarchy (e.g. Alt-Tab, DC menu)
+    connect(qApp, &QApplication::focusChanged, this, [this](QWidget *old, QWidget *now) {
+        if (QApplication::activeModalWidget())
+            return;
+
+        bool oldInside = old && (old == this || this->isAncestorOf(old));
+        bool nowInside = now && (now == this || this->isAncestorOf(now));
+
+        if (m_isActive && oldInside && !nowInside) {
+            m_isActive = false;
+            m_activeInput = nullptr;
+        } else if (!m_isActive && nowInside && !oldInside) {
+            if (old) {
+                QTimer::singleShot(0, this, [this]() {
+                    restoreFocusToDC();
+                });
+            } else {
+                QTimer::singleShot(0, this, [this]() {
+                    restoreFocusToDC();
+                });
+            }
+        }
+    });
 
     // ── Connections ────────────────────────────────────────────────────
     connect(btnSearchStart, &QPushButton::clicked,
@@ -622,128 +646,130 @@ LogViewerWidget::LogViewerWidget(QWidget *parent)
 }
 
 LogViewerWidget::~LogViewerWidget() {
-    qDebug() << "LogViewerWidget destroyed";
 }
 
-// ─── Focus Layer 2: installFocusGuard ──────────────────────────────────
-//
-// Walk the entire child tree: set NoFocus on non-input widgets.
-// Input widgets (searchEdit, timeStart, timeEnd) and their internal children
-// are left alone so they remain usable, but we still install our event
-// filter on them for Escape/Enter handling and FocusIn interception.
-//
-bool LogViewerWidget::isInputWidget(QWidget *w) const {
+// ─── Focus helpers ─────────────────────────────────────────────────────
+
+bool LogViewerWidget::isTextInputWidget(QWidget *w) const {
     if (!w) return false;
     if (w == searchEdit || w == timeStart || w == timeEnd) return true;
-    // Check if w is an internal child of an input widget
     if (searchEdit->isAncestorOf(w)) return true;
     if (timeStart->isAncestorOf(w)) return true;
     if (timeEnd->isAncestorOf(w)) return true;
     return false;
 }
 
-void LogViewerWidget::installFocusGuard() {
-    const auto children = findChildren<QWidget*>();
-    for (QWidget *child : children) {
-        child->installEventFilter(this);
-        // Input widgets keep their default focus policy so they remain usable
-        if (!isInputWidget(child))
-            child->setFocusPolicy(Qt::NoFocus);
-    }
-}
-
-// ─── Focus Layer 3: save / restore ─────────────────────────────────────
-//
-// Call restoreFocusToDC() after any operation that may have stolen focus.
-//
 void LogViewerWidget::restoreFocusToDC() {
     if (m_savedFocusWidget) {
         m_savedFocusWidget->setFocus(Qt::OtherFocusReason);
+    } else if (parentWidget()) {
+        parentWidget()->setFocus(Qt::OtherFocusReason);
     } else {
-        // Last resort: clear focus from anything inside our subtree
         if (QWidget *fw = QApplication::focusWidget()) {
-            if (fw == this || fw->isAncestorOf(this) || this->isAncestorOf(fw))
+            if (fw == this || this->isAncestorOf(fw))
                 fw->clearFocus();
         }
     }
 }
 
-// ─── Focus Layer 4: Global FocusIn interceptor ─────────────────────────
-//
-// If ANY child widget inside our subtree receives FocusIn, we immediately
-// clear it — UNLESS the user has explicitly activated an input widget
-// (searchEdit, timeStart, timeEnd) via mouse click.
-//
+// ─── Event filter (installed on qApp) ──────────────────────────────────
+
 bool LogViewerWidget::eventFilter(QObject *obj, QEvent *event) {
-    auto *w = qobject_cast<QWidget*>(obj);
+    QWidget *w = qobject_cast<QWidget*>(obj);
 
-    // ── Layer 4: Intercept FocusIn on our children ─────────────────────
-    if (event->type() == QEvent::FocusIn && w && this->isAncestorOf(w)) {
-        // Allow focus on the active input widget and its internal children
-        if (m_activeInput && (w == m_activeInput || m_activeInput->isAncestorOf(w)))
+    // ── Geometry-based click activation/deactivation ───────────────────
+    if (event->type() == QEvent::MouseButtonPress) {
+        auto *me = static_cast<QMouseEvent*>(event);
+        const QPoint gp = me->globalPosition().toPoint();
+        const QRect gr(mapToGlobal(QPoint(0, 0)), size());
+
+        if (m_isActive && !gr.contains(gp)) {
+            // Click outside plugin → deactivate
+            m_isActive = false;
+            m_activeInput = nullptr;
+            clearFocus();
+            restoreFocusToDC();
             return false;
-        // Reject all other focus — restore to DC
-        QTimer::singleShot(0, this, [this]() { restoreFocusToDC(); });
-        return false;
-    }
+        } else if (!m_isActive && gr.contains(gp)) {
+            // Click inside plugin → activate
+            m_isActive = true;
 
-    // ── Handle ChildAdded: guard dynamically-created children ──────────
-    if (event->type() == QEvent::ChildAdded) {
-        auto *ce = static_cast<QChildEvent*>(event);
-        if (auto *childWidget = qobject_cast<QWidget*>(ce->child())) {
-            if (!isInputWidget(childWidget))
-                childWidget->setFocusPolicy(Qt::NoFocus);
-            childWidget->installEventFilter(this);
+            // Determine what was clicked
+            if (w && isTextInputWidget(w)) {
+                // Clicked a text input — let it gain focus naturally
+                m_activeInput = w;
+                // Find the top-level input widget for tracking
+                if (searchEdit->isAncestorOf(w) || w == searchEdit)
+                    m_activeInput = searchEdit;
+                else if (timeStart->isAncestorOf(w) || w == timeStart)
+                    m_activeInput = timeStart;
+                else if (timeEnd->isAncestorOf(w) || w == timeEnd)
+                    m_activeInput = timeEnd;
+            } else {
+                // Clicked somewhere else in the plugin — focus the list
+                m_activeInput = nullptr;
+                listView->setFocus(Qt::MouseFocusReason);
+            }
+            return false;
+        } else if (m_isActive && gr.contains(gp)) {
+            // Already active, click inside — update input tracking
+            if (w && isTextInputWidget(w)) {
+                if (searchEdit->isAncestorOf(w) || w == searchEdit)
+                    m_activeInput = searchEdit;
+                else if (timeStart->isAncestorOf(w) || w == timeStart)
+                    m_activeInput = timeStart;
+                else if (timeEnd->isAncestorOf(w) || w == timeEnd)
+                    m_activeInput = timeEnd;
+                else
+                    m_activeInput = w;
+            } else if (w && (w == listView || listView->isAncestorOf(w))) {
+                m_activeInput = nullptr;
+                listView->setFocus(Qt::MouseFocusReason);
+            } else {
+                m_activeInput = nullptr;
+            }
+            return false;
         }
     }
 
-    // ── KeyPress handling ──────────────────────────────────────────────
-    if (event->type() == QEvent::KeyPress) {
+    // ── KeyPress handling (only when plugin is active) ─────────────────
+    if (event->type() == QEvent::KeyPress && m_isActive) {
         auto *ke = static_cast<QKeyEvent*>(event);
 
-        // Escape from any input widget: deactivate and restore focus to DC
-        if (ke->key() == Qt::Key_Escape && m_activeInput) {
-            m_activeInput = nullptr;
-            restoreFocusToDC();
+        // Escape: deactivate text input or deactivate plugin entirely
+        if (ke->key() == Qt::Key_Escape) {
+            if (m_activeInput) {
+                m_activeInput = nullptr;
+                listView->setFocus(Qt::OtherFocusReason);
+            } else {
+                m_isActive = false;
+                restoreFocusToDC();
+            }
             return true;
         }
 
-        // Enter in search edit: trigger search, deactivate, restore focus
-        if (obj == searchEdit && (ke->key() == Qt::Key_Return ||
-                                  ke->key() == Qt::Key_Enter)) {
+        // Enter in search edit: trigger search, return focus to list
+        if (m_activeInput == searchEdit && (ke->key() == Qt::Key_Return ||
+                                             ke->key() == Qt::Key_Enter)) {
             onSearchStartClicked();
             m_activeInput = nullptr;
-            restoreFocusToDC();
+            listView->setFocus(Qt::OtherFocusReason);
             return true;
         }
 
-        // Ctrl+C in list view: copy
-        if (obj == listView && ke->matches(QKeySequence::Copy)) {
-            copySelectedLines();
-            return true;
-        }
+        // Shortcuts that only work when NOT in a text input
+        if (!m_activeInput) {
+            // Ctrl+C: copy selected lines
+            if (ke->matches(QKeySequence::Copy)) {
+                copySelectedLines();
+                return true;
+            }
 
-        // Delete key in list view: delete selected lines
-        if (obj == listView && ke->key() == Qt::Key_Delete && !m_activeInput) {
-            deleteSelectedLines();
-            return true;
-        }
-    }
-
-    // ── MousePress on input widgets: activate them temporarily ─────────
-    if (event->type() == QEvent::MouseButtonPress && w) {
-        // Determine if click is on one of our input widgets
-        QWidget *inputTarget = nullptr;
-        if (w == searchEdit || searchEdit->isAncestorOf(w))
-            inputTarget = searchEdit;
-        else if (w == timeStart || timeStart->isAncestorOf(w))
-            inputTarget = timeStart;
-        else if (w == timeEnd || timeEnd->isAncestorOf(w))
-            inputTarget = timeEnd;
-
-        if (inputTarget) {
-            m_activeInput = inputTarget;
-            return false; // let the click through normally
+            // Delete: delete selected lines
+            if (ke->key() == Qt::Key_Delete) {
+                deleteSelectedLines();
+                return true;
+            }
         }
     }
 
@@ -753,21 +779,26 @@ bool LogViewerWidget::eventFilter(QObject *obj, QEvent *event) {
 // ─── File loading ──────────────────────────────────────────────────────
 
 void LogViewerWidget::loadFile(const QString& filePath) {
-    qDebug() << "LogViewerWidget loading file:" << filePath;
-
-    // FOCUS LAYER 3: Save whichever DC widget currently has focus
-    m_savedFocusWidget = QApplication::focusWidget();
+    // Save whichever DC widget currently has focus to restore it later.
+    // Crucial: Only save it if the focused widget is outside our plugin!
+    // Otherwise, a reload triggered while we have focus would trap focus inside us.
+    if (QWidget *fw = QApplication::focusWidget()) {
+        if (fw != this && !this->isAncestorOf(fw)) {
+            m_savedFocusWidget = fw;
+        }
+    }
 
     currentFile = filePath;
     m_lastMatchRow = -1;
     m_lastSearchQuery.clear();
     m_activeInput = nullptr;
+    m_isActive = false; // Ensure we start inactive
     statusLabel->setText(QString("Loading %1...").arg(filePath));
     model->loadFile(filePath);
     statusLabel->setText(QString("Lines: %1 | %2")
         .arg(model->lineCount()).arg(filePath));
 
-    // FOCUS LAYER 3: Restore focus to DC after loading completes
+    // Restore focus to DC after loading completes
     QTimer::singleShot(0, this, [this]() { restoreFocusToDC(); });
 }
 

@@ -23,7 +23,6 @@ EXPORT void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps) {
 
 EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags) {
     try {
-        qDebug() << "ListLoad called for file:" << FileToLoad;
         
         // On Double Commander's Qt6 widgetset, ParentWin is a QWidget* pointer
         // (not an X11 window ID). Simply cast and use as the parent widget.
@@ -57,7 +56,6 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags) {
 
 EXPORT int DCPCALL ListLoadNext(HWND ParentWin, HWND PluginWin, char* FileToLoad, int ShowFlags) {
     try {
-        qDebug() << "ListLoadNext called for file:" << FileToLoad;
         
         // PluginWin is the QWidget* pointer returned by ListLoad
         LogViewerWidget *viewer = qobject_cast<LogViewerWidget*>((QWidget*)PluginWin);
@@ -75,7 +73,6 @@ EXPORT int DCPCALL ListLoadNext(HWND ParentWin, HWND PluginWin, char* FileToLoad
 
 EXPORT void DCPCALL ListCloseWindow(HWND ListWin) {
     try {
-        qDebug() << "ListCloseWindow called";
         // ListWin is the QWidget* pointer returned by ListLoad
         QWidget *widget = (QWidget*)ListWin;
         if (widget) {
@@ -90,7 +87,6 @@ EXPORT void DCPCALL ListCloseWindow(HWND ListWin) {
 
 EXPORT int DCPCALL ListSearchText(HWND ListWin, char* SearchString, int SearchParameter) {
     try {
-        qDebug() << "ListSearchText called:" << SearchString;
         // ListWin is the QWidget* pointer returned by ListLoad
         LogViewerWidget *viewer = qobject_cast<LogViewerWidget*>((QWidget*)ListWin);
         if (viewer) {

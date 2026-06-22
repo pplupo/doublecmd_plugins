@@ -70,9 +70,8 @@ private slots:
 
 private:
     void scrollToSourceRow(int sourceRow);
-    void installFocusGuard();       // NoFocus + focusProxy on all children
     void restoreFocusToDC();        // Give focus back to the saved DC widget
-    bool isInputWidget(QWidget *w) const; // Check if w is an input widget
+    bool isTextInputWidget(QWidget *w) const; // Check if w is a text input (searchEdit, timeStart, timeEnd)
 
     // UI Elements
     QListView *listView;
@@ -97,7 +96,8 @@ private:
     int m_lastMatchRow = -1;
     bool m_timestampsLoading = false;
 
-    // Focus management: save/restore DC's focused widget across file loads
+    // Focus management
+    bool m_isActive = false;
     QPointer<QWidget> m_savedFocusWidget;
-    QPointer<QWidget> m_activeInput; // currently active input widget (search/time edits)
+    QPointer<QWidget> m_activeInput; // currently active text input widget (search/time edits)
 };
