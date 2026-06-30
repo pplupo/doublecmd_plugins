@@ -21,41 +21,8 @@
 #include <QMenu>
 #include <QApplication>
 #include <QLabel>
-#include <QStyledItemDelegate>
-#include <QPlainTextEdit>
 
 using namespace QtWlPlugin;
-
-class MultiLineDelegate : public QStyledItemDelegate {
-    Q_OBJECT
-public:
-    using QStyledItemDelegate::QStyledItemDelegate;
-
-    QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &option,
-                          const QModelIndex &index) const override {
-        auto *editor = new QPlainTextEdit(parent);
-        editor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-        return editor;
-    }
-
-    void setEditorData(QWidget *editor, const QModelIndex &index) const override {
-        QString value = index.model()->data(index, Qt::EditRole).toString();
-        auto *textEdit = static_cast<QPlainTextEdit*>(editor);
-        textEdit->setPlainText(value);
-    }
-
-    void setModelData(QWidget *editor, QAbstractItemModel *model,
-                      const QModelIndex &index) const override {
-        auto *textEdit = static_cast<QPlainTextEdit*>(editor);
-        model->setData(index, textEdit->toPlainText(), Qt::EditRole);
-    }
-
-    void updateEditorGeometry(QWidget *editor,
-                              const QStyleOptionViewItem &option,
-                              const QModelIndex &index) const override {
-        editor->setGeometry(option.rect);
-    }
-};
 
 StructViewWidget::StructViewWidget(QWidget *parent)
     : QWidget(parent)
@@ -118,7 +85,6 @@ void StructViewWidget::setupUi()
     m_gridView->setSelectionBehavior(QAbstractItemView::SelectItems);
     m_gridView->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_gridView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-    m_gridView->setItemDelegate(new MultiLineDelegate(m_gridView));
 
     connect(m_filterHeader, &FilterableHeaderView::filterChanged, this,
             [this](int column, const QString &text) {
@@ -689,4 +655,4 @@ void StructViewWidget::showTreeContextMenu(const QPoint &pos)
         }
     }
 }
-#include "StructViewWidget.moc"
+
