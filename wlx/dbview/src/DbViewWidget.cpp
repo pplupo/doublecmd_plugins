@@ -83,6 +83,12 @@ DbViewWidget::~DbViewWidget()
 // File loading
 // ---------------------------------------------------------------------------
 
+void DbViewWidget::discardPendingChanges()
+{
+    if (m_engine && m_engine->supportsSubmitRevert() && !m_engine->isReadOnly())
+        m_engine->revertAll();
+}
+
 bool DbViewWidget::loadFile(const QString &filepath)
 {
     m_loadedFilePath = filepath;

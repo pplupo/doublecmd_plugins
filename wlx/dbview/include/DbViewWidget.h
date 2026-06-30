@@ -36,6 +36,9 @@ public:
     bool loadFile(const QString &filepath);
     QString currentFilePath() const { return m_loadedFilePath; }
 
+    /// Discard any uncommitted edits (works for all engine types).
+    void discardPendingChanges();
+
     // WLX bridge accessors
     QtWlPlugin::FocusManager *focusManager() const;
     QtWlPlugin::EditableGridWidget *grid() const;

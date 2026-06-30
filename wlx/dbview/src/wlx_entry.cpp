@@ -11,7 +11,6 @@
 
 #include "wlxplugin.h"
 #include "DbViewWidget.h"
-#include "KeyValueModel.h"
 
 // ---------------------------------------------------------------------------
 // Widget instance tracking — prevents DC's file-change reload cycle from
@@ -49,13 +48,7 @@ HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
             // or user navigated away and came back.
             // Discard any uncommitted edits and show the existing widget.
             if (widget->currentFilePath() == path) {
-                if (widget->grid() && widget->grid()->view() && widget->grid()->view()->model()) {
-                    // Revert pending KV edits (no-op for SQL engines)
-                    auto *kvModel = qobject_cast<KeyValueModel*>(
-                        const_cast<QAbstractItemModel*>(widget->grid()->view()->model()));
-                    if (kvModel)
-                        kvModel->revertAll();
-                }
+                widget->discardPendingChanges();
                 widget->show();
                 return reinterpret_cast<HWND>(widget);
             }
