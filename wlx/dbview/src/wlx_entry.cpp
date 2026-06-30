@@ -11,6 +11,7 @@
 
 #include "wlxplugin.h"
 #include "DbViewWidget.h"
+#include "KeyValueModel.h"
 
 // ---------------------------------------------------------------------------
 // Widget instance tracking — prevents DC's file-change reload cycle from
@@ -44,9 +45,17 @@ HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
         // Check for an existing widget on this parent (DC reload cycle)
         DbViewWidget *widget = g_instances.value(ParentWin, nullptr);
         if (widget && widget->parentWidget() == parentWidget) {
-            // Same file → DC is reloading due to file-change detection.
-            // Just show the existing widget — don't reload.
+            // Same file → DC is reloading due to file-change detection,
+            // or user navigated away and came back.
+            // Discard any uncommitted edits and show the existing widget.
             if (widget->currentFilePath() == path) {
+                if (widget->grid() && widget->grid()->view() && widget->grid()->view()->model()) {
+                    // Revert pending KV edits (no-op for SQL engines)
+                    auto *kvModel = qobject_cast<KeyValueModel*>(
+                        const_cast<QAbstractItemModel*>(widget->grid()->view()->model()));
+                    if (kvModel)
+                        kvModel->revertAll();
+                }
                 widget->show();
                 return reinterpret_cast<HWND>(widget);
             }
