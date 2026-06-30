@@ -19,6 +19,7 @@
 #include <QRegularExpression>
 #include <QMessageBox>
 #include <QSortFilterProxyModel>
+#include <QPlainTextEdit>
 #include <algorithm>
 
 namespace QtWlPlugin {
@@ -194,6 +195,37 @@ QSize WrapAnywhereDelegate::sizeHint(const QStyleOptionViewItem &option,
 
 void WrapAnywhereDelegate::setWrapAnywhere(bool wrap) { m_wrap = wrap; }
 bool WrapAnywhereDelegate::wrapAnywhere() const { return m_wrap; }
+
+QWidget *WrapAnywhereDelegate::createEditor(QWidget *parent, const QStyleOptionViewItem &option,
+                                            const QModelIndex &index) const {
+    auto *editor = new QPlainTextEdit(parent);
+    editor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    return editor;
+}
+
+void WrapAnywhereDelegate::setEditorData(QWidget *editor, const QModelIndex &index) const {
+    QString value = index.model()->data(index, Qt::EditRole).toString();
+    auto *textEdit = qobject_cast<QPlainTextEdit*>(editor);
+    if (textEdit)
+        textEdit->setPlainText(value);
+    else
+        QStyledItemDelegate::setEditorData(editor, index);
+}
+
+void WrapAnywhereDelegate::setModelData(QWidget *editor, QAbstractItemModel *model,
+                                        const QModelIndex &index) const {
+    auto *textEdit = qobject_cast<QPlainTextEdit*>(editor);
+    if (textEdit)
+        model->setData(index, textEdit->toPlainText(), Qt::EditRole);
+    else
+        QStyledItemDelegate::setModelData(editor, model, index);
+}
+
+void WrapAnywhereDelegate::updateEditorGeometry(QWidget *editor,
+                                                const QStyleOptionViewItem &option,
+                                                const QModelIndex &index) const {
+    editor->setGeometry(option.rect);
+}
 
 // ---------------------------------------------------------------------------
 // EditableGridWidget
@@ -507,6 +539,10 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
         }
 
         if (ke->key() == Qt::Key_Up || ke->key() == Qt::Key_Down) {
+            // If the active editor is a QPlainTextEdit, let it move the cursor within text
+            if (qobject_cast<QPlainTextEdit*>(m_fm->activeInput()))
+                return QWidget::eventFilter(obj, event);
+
             QModelIndex current = m_view->currentIndex();
             int r = current.row(), c = current.column();
             if (ke->key() == Qt::Key_Up) r--;
@@ -531,6 +567,21 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
         }
 
         if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
+            auto *plainEditor = qobject_cast<QPlainTextEdit*>(m_fm->activeInput());
+
+            if (plainEditor) {
+                // Ctrl+Enter commits; plain Enter inserts newline
+                if (ke->modifiers() & Qt::ControlModifier) {
+                    QModelIndex current = m_view->currentIndex();
+                    QAbstractItemDelegate *delegate = m_view->itemDelegateForIndex(current);
+                    if (delegate && plainEditor)
+                        delegate->setModelData(plainEditor, model, current);
+                    m_view->closePersistentEditor(current);
+                    return true;
+                }
+                return QWidget::eventFilter(obj, event);
+            }
+
             QModelIndex current = m_view->currentIndex();
             int r = current.row(), c = current.column();
 
