@@ -570,16 +570,18 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
             auto *plainEditor = qobject_cast<QPlainTextEdit*>(m_fm->activeInput());
 
             if (plainEditor) {
-                // Ctrl+Enter commits; plain Enter inserts newline
                 if (ke->modifiers() & Qt::ControlModifier) {
-                    QModelIndex current = m_view->currentIndex();
-                    QAbstractItemDelegate *delegate = m_view->itemDelegateForIndex(current);
-                    if (delegate && plainEditor)
-                        delegate->setModelData(plainEditor, model, current);
-                    m_view->closePersistentEditor(current);
+                    // Ctrl+Enter inserts a newline within the editor
+                    plainEditor->insertPlainText(QStringLiteral("\n"));
                     return true;
                 }
-                return QWidget::eventFilter(obj, event);
+                // Plain Enter commits and closes
+                QModelIndex current = m_view->currentIndex();
+                QAbstractItemDelegate *delegate = m_view->itemDelegateForIndex(current);
+                if (delegate)
+                    delegate->setModelData(plainEditor, model, current);
+                m_view->closePersistentEditor(current);
+                return true;
             }
 
             QModelIndex current = m_view->currentIndex();
