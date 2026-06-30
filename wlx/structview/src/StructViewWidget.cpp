@@ -296,6 +296,8 @@ bool StructViewWidget::loadFile(const QString &filepath)
     m_filepath = filepath;
 
     // Populate tree
+    m_currentNode = nullptr;
+    m_gridModel->clear();
     populateTree();
 
     // Set text tab
@@ -306,10 +308,22 @@ bool StructViewWidget::loadFile(const QString &filepath)
     m_statusBar->setFormatInfo(m_engine->formatName());
     m_statusBar->setEncoding(EncodingUtils::detectEncoding(data));
 
-    // Select root node
+    // Select root node and explicitly show its data (don't rely on
+    // currentChanged firing — it may be suppressed if the index position
+    // hasn't changed between loads of the same or a previous file).
     if (m_treeModel->rowCount() > 0) {
-        m_treeView->setCurrentIndex(m_treeModel->index(0, 0));
+        QModelIndex rootIdx = m_treeModel->index(0, 0);
+        // Block signals so setCurrentIndex doesn't double-call showNodeData
+        m_treeView->selectionModel()->blockSignals(true);
+        m_treeView->setCurrentIndex(rootIdx);
+        m_treeView->selectionModel()->blockSignals(false);
         m_treeView->expandAll();
+
+        // Always refresh the grid from the fresh node
+        auto ptr = rootIdx.data(Qt::UserRole).value<quintptr>();
+        auto *rootNode = reinterpret_cast<DocumentNode*>(ptr);
+        if (rootNode)
+            showNodeData(rootNode);
     }
 
     if (m_grid && m_grid->undoStack()) {
