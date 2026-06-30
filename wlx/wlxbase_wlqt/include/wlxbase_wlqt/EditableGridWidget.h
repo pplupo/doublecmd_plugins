@@ -48,6 +48,7 @@ public:
     void updateEditorGeometry(QWidget *editor,
                               const QStyleOptionViewItem &option,
                               const QModelIndex &index) const override;
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private:
     bool m_wrap = false;
