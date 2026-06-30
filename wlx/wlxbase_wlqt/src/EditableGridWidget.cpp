@@ -229,21 +229,21 @@ void WrapAnywhereDelegate::updateEditorGeometry(QWidget *editor,
 
 bool WrapAnywhereDelegate::eventFilter(QObject *obj, QEvent *event) {
     // Qt installs the delegate as event filter on the editor widget.
-    // Intercept Enter/Return here so QPlainTextEdit editors behave correctly.
+    // We intercept plain Enter to commit+close, but let Ctrl+Enter fall through
+    // to QPlainTextEdit::keyPressEvent which inserts a newline naturally.
+    // (QAbstractItemDelegate::eventFilter already skips commit for QPlainTextEdit,
+    // so the event reaches keyPressEvent regardless — but we must not consume it.)
     auto *editor = qobject_cast<QPlainTextEdit*>(obj);
     if (editor && event->type() == QEvent::KeyPress) {
         auto *ke = static_cast<QKeyEvent*>(event);
-        if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
-            if (ke->modifiers() & Qt::ControlModifier) {
-                // Ctrl+Enter: insert a newline
-                editor->insertPlainText(QStringLiteral("\n"));
-                return true;
-            }
+        if ((ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter)
+                && !(ke->modifiers() & Qt::ControlModifier)) {
             // Plain Enter: commit and close
             emit commitData(editor);
             emit closeEditor(editor, QAbstractItemDelegate::SubmitModelCache);
             return true;
         }
+        // Ctrl+Enter: fall through — QPlainTextEdit::keyPressEvent inserts a newline.
     }
     return QStyledItemDelegate::eventFilter(obj, event);
 }
