@@ -3,6 +3,7 @@
 #include <QWidget>
 #include <QTableView>
 #include <QAbstractItemModel>
+#include <QHash>
 
 #include <wlxbase_wlqt/FocusManager.h>
 #include <wlxbase_wlqt/EditableGridWidget.h>
@@ -10,6 +11,21 @@
 
 #include "wlxplugin.h"
 #include "DbViewWidget.h"
+
+// ---------------------------------------------------------------------------
+// Widget instance tracking — prevents DC's file-change reload cycle from
+// destroying the plugin widget (which causes focus loss and flicker).
+// Same approach as the Kate editor WLX plugin.
+// ---------------------------------------------------------------------------
+
+static QHash<void*, DbViewWidget*> g_instances;
+
+static void trackParentLifetime(QWidget *parent, void *key) {
+    QObject::connect(parent, &QObject::destroyed, parent, [key]() {
+        DbViewWidget *w = g_instances.take(key);
+        delete w;
+    });
+}
 
 // ---------------------------------------------------------------------------
 // WLX Plugin Entry Points — all wrapped with WLX_TRY/WLX_CATCH
@@ -22,12 +38,33 @@ HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
         if (!QApplication::instance())
             return nullptr;
 
-        auto *widget = new DbViewWidget(reinterpret_cast<QWidget*>(ParentWin));
-        if (!widget->loadFile(QString::fromUtf8(FileToLoad))) {
+        auto *parentWidget = reinterpret_cast<QWidget*>(ParentWin);
+        const QString path = QString::fromUtf8(FileToLoad);
+
+        // Check for an existing widget on this parent (DC reload cycle)
+        DbViewWidget *widget = g_instances.value(ParentWin, nullptr);
+        if (widget && widget->parentWidget() == parentWidget) {
+            // Same file → DC is reloading due to file-change detection.
+            // Just show the existing widget — don't reload.
+            if (widget->currentFilePath() == path) {
+                widget->show();
+                return reinterpret_cast<HWND>(widget);
+            }
+            // Different file → user selected a new file.
+            // Destroy the old widget and fall through to create a new one.
+            g_instances.remove(ParentWin);
+            delete widget;
+            widget = nullptr;
+        }
+
+        widget = new DbViewWidget(parentWidget);
+        if (!widget->loadFile(path)) {
             delete widget;
             return nullptr;
         }
 
+        g_instances.insert(ParentWin, widget);
+        trackParentLifetime(parentWidget, ParentWin);
         widget->show();
         return reinterpret_cast<HWND>(widget);
     } WLX_CATCH("ListLoad");
@@ -37,8 +74,12 @@ HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
 void DCPCALL ListCloseWindow(HWND ListWin)
 {
     WLX_TRY {
+        // DC calls ListCloseWindow during its internal "reload" cycle.
+        // Hide instead of delete so the widget survives the cycle.
+        // Cleanup happens when the parent container is destroyed.
         auto *widget = reinterpret_cast<DbViewWidget*>(ListWin);
-        delete widget;
+        if (widget)
+            widget->hide();
     } WLX_CATCH("ListCloseWindow");
 }
 
@@ -62,8 +103,7 @@ int DCPCALL ListSendCommand(HWND ListWin, int Command, int Parameter)
             // DC sends lc_newparams when it detects file changes in the
             // viewed directory (e.g. DB engine writing LOG/WAL files).
             // Returning LISTPLUGIN_ERROR causes DC to destroy/recreate the
-            // plugin, which looks like "reloads" and causes focus loss.
-            // Accept and ignore to prevent the destroy/recreate cycle.
+            // plugin. Accept and ignore to prevent the cycle.
             return LISTPLUGIN_OK;
         case lc_focus:
             if (Parameter) {

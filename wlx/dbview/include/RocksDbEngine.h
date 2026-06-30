@@ -22,7 +22,7 @@ public:
     QString currentTableName() const override;
 
     bool supportsMultipleTables() const override { return false; }
-    bool supportsSubmitRevert() const override { return false; }
+    bool supportsSubmitRevert() const override { return true; }
     QString engineName() const override { return QStringLiteral("RocksDB"); }
 
 private:

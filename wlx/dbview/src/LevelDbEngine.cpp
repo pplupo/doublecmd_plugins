@@ -42,18 +42,36 @@ bool LevelDbEngine::open(const QString &filepath)
     if (!QFile::exists(dbPath + QStringLiteral("/CURRENT")))
         return false;
 
-    rocksdb::Options options;
-    options.create_if_missing = false;
-    // No-op logger suppresses LOG file writes in the DB directory
-    options.info_log = std::make_shared<RocksDbNoOpLogger>();
-    // Redirect info log dir away from the watched DB directory
+    // Redirect all engine file writes away from the DB directory so DC's
+    // file-change detection is not triggered (which causes focus loss/reload).
     QString tmpDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
                      + QStringLiteral("/dbview_logs");
     QDir().mkpath(tmpDir);
+
+    rocksdb::Options options;
+    options.create_if_missing = false;
+    options.info_log = std::make_shared<RocksDbNoOpLogger>();
     options.db_log_dir = tmpDir.toStdString();
+    options.wal_dir = tmpDir.toStdString();
+    // Disable background threads — RocksDB compaction/flush threads conflict
+    // with Qt's GUI threading model (Breeze theme crash on native LevelDB DBs).
+    options.max_background_jobs = 0;
+    options.disable_auto_compactions = true;
 
     rocksdb::DB *db = nullptr;
-    rocksdb::Status status = rocksdb::DB::OpenForReadOnly(options, dbPath.toStdString(), &db);
+
+    // Try writable first — enables editing
+    rocksdb::Status status = rocksdb::DB::Open(options, dbPath.toStdString(), &db);
+    if (status.ok() && db) {
+        m_db = db;
+        m_readOnly = false;
+        m_keyCount = countKeys();
+        return true;
+    }
+
+    // Fallback: read-only (DB locked by another process)
+    db = nullptr;
+    status = rocksdb::DB::OpenForReadOnly(options, dbPath.toStdString(), &db);
     if (!status.ok() || !db)
         return false;
 

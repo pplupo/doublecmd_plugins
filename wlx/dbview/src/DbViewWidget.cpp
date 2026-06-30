@@ -85,6 +85,7 @@ DbViewWidget::~DbViewWidget()
 
 bool DbViewWidget::loadFile(const QString &filepath)
 {
+    m_loadedFilePath = filepath;
     m_engine = DbEngine::createForFile(filepath);
     if (!m_engine)
         return false;

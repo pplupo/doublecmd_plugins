@@ -34,6 +34,7 @@ public:
     ~DbViewWidget() override;
 
     bool loadFile(const QString &filepath);
+    QString currentFilePath() const { return m_loadedFilePath; }
 
     // WLX bridge accessors
     QtWlPlugin::FocusManager *focusManager() const;
@@ -86,4 +87,5 @@ private:
     QTableView *m_sqlResultsView = nullptr;
     QTextEdit *m_sqlMessageView = nullptr;
     QSplitter *m_mainSplitter = nullptr;
+    QString m_loadedFilePath;
 };
