@@ -12,7 +12,7 @@ Built on the [`wlxbase_wlqt`](../wlxbase_wlqt/) platform library.
 > By default, this plugin attempts to open databases in **read-write** mode to allow direct grid editing and data mutation.
 > - **File Locking:** Opening a database with read-write privileges may lock the file, preventing other applications from writing to it.
 > - **Concurrent Access Fallback:** If the database file is locked by another process, the plugin will silently fall back to **read-only** mode.
-> - **Data Integrity:** Any edited cells must be explicitly committed using the **Commit** button (or `Ctrl+S` / `Ctrl+Shift+Z`) for relational databases, or are saved instantly for key-value stores. Handle write mode with care to prevent unintended database modifications.
+> - **Buffered Edits:** All changes are buffered in memory and must be explicitly committed using the **Commit** button (`Ctrl+S` or `Ctrl+Shift+Z`). Uncommitted changes can be discarded with the **Revert** button (`Ctrl+Z`). Handle write mode with care to prevent unintended database modifications.
 
 ---
 
@@ -24,17 +24,17 @@ Built on the [`wlxbase_wlqt`](../wlxbase_wlqt/) platform library.
 - **Copy Selection** (`Ctrl+C`) — copy selected cell values as tab-separated values.
 - **Word Wrap & Grid Lines** — toolbar actions to toggle wrapping and gridlines.
 - **`GridMode::LiveDatabase`** — direct table mapping with minimal memory overhead.
+- **Commit / Revert** (`Ctrl+S` / `Ctrl+Z` or `Ctrl+Shift+Z`) — commit or discard pending changes. Available on all writable engines.
 
 ### SQL Engines (SQLite, DuckDB, Firebird Embedded, Apache Parquet)
 - **SQL Console:** A vertical split panel containing a query editor (with execution via `Ctrl+Return` or `Execute` button), results grid, and CSV/TSV results exporter.
 - **Apache Parquet Proxying:** Opening a `.parquet`/`.pq` file initializes an in-memory DuckDB database and reads it via a virtual `read_parquet` view, making it SQL-queryable.
-- **In-place Grid Editing:** Cells are editable, with modifications buffered.
-- **Commit / Revert** (`Ctrl+S` / `Ctrl+Z` or `Ctrl+Shift+Z`) — commit or rollback pending changes.
+- **In-place Grid Editing:** Cells are editable, with modifications buffered until committed.
 
 ### Key-Value & Non-Relational Engines (LevelDB, RocksDB, LMDB, Berkeley DB, MS Access)
 - **Hidden SQL Console:** The SQL Console panel is automatically hidden as these engines do not support custom SQL.
 - **Two-Column Grid:** Displays Key and Value columns.
-- **Immediate Writing:** Key-value writes are saved instantly (no buffering).
+- **Buffered Editing:** Value edits are buffered in memory until explicitly committed, consistent with SQL engines.
 - **Binary/BLOB Value Detection:** Non-UTF-8 values and large binaries display placeholder information `[Binary Data - X bytes]`.
 - **Right-Click Context Menu Options:**
   - **Hex View Toggle:** Displays binary data as space-separated hex strings.
@@ -44,36 +44,34 @@ Built on the [`wlxbase_wlqt`](../wlxbase_wlqt/) platform library.
 
 ---
 
+## Engine Capabilities
+
+| Engine | Extensions | Writable | Commit/Revert | SQL Console | Notes |
+|--------|-----------|:--------:|:-------------:|:-----------:|-------|
+| SQLite | `.sqlite`, `.sqlite3`, `.db`, `.db3` | ✅ | ✅ | ✅ | QSQLITE driver |
+| DuckDB | `.duckdb` | ✅ | ✅ | ✅ | Native C++ API |
+| Apache Parquet | `.parquet`, `.pq` | ✅ | ✅ | ✅ | Via DuckDB `read_parquet()` |
+| Firebird Embedded | `.fdb` | ✅ | ✅ | ✅ | QIBASE driver |
+| RocksDB | `.sst` (with `CURRENT`) | ✅ | ✅ | — | Requires `ENABLE_ROCKSDB_LEVELDB` |
+| LevelDB | `.ldb` (with `CURRENT`) | ✅ | ✅ | — | Via RocksDB API, bg threads disabled |
+| LMDB | `.lmdb`, `data.mdb` | ✅ | ✅ | — | C API |
+| Berkeley DB | `.bdb` | ✅ | ✅ | — | C API, B-Tree cursors |
+| MS Access | `.mdb`, `.accdb` | ❌ | — | — | Read-only (`libmdb`) |
+
+*All writable engines fall back to read-only if the database is locked by another process or lacks write permissions.*
+
+---
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+S` | Commit changes (Relational engines only) |
-| `Ctrl+Z` | Revert pending changes (Relational engines only) |
+| `Ctrl+S` | Commit changes |
+| `Ctrl+Z` | Revert pending changes |
 | `Ctrl+Shift+Z` | Alternative Commit/Redo shortcut |
 | `Ctrl+Return` | Execute custom SQL query inside the SQL Console |
 | `Ctrl+F` | Toggle Find panel |
 | `Ctrl+C` | Copy selection |
-
----
-
-## Engine Selection Logic
-
-The factory (`DbEngine::createForFile()`) resolves the file type by extension and locks:
-
-| Extension / File Pattern | Engine | SQL Console | Read-Only | Notes |
-|-------------------------|--------|-------------|-----------|-------|
-| `.sqlite`, `.sqlite3`, `.db`, `.db3` | SQLite | Yes | No* | QSQLITE driver connection |
-| `.duckdb` | DuckDB | Yes | No* | C++ native client API |
-| `.parquet`, `.pq` | DuckDB | Yes | No* | Virtual view via `read_parquet()` |
-| `.fdb` | Firebird Embedded | Yes | No* | QIBASE SQL driver connection |
-| `.mdb`, `.accdb` (if user table) | MS Access | No | **Yes** | Statically linked `libmdb` |
-| `.lmdb`, `data.mdb` | LMDB | No | No* | C API client |
-| `.bdb` | Berkeley DB | No | No* | C API with B-Tree cursors |
-| `.ldb`, `.sst`, `.log` (if parent has `CURRENT`) | LevelDB | No | **Yes** | C++ API client via RocksDB (if compiled) |
-| `.sst`, `.log` (fallback if LevelDB fails) | RocksDB | No | **Yes** | C++ API (if compiled) |
-
-*\* Note: Opens as Read-Only automatically if the file lacks write permissions or if the database is currently locked by another process.*
 
 ---
 
@@ -93,7 +91,7 @@ cmake ..
 make -j$(nproc)
 ```
 
-To enable support for **LevelDB** and **RocksDB**, you must compile with the `ENABLE_ROCKSDB_LEVELDB` flag set to `ON`. This flag is disabled by default because linking the RocksDB libraries increases the final `dbview_qt6.wlx` plugin size by over 12 MB. Both formats will be opened in strict read-only mode.
+To enable support for **LevelDB** and **RocksDB**, you must compile with the `ENABLE_ROCKSDB_LEVELDB` flag set to `ON`. This flag is disabled by default because linking the RocksDB libraries increases the final `dbview_qt6.wlx` plugin size by over 12 MB.
 
 ```bash
 cmake .. -DENABLE_ROCKSDB_LEVELDB=ON

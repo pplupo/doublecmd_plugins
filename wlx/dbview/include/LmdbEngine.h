@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DbEngine.h"
+#include "KeyValueModel.h"
 #include <lmdb.h>
 #undef mdb_open
 #undef mdb_close
@@ -19,7 +20,9 @@ public:
     QString currentTableName() const override;
 
     bool supportsMultipleTables() const override { return false; }
-    bool supportsSubmitRevert() const override { return false; }
+    bool supportsSubmitRevert() const override { return true; }
+    bool submitAll() override;
+    bool revertAll() override;
     QString engineName() const override { return QStringLiteral("LMDB"); }
 
 private:
@@ -28,5 +31,5 @@ private:
     MDB_env *m_env = nullptr;
     MDB_dbi m_dbi = 0;
     int m_keyCount = 0;
-    QAbstractItemModel *m_model = nullptr;
+    KeyValueModel *m_model = nullptr;
 };

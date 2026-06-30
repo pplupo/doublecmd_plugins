@@ -4,17 +4,21 @@
 #include <QVector>
 #include <QByteArray>
 #include <QSet>
+#include <QMap>
 #include <functional>
 
-/// QAbstractTableModel for Key-Value stores (LevelDB, RocksDB).
+/// QAbstractTableModel for Key-Value stores (LevelDB, RocksDB, LMDB, BDB).
 ///
 /// Uses a sliding window cache of ~1000 entries centered on the viewport.
 /// Binary values that fail UTF-8 validation are displayed as
 /// "[Binary Data - X bytes]" with support for hex view toggle
 /// and save/load binary values as files.
 ///
+/// Edits are buffered in memory until explicitly committed via submitAll().
+/// revertAll() discards the buffer and refreshes the display.
+///
 /// This model works with abstract iterator callbacks so the same model
-/// serves both LevelDB and RocksDB.
+/// serves LevelDB, RocksDB, LMDB, and Berkeley DB.
 class KeyValueModel : public QAbstractTableModel {
     Q_OBJECT
 public:
@@ -56,8 +60,17 @@ public:
     /// Set hex display mode for a row.
     void setHexMode(int row, bool enabled);
 
-    /// Replace a value from file contents.
+    /// Replace a value from file contents (buffered, not committed).
     bool loadValueFromFile(int row, const QByteArray &fileData);
+
+    /// Flush all pending edits to the database. Returns true if all writes succeed.
+    bool submitAll();
+
+    /// Discard all pending edits and refresh the display.
+    void revertAll();
+
+    /// Whether there are pending uncommitted edits.
+    bool hasPendingChanges() const { return !m_pendingEdits.isEmpty(); }
 
 private:
     void ensureCached(int row) const;
@@ -75,4 +88,7 @@ private:
 
     // Per-row hex display toggle
     mutable QSet<int> m_hexRows;
+
+    // Buffered edits: row index -> new value (uncommitted)
+    QMap<int, QByteArray> m_pendingEdits;
 };

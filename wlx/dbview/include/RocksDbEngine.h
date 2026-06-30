@@ -3,6 +3,7 @@
 #ifdef ENABLE_ROCKSDB_LEVELDB
 
 #include "DbEngine.h"
+#include "KeyValueModel.h"
 #include <memory>
 
 namespace rocksdb { class DB; }
@@ -23,6 +24,8 @@ public:
 
     bool supportsMultipleTables() const override { return false; }
     bool supportsSubmitRevert() const override { return true; }
+    bool submitAll() override;
+    bool revertAll() override;
     QString engineName() const override { return QStringLiteral("RocksDB"); }
 
 private:
@@ -30,7 +33,7 @@ private:
 
     rocksdb::DB *m_db = nullptr;
     int m_keyCount = 0;
-    QAbstractItemModel *m_model = nullptr;
+    KeyValueModel *m_model = nullptr;
 };
 
 #endif // ENABLE_ROCKSDB_LEVELDB

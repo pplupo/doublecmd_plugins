@@ -58,6 +58,17 @@ QVariant KeyValueModel::data(const QModelIndex &index, int role) const
     if (role != Qt::DisplayRole && role != Qt::EditRole)
         return {};
 
+    // For the value column, check for pending (uncommitted) edits first
+    if (index.column() == 1 && m_pendingEdits.contains(index.row())) {
+        const QByteArray &raw = m_pendingEdits[index.row()];
+        if (!isValidUtf8(raw)) {
+            if (m_hexRows.contains(index.row()))
+                return toHexString(raw);
+            return formatBinaryPlaceholder(raw.size());
+        }
+        return QString::fromUtf8(raw);
+    }
+
     ensureCached(index.row());
 
     int localIdx = index.row() - m_cacheStartRow;
@@ -87,24 +98,68 @@ bool KeyValueModel::setData(const QModelIndex &index, const QVariant &value, int
     if (role != Qt::EditRole || index.column() != 1 || !index.isValid())
         return false;
 
-    ensureCached(index.row());
-    int localIdx = index.row() - m_cacheStartRow;
-    if (localIdx < 0 || localIdx >= m_cache.size())
-        return false;
-
-    QByteArray key = m_cache[localIdx].key;
     QByteArray newValue = value.toString().toUtf8();
 
-    if (m_ops.putValue && m_ops.putValue(key, newValue)) {
-        m_cache[localIdx].value = newValue;
-        emit dataChanged(index, index, {Qt::DisplayRole, Qt::EditRole});
-        return true;
+    // Buffer the edit — don't write to the DB yet
+    m_pendingEdits[index.row()] = newValue;
+    emit dataChanged(index, index, {Qt::DisplayRole, Qt::EditRole});
+    return true;
+}
+
+bool KeyValueModel::submitAll()
+{
+    if (!m_ops.putValue)
+        return false;
+
+    bool allOk = true;
+    for (auto it = m_pendingEdits.constBegin(); it != m_pendingEdits.constEnd(); ++it) {
+        int row = it.key();
+        const QByteArray &newValue = it.value();
+
+        ensureCached(row);
+        int localIdx = row - m_cacheStartRow;
+        if (localIdx < 0 || localIdx >= m_cache.size()) {
+            allOk = false;
+            continue;
+        }
+
+        QByteArray key = m_cache[localIdx].key;
+        if (m_ops.putValue(key, newValue)) {
+            // Update cache to reflect the committed value
+            m_cache[localIdx].value = newValue;
+        } else {
+            allOk = false;
+        }
     }
-    return false;
+
+    m_pendingEdits.clear();
+    return allOk;
+}
+
+void KeyValueModel::revertAll()
+{
+    if (m_pendingEdits.isEmpty())
+        return;
+
+    // Collect affected rows before clearing
+    QList<int> rows = m_pendingEdits.keys();
+    m_pendingEdits.clear();
+
+    // Invalidate cache so next data() re-fetches from DB
+    m_cacheStartRow = -1;
+    m_cache.clear();
+
+    // Notify the view that these rows changed back to DB values
+    for (int row : rows) {
+        QModelIndex idx = index(row, 1);
+        emit dataChanged(idx, idx, {Qt::DisplayRole, Qt::EditRole});
+    }
 }
 
 bool KeyValueModel::isBinaryValue(int row) const
 {
+    if (m_pendingEdits.contains(row))
+        return !isValidUtf8(m_pendingEdits[row]);
     ensureCached(row);
     int localIdx = row - m_cacheStartRow;
     if (localIdx < 0 || localIdx >= m_cache.size())
@@ -114,6 +169,8 @@ bool KeyValueModel::isBinaryValue(int row) const
 
 QByteArray KeyValueModel::rawValue(int row) const
 {
+    if (m_pendingEdits.contains(row))
+        return m_pendingEdits[row];
     ensureCached(row);
     int localIdx = row - m_cacheStartRow;
     if (localIdx < 0 || localIdx >= m_cache.size())
@@ -143,19 +200,11 @@ void KeyValueModel::setHexMode(int row, bool enabled)
 
 bool KeyValueModel::loadValueFromFile(int row, const QByteArray &fileData)
 {
-    ensureCached(row);
-    int localIdx = row - m_cacheStartRow;
-    if (localIdx < 0 || localIdx >= m_cache.size())
-        return false;
-
-    QByteArray key = m_cache[localIdx].key;
-    if (m_ops.putValue && m_ops.putValue(key, fileData)) {
-        m_cache[localIdx].value = fileData;
-        QModelIndex idx = index(row, 1);
-        emit dataChanged(idx, idx, {Qt::DisplayRole, Qt::EditRole});
-        return true;
-    }
-    return false;
+    // Buffer the file data as a pending edit
+    m_pendingEdits[row] = fileData;
+    QModelIndex idx = index(row, 1);
+    emit dataChanged(idx, idx, {Qt::DisplayRole, Qt::EditRole});
+    return true;
 }
 
 bool KeyValueModel::isValidUtf8(const QByteArray &data)

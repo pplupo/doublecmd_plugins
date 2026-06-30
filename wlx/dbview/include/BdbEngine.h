@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DbEngine.h"
+#include "KeyValueModel.h"
 #include <db.h>
 
 class BdbEngine : public DbEngine {
@@ -17,7 +18,9 @@ public:
     QString currentTableName() const override;
 
     bool supportsMultipleTables() const override { return false; }
-    bool supportsSubmitRevert() const override { return false; }
+    bool supportsSubmitRevert() const override { return true; }
+    bool submitAll() override;
+    bool revertAll() override;
     QString engineName() const override { return QStringLiteral("Berkeley DB"); }
 
 private:
@@ -25,5 +28,5 @@ private:
 
     DB *m_db = nullptr;
     int m_keyCount = 0;
-    QAbstractItemModel *m_model = nullptr;
+    KeyValueModel *m_model = nullptr;
 };

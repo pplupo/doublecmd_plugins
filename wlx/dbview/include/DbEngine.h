@@ -63,16 +63,15 @@ public:
     virtual bool supportsMultipleTables() const = 0;
 
     /// Whether the engine buffers writes until explicit submit.
-    /// SQL engines: true (OnManualSubmit). KV engines: false (direct writes).
     virtual bool supportsSubmitRevert() const = 0;
 
     /// Human-readable engine name for display in the toolbar.
     virtual QString engineName() const = 0;
 
-    /// Submit buffered writes to the database. SQL engines only.
+    /// Submit buffered writes to the database.
     virtual bool submitAll() { return false; }
 
-    /// Revert all pending changes. SQL engines only.
+    /// Revert all pending changes.
     virtual bool revertAll() { return false; }
 
     /// Execute a custom SQL query (SQL engines only).

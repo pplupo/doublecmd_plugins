@@ -165,3 +165,14 @@ QAbstractItemModel *BdbEngine::modelForTable(const QString &tableName)
     m_model = new KeyValueModel(m_keyCount, std::move(ops), this);
     return m_model;
 }
+
+bool BdbEngine::submitAll()
+{
+    return m_model ? m_model->submitAll() : false;
+}
+
+bool BdbEngine::revertAll()
+{
+    if (m_model) m_model->revertAll();
+    return true;
+}

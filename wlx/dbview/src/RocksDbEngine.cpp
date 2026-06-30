@@ -161,4 +161,15 @@ QAbstractItemModel *RocksDbEngine::modelForTable(const QString &tableName)
     return m_model;
 }
 
+bool RocksDbEngine::submitAll()
+{
+    return m_model ? m_model->submitAll() : false;
+}
+
+bool RocksDbEngine::revertAll()
+{
+    if (m_model) m_model->revertAll();
+    return true;
+}
+
 #endif // ENABLE_ROCKSDB_LEVELDB
