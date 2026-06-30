@@ -19,7 +19,6 @@
 #include <QRegularExpression>
 #include <QMessageBox>
 #include <QSortFilterProxyModel>
-#include <QPlainTextEdit>
 #include <algorithm>
 
 namespace QtWlPlugin {
@@ -195,58 +194,6 @@ QSize WrapAnywhereDelegate::sizeHint(const QStyleOptionViewItem &option,
 
 void WrapAnywhereDelegate::setWrapAnywhere(bool wrap) { m_wrap = wrap; }
 bool WrapAnywhereDelegate::wrapAnywhere() const { return m_wrap; }
-
-QWidget *WrapAnywhereDelegate::createEditor(QWidget *parent, const QStyleOptionViewItem &option,
-                                            const QModelIndex &index) const {
-    auto *editor = new QPlainTextEdit(parent);
-    editor->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    return editor;
-}
-
-void WrapAnywhereDelegate::setEditorData(QWidget *editor, const QModelIndex &index) const {
-    QString value = index.model()->data(index, Qt::EditRole).toString();
-    auto *textEdit = qobject_cast<QPlainTextEdit*>(editor);
-    if (textEdit)
-        textEdit->setPlainText(value);
-    else
-        QStyledItemDelegate::setEditorData(editor, index);
-}
-
-void WrapAnywhereDelegate::setModelData(QWidget *editor, QAbstractItemModel *model,
-                                        const QModelIndex &index) const {
-    auto *textEdit = qobject_cast<QPlainTextEdit*>(editor);
-    if (textEdit)
-        model->setData(index, textEdit->toPlainText(), Qt::EditRole);
-    else
-        QStyledItemDelegate::setModelData(editor, model, index);
-}
-
-void WrapAnywhereDelegate::updateEditorGeometry(QWidget *editor,
-                                                const QStyleOptionViewItem &option,
-                                                const QModelIndex &index) const {
-    editor->setGeometry(option.rect);
-}
-
-bool WrapAnywhereDelegate::eventFilter(QObject *obj, QEvent *event) {
-    // Qt installs the delegate as event filter on the editor widget.
-    // We intercept plain Enter to commit+close, but let Ctrl+Enter fall through
-    // to QPlainTextEdit::keyPressEvent which inserts a newline naturally.
-    // (QAbstractItemDelegate::eventFilter already skips commit for QPlainTextEdit,
-    // so the event reaches keyPressEvent regardless — but we must not consume it.)
-    auto *editor = qobject_cast<QPlainTextEdit*>(obj);
-    if (editor && event->type() == QEvent::KeyPress) {
-        auto *ke = static_cast<QKeyEvent*>(event);
-        if ((ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter)
-                && !(ke->modifiers() & Qt::ControlModifier)) {
-            // Plain Enter: commit and close
-            emit commitData(editor);
-            emit closeEditor(editor, QAbstractItemDelegate::SubmitModelCache);
-            return true;
-        }
-        // Ctrl+Enter: fall through — QPlainTextEdit::keyPressEvent inserts a newline.
-    }
-    return QStyledItemDelegate::eventFilter(obj, event);
-}
 
 // ---------------------------------------------------------------------------
 // EditableGridWidget
@@ -584,9 +531,6 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
         }
 
         if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
-            // QPlainTextEdit editors handle Enter in WrapAnywhereDelegate::eventFilter
-            // (Qt routes editor key events to the delegate, not to m_view).
-
             QModelIndex current = m_view->currentIndex();
             int r = current.row(), c = current.column();
 
