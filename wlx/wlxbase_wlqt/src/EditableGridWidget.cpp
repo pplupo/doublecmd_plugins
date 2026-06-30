@@ -227,6 +227,27 @@ void WrapAnywhereDelegate::updateEditorGeometry(QWidget *editor,
     editor->setGeometry(option.rect);
 }
 
+bool WrapAnywhereDelegate::eventFilter(QObject *obj, QEvent *event) {
+    // Qt installs the delegate as event filter on the editor widget.
+    // Intercept Enter/Return here so QPlainTextEdit editors behave correctly.
+    auto *editor = qobject_cast<QPlainTextEdit*>(obj);
+    if (editor && event->type() == QEvent::KeyPress) {
+        auto *ke = static_cast<QKeyEvent*>(event);
+        if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
+            if (ke->modifiers() & Qt::ControlModifier) {
+                // Ctrl+Enter: insert a newline
+                editor->insertPlainText(QStringLiteral("\n"));
+                return true;
+            }
+            // Plain Enter: commit and close
+            emit commitData(editor);
+            emit closeEditor(editor, QAbstractItemDelegate::SubmitModelCache);
+            return true;
+        }
+    }
+    return QStyledItemDelegate::eventFilter(obj, event);
+}
+
 // ---------------------------------------------------------------------------
 // EditableGridWidget
 // ---------------------------------------------------------------------------
@@ -539,10 +560,6 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
         }
 
         if (ke->key() == Qt::Key_Up || ke->key() == Qt::Key_Down) {
-            // If the active editor is a QPlainTextEdit, let it move the cursor within text
-            if (qobject_cast<QPlainTextEdit*>(m_fm->activeInput()))
-                return QWidget::eventFilter(obj, event);
-
             QModelIndex current = m_view->currentIndex();
             int r = current.row(), c = current.column();
             if (ke->key() == Qt::Key_Up) r--;
@@ -567,22 +584,8 @@ bool EditableGridWidget::eventFilter(QObject *obj, QEvent *event)
         }
 
         if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) {
-            auto *plainEditor = qobject_cast<QPlainTextEdit*>(m_fm->activeInput());
-
-            if (plainEditor) {
-                if (ke->modifiers() & Qt::ControlModifier) {
-                    // Ctrl+Enter inserts a newline within the editor
-                    plainEditor->insertPlainText(QStringLiteral("\n"));
-                    return true;
-                }
-                // Plain Enter commits and closes
-                QModelIndex current = m_view->currentIndex();
-                QAbstractItemDelegate *delegate = m_view->itemDelegateForIndex(current);
-                if (delegate)
-                    delegate->setModelData(plainEditor, model, current);
-                m_view->closePersistentEditor(current);
-                return true;
-            }
+            // QPlainTextEdit editors handle Enter in WrapAnywhereDelegate::eventFilter
+            // (Qt routes editor key events to the delegate, not to m_view).
 
             QModelIndex current = m_view->currentIndex();
             int r = current.row(), c = current.column();
