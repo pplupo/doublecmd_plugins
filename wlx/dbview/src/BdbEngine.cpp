@@ -23,6 +23,11 @@ bool BdbEngine::open(const QString &filepath)
         return false;
     }
 
+    // Suppress BDB error messages to stderr — this engine is often used as a
+    // probe/fallback in DbEngine::createForFile, and format-mismatch errors
+    // (e.g. "DB0004 fop_read_meta: unexpected file type") are confusing noise.
+    m_db->set_errcall(m_db, [](const DB_ENV*, const char*, const char*) {});
+
     // Try read-write open (0 flag)
     ret = m_db->open(m_db, nullptr, filepath.toLocal8Bit().constData(), nullptr, DB_UNKNOWN, 0, 0664);
     if (ret != 0) {

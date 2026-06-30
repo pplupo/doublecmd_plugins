@@ -8,6 +8,8 @@
 
 #include <QFileInfo>
 #include <QFile>
+#include <QDir>
+#include <QStandardPaths>
 
 namespace {
 class RocksDbNoOpLogger : public rocksdb::Logger {
@@ -42,7 +44,13 @@ bool RocksDbEngine::open(const QString &filepath)
 
     rocksdb::Options options;
     options.create_if_missing = false;
+    // No-op logger suppresses LOG file writes in the DB directory
     options.info_log = std::make_shared<RocksDbNoOpLogger>();
+    // Redirect info log dir away from the watched DB directory
+    QString tmpDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+                     + QStringLiteral("/dbview_logs");
+    QDir().mkpath(tmpDir);
+    options.db_log_dir = tmpDir.toStdString();
 
     rocksdb::DB *db = nullptr;
     rocksdb::Status status = rocksdb::DB::OpenForReadOnly(options, dbPath.toStdString(), &db);

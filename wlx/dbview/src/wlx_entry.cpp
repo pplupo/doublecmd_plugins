@@ -58,6 +58,13 @@ int DCPCALL ListSendCommand(HWND ListWin, int Command, int Parameter)
             if (widget->grid() && widget->grid()->view())
                 widget->grid()->view()->selectAll();
             break;
+        case lc_newparams:
+            // DC sends lc_newparams when it detects file changes in the
+            // viewed directory (e.g. DB engine writing LOG/WAL files).
+            // Returning LISTPLUGIN_ERROR causes DC to destroy/recreate the
+            // plugin, which looks like "reloads" and causes focus loss.
+            // Accept and ignore to prevent the destroy/recreate cycle.
+            return LISTPLUGIN_OK;
         case lc_focus:
             if (Parameter) {
                 widget->focusManager()->setActive(true);
