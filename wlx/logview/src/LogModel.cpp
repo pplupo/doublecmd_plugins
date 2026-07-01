@@ -146,14 +146,12 @@ void LogModel::loadFile(const QString& filePath) {
 
     m_fd = open(pathBytes.constData(), O_RDONLY);
     if (m_fd < 0) {
-        qWarning() << "LogModel: open failed:" << filePath;
         endResetModel();
         return;
     }
 
     struct stat st;
     if (fstat(m_fd, &st) != 0 || st.st_size == 0) {
-        qWarning() << "LogModel: empty or stat failed:" << filePath;
         close(m_fd); m_fd = -1;
         endResetModel();
         return;
@@ -164,7 +162,6 @@ void LogModel::loadFile(const QString& filePath) {
         mmap(nullptr, m_mappedSize, PROT_READ, MAP_SHARED, m_fd, 0));
 
     if (m_mappedData == MAP_FAILED) {
-        qWarning() << "LogModel: mmap failed:" << filePath;
         m_mappedData = nullptr; m_mappedSize = 0;
         close(m_fd); m_fd = -1;
         endResetModel();
