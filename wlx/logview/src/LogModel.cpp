@@ -2,6 +2,7 @@
 #include <QDebug>
 #include <QColor>
 #include <re2/re2.h>
+#include <QFile>
 
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -94,14 +95,44 @@ QVariant LogModel::data(const QModelIndex &index, int role) const {
     if (role == Qt::DisplayRole)
         return lineText(row);
 
-    // Highlight matched lines with a subtle background
-    if (role == Qt::BackgroundRole) {
-        if (row < (int)m_matches.size() && m_matches[row])
+    if (role == Qt::BackgroundRole || role == Qt::ForegroundRole) {
+        // Search match background takes priority
+        if (role == Qt::BackgroundRole && row < (int)m_matches.size() && m_matches[row]) {
             return QColor(60, 60, 0); // dark yellow
+        }
+
+        // Test highlight rules in order
+        if (m_mappedData && !m_rules.empty()) {
+            const uint64_t start = m_lineOffsets[row];
+            const uint64_t end   = m_lineOffsets[row + 1];
+            uint64_t len = end - start;
+            while (len > 0 && (m_mappedData[start + len - 1] == '\n' ||
+                               m_mappedData[start + len - 1] == '\r'))
+                --len;
+            re2::StringPiece linePiece(m_mappedData + start, len);
+
+            for (const auto &rule : m_rules) {
+                if (rule.compiledRegex && re2::RE2::PartialMatch(linePiece, *rule.compiledRegex)) {
+                    if (role == Qt::BackgroundRole) {
+                        return rule.backgroundColor;
+                    } else if (role == Qt::ForegroundRole) {
+                        return rule.foregroundColor;
+                    }
+                }
+            }
+        }
     }
 
     return {};
 }
+
+void LogModel::setHighlightRules(const std::vector<HighlightRule>& rules) {
+    m_rules = rules;
+    if (lineCount() > 0) {
+        emit dataChanged(index(0), index(lineCount() - 1), {Qt::BackgroundRole, Qt::ForegroundRole});
+    }
+}
+
 
 // ─── File loading ──────────────────────────────────────────────────────
 
@@ -115,14 +146,12 @@ void LogModel::loadFile(const QString& filePath) {
 
     m_fd = open(pathBytes.constData(), O_RDONLY);
     if (m_fd < 0) {
-        qWarning() << "LogModel: open failed:" << filePath;
         endResetModel();
         return;
     }
 
     struct stat st;
     if (fstat(m_fd, &st) != 0 || st.st_size == 0) {
-        qWarning() << "LogModel: empty or stat failed:" << filePath;
         close(m_fd); m_fd = -1;
         endResetModel();
         return;
@@ -133,7 +162,6 @@ void LogModel::loadFile(const QString& filePath) {
         mmap(nullptr, m_mappedSize, PROT_READ, MAP_SHARED, m_fd, 0));
 
     if (m_mappedData == MAP_FAILED) {
-        qWarning() << "LogModel: mmap failed:" << filePath;
         m_mappedData = nullptr; m_mappedSize = 0;
         close(m_fd); m_fd = -1;
         endResetModel();
@@ -152,12 +180,61 @@ void LogModel::loadFile(const QString& filePath) {
     m_lineOffsets.push_back(m_mappedSize); // sentinel
 
     endResetModel();
-    qDebug() << "LogModel indexed:" << filePath << "lines:" << lineCount();
+    int linesIndexedThisBatch = 0;
 
-    parseTimestamps();
+    buildTimestampIndex();
 
     // Set up file watcher for tail
     m_watcher->addPath(m_filePath);
+}
+
+// ─── Clear / Delete ────────────────────────────────────────────────────
+
+void LogModel::clearFile() {
+    if (m_filePath.isEmpty()) return;
+
+    // Truncate the file to zero bytes
+    int fd = open(m_filePath.toUtf8().constData(), O_WRONLY | O_TRUNC);
+    if (fd >= 0) {
+        close(fd);
+    }
+
+    // Reload so the model reflects the empty file
+    loadFile(m_filePath);
+}
+
+void LogModel::deleteRows(const std::vector<int>& sourceRows) {
+    if (sourceRows.empty() || m_filePath.isEmpty() || !m_mappedData) return;
+
+    // Build a set for O(1) lookup
+    std::vector<bool> toDelete(lineCount(), false);
+    for (int r : sourceRows) {
+        if (r >= 0 && r < lineCount())
+            toDelete[r] = true;
+    }
+
+    // Collect the raw bytes of lines we want to keep
+    QByteArray kept;
+    kept.reserve(static_cast<int>(m_mappedSize));
+    for (int i = 0; i < lineCount(); ++i) {
+        if (toDelete[i]) continue;
+        const uint64_t start = m_lineOffsets[i];
+        const uint64_t end   = m_lineOffsets[i + 1];
+        kept.append(m_mappedData + start, static_cast<int>(end - start));
+    }
+
+    // Write the kept lines back to the file
+    // (unmap first, then rewrite, then reload)
+    QString path = m_filePath;  // save before cleanup
+    cleanup();
+
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        file.write(kept);
+        file.close();
+    }
+
+    loadFile(path);
 }
 
 // ─── Search ────────────────────────────────────────────────────────────
@@ -271,29 +348,40 @@ QDateTime LogModel::parseTimestampFromLine(const QString &line) {
     return tryParseTimestamp(utf8.constData(), utf8.size());
 }
 
-void LogModel::parseTimestamps() {
-    m_firstTimestamp = {};
-    m_lastTimestamp  = {};
-    if (lineCount() == 0 || !m_mappedData) return;
+void LogModel::buildTimestampIndex() {
+    m_interpolatedTimestamps.clear();
+    m_interpolatedTimestamps.resize(lineCount(), QDateTime());
 
-    // First line
-    {
-        uint64_t s = m_lineOffsets[0], e = m_lineOffsets[1];
-        uint64_t len = e - s;
-        while (len > 0 && (m_mappedData[s+len-1]=='\n'||m_mappedData[s+len-1]=='\r')) --len;
-        m_firstTimestamp = tryParseTimestamp(m_mappedData + s, (int)len);
+    QDateTime lastKnownTimestamp;
+    QDateTime firstValidTimestamp;
+
+    for (int i = 0; i < lineCount(); ++i) {
+        QDateTime currentTs = parseTimestampFromLine(lineText(i));
+
+        if (currentTs.isValid()) {
+            lastKnownTimestamp = currentTs;
+            if (!firstValidTimestamp.isValid()) {
+                firstValidTimestamp = currentTs;
+            }
+        }
+        
+        if (lastKnownTimestamp.isValid()) {
+            m_interpolatedTimestamps[i] = lastKnownTimestamp;
+        }
     }
-    // Last line
-    {
-        int last = lineCount() - 1;
-        uint64_t s = m_lineOffsets[last], e = m_lineOffsets[last + 1];
-        uint64_t len = e - s;
-        while (len > 0 && (m_mappedData[s+len-1]=='\n'||m_mappedData[s+len-1]=='\r')) --len;
-        m_lastTimestamp = tryParseTimestamp(m_mappedData + s, (int)len);
-    }
+
+    m_firstTimestamp = firstValidTimestamp;
+    m_lastTimestamp = lastKnownTimestamp;
 
     if (m_firstTimestamp.isValid() || m_lastTimestamp.isValid())
         emit timestampsDetected(m_firstTimestamp, m_lastTimestamp);
+}
+
+QDateTime LogModel::getInterpolatedTimestamp(int row) const {
+    if (row < 0 || row >= static_cast<int>(m_interpolatedTimestamps.size())) {
+        return QDateTime();
+    }
+    return m_interpolatedTimestamps[row];
 }
 
 // ─── Follow / tail ─────────────────────────────────────────────────────
