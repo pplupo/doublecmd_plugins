@@ -95,6 +95,7 @@ mkdir -p wlx/kate/build
 install -m 644 wlx/kate/build/rich_editor_qt.wlx release/wlx/kate/
 install -m 644 wlx/kate/*.md release/wlx/kate/
 install -m 644 wlx/kate/*.png release/wlx/kate/
+
 pushd release
 tar -czpf ../plugins-$(date +%y.%m.%d)-$ARCH.tar.gz *
 popd
