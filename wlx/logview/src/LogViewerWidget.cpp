@@ -748,6 +748,16 @@ bool LogViewerWidget::eventFilter(QObject *obj, QEvent *event) {
             return true;
         }
 
+        // Ctrl+Q: Toggle preview pane (pass to DC main window)
+        if (ke->key() == Qt::Key_Q && (ke->modifiers() & Qt::ControlModifier)) {
+            m_isActive = false;
+            restoreFocusToDC();
+            if (QWidget *top = window()) {
+                QKeyEvent *newKe = new QKeyEvent(QEvent::KeyPress, Qt::Key_Q, Qt::ControlModifier);
+                QCoreApplication::postEvent(top, newKe);
+            }
+            return true;
+        }
         // Enter in search edit: trigger search, return focus to list
         if (m_activeInput == searchEdit && (ke->key() == Qt::Key_Return ||
                                              ke->key() == Qt::Key_Enter)) {
