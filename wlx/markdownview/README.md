@@ -1,4 +1,4 @@
-# WLX Markdown Lister Plugin for Double Commander
+# MarkdownView Lister Plugin for Double Commander
 
 A high-performance Lister (WLX) plugin for [Double Commander](https://doublecmd.sourceforge.io/) built with **Qt6** that provides rich, interactive previews of Markdown files (`.md`, `.markdown`, `.mdown`, `.mkd`).
 
@@ -18,17 +18,17 @@ A high-performance Lister (WLX) plugin for [Double Commander](https://doublecmd.
 
 ---
 
-## Configuration (`wlx_markdown.ini`)
+## Configuration (`markdownview.ini`)
 
 The plugin configuration is stored at:
 ```path
-~/.config/doublecmd/plugins/wlx/wlx_markdown.ini
+~/.config/doublecmd/plugins/wlx/markdownview.ini
 ```
 
 ### Supported Settings
 
 ```ini
-[wlx_markdown]
+[markdownview]
 # Path to a custom CSS stylesheet file. Takes precedence over default plugin CSS.
 theme_file_path=
 
@@ -46,14 +46,14 @@ auto_reload=true
 ### Plugin CSS Location
 The default stylesheet is located alongside the plugin at:
 ```path
-~/.config/doublecmd/plugins/wlx/wlx_markdown.css
+~/.config/doublecmd/plugins/wlx/markdownview.css
 ```
 
 ### CSS Lookup Order
 When loading stylesheet rules, the plugin uses a strict 4-step precedence lookup order:
 
-1. **`theme_file_path`** setting specified in `wlx_markdown.ini` (if defined and the target file exists).
-2. **Plugin Directory CSS**: `~/.config/doublecmd/plugins/wlx/wlx_markdown.css`.
+1. **`theme_file_path`** setting specified in `markdownview.ini` (if defined and the target file exists).
+2. **Plugin Directory CSS**: `~/.config/doublecmd/plugins/wlx/markdownview.css`.
 3. **`markdownpart.css` Fallback**: `~/.config/doublecmd/plugins/wlx/markdownpart.css` or `~/.config/markdownpart.css`.
 4. **Binary Embedded Fallback**: Built-in C++ string constants compiled directly into the binary.
 
@@ -81,7 +81,7 @@ Right-clicking inside the document viewer opens a context menu with options to:
 ### Build Steps
 
 ```bash
-cd wlx/markdown
+cd wlx/markdownview
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
@@ -93,11 +93,11 @@ Copy the built `.wlx` plugin binary and stylesheet to Double Commander's plugin 
 
 ```bash
 mkdir -p ~/.config/doublecmd/plugins/wlx
-cp wlx_markdown_qt6.wlx ~/.config/doublecmd/plugins/wlx/
-cp ../wlx_markdown.css ~/.config/doublecmd/plugins/wlx/
+cp markdownview_qt6.wlx ~/.config/doublecmd/plugins/wlx/
+cp ../markdownview.css ~/.config/doublecmd/plugins/wlx/
 ```
 
-Register the plugin in Double Commander under **Options -> Plugins -> WLX (Lister Plugins)** by pointing to `wlx_markdown_qt6.wlx`.
+Register the plugin in Double Commander under **Options -> Plugins -> WLX (Lister Plugins)** by pointing to `markdownview_qt6.wlx`.
 
 ---
 

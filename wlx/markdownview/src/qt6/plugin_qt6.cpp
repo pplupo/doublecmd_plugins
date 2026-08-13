@@ -23,7 +23,7 @@
 #include "wlxplugin.h"
 #include "../core/markdown_engine.h"
 
-#define PLUGNAME "wlx_markdown"
+#define PLUGNAME "markdownview"
 
 static bool g_autoReloadEnabled = true;
 static QString g_mode = QStringLiteral("system"); // "system", "dark", "light"
@@ -269,7 +269,7 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
 {
     if (!dps) return;
     QFileInfo defini(QString::fromUtf8(dps->DefaultIniName));
-    g_configPath = defini.absolutePath() + "/wlx_markdown.ini";
+    g_configPath = defini.absolutePath() + "/markdownview.ini";
     QSettings settings(g_configPath, QSettings::IniFormat);
 
     if (!settings.contains(PLUGNAME "/theme_file_path"))

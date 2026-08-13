@@ -134,11 +134,12 @@ make -C wlx/mdk clean all
 install -m 644 wlx/mdk/wlx_mdk_wayland.wlx release/wlx/mdk/
 install -m 644 wlx/mdk/*.md release/wlx/mdk/
 
-# markdown
-mkdir -p release/wlx/markdown
-mkdir -p wlx/markdown/build
-(cd wlx/markdown/build && cmake .. && make)
-install -m 644 wlx/markdown/build/wlx_markdown_qt6.wlx release/wlx/markdown/
+# markdownview
+mkdir -p release/wlx/markdownview
+mkdir -p wlx/markdownview/build
+(cd wlx/markdownview/build && cmake .. && make)
+install -m 644 wlx/markdownview/build/markdownview_qt6.wlx release/wlx/markdownview/
+install -m 644 wlx/markdownview/markdownview.css release/wlx/markdownview/
 
 pushd release
 tar -czpf ../plugins-$(date +%y.%m.%d)-$ARCH.tar.gz *

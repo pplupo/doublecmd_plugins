@@ -186,7 +186,7 @@ static QString postProcessHtml(const QString& rawHtml, bool darkMode, const std:
 
     // Prepare CSS with strict lookup precedence:
     // 1. theme_file_path (customCssPath argument if provided and file exists)
-    // 2. Plugin CSS (~/.config/doublecmd/plugins/wlx/wlx_markdown.css)
+    // 2. Plugin CSS (~/.config/doublecmd/plugins/wlx/markdownview.css)
     // 3. markdownpart.css (~/.config/doublecmd/plugins/wlx/markdownpart.css or ~/.config/markdownpart.css)
     // 4. Binary String Constants (DEFAULT_LIGHT_CSS / DEFAULT_DARK_CSS)
     QString cssStr;
@@ -196,7 +196,7 @@ static QString postProcessHtml(const QString& rawHtml, bool darkMode, const std:
         targetCssFile = QString::fromStdString(customCssPath);
     } else {
         QString homeDir = QDir::homePath();
-        QString pluginDirCss = homeDir + QStringLiteral("/.config/doublecmd/plugins/wlx/wlx_markdown.css");
+        QString pluginDirCss = homeDir + QStringLiteral("/.config/doublecmd/plugins/wlx/markdownview.css");
         QString pluginPartCss = homeDir + QStringLiteral("/.config/doublecmd/plugins/wlx/markdownpart.css");
         QString userPartCss = homeDir + QStringLiteral("/.config/markdownpart.css");
 
