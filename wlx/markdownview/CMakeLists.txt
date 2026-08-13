@@ -18,7 +18,7 @@ find_package(Qt6 6.2 REQUIRED COMPONENTS
     PrintSupport
 )
 
-# 3rdparty configurations
+# 3rdparty configurations - enforce static libraries for maximum portability across environments
 set(BUILD_MD4QT_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/md4qt)
 
@@ -31,7 +31,7 @@ add_subdirectory(3rdparty/MicroTeX)
 
 add_definitions(-DQT_NO_CONTEXTLESS_CONNECT -DMD4QT_QT_SUPPORT)
 
-# Core Markdown Rendering Library
+# Core Markdown Rendering Library (Static Library)
 add_library(markdownview_core STATIC
     src/core/markdownvisitor.cpp
     src/core/markdown_engine.cpp
@@ -63,6 +63,12 @@ target_link_libraries(markdownview_qt6 PRIVATE
     Qt6::Widgets
 )
 
+# Statically link standard C++ runtime to prevent GLIBCXX version mismatches across environments
+target_link_options(markdownview_qt6 PRIVATE
+    -static-libstdc++
+    -static-libgcc
+)
+
 set_target_properties(markdownview_qt6 PROPERTIES
     PREFIX ""
     OUTPUT_NAME "markdownview_qt6"
@@ -81,6 +87,7 @@ if(BUILD_WLX_GTK)
         target_compile_definitions(markdownview_gtk3 PRIVATE BUILD_GTK_TARGET)
         target_include_directories(markdownview_gtk3 PRIVATE ${GTK3_INCLUDE_DIRS})
         target_link_libraries(markdownview_gtk3 PRIVATE markdownview_core ${GTK3_LIBRARIES})
+        target_link_options(markdownview_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
         set_target_properties(markdownview_gtk3 PROPERTIES
             PREFIX ""
             OUTPUT_NAME "markdownview_gtk3"
