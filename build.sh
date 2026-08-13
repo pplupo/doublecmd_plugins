@@ -72,14 +72,6 @@ install -m 644 wdx/mediainfo/luajit/*.lua      release/wdx/mediainfo/
 install -m 644 wdx/translitwdx/translitwdx.lua release/wdx/translitwdx/
 install -m 644 wdx/translitwdx/readme.txt      release/wdx/translitwdx/
 
-# jsonview
-mkdir -p release/wlx/jsonview
-make -C wlx/jsonview/src clean all
-install -m 644 wlx/jsonview/jsonview_qt6.wlx release/wlx/jsonview/
-cp -r wlx/jsonview/langs release/wlx/jsonview/
-install -m 644 wlx/jsonview/*.md release/wlx/jsonview/
-install -m 644 wlx/jsonview/*.png release/wlx/jsonview/
-
 # csvview
 mkdir -p release/wlx/csvview
 mkdir -p wlx/csvview/build
