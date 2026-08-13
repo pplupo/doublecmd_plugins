@@ -155,7 +155,7 @@ Works with both `.csv` and `.tsv` files. The separator is auto-detected from con
 
 ## Configuration
 
-The plugin configuration is stored in `j2969719.ini` inside the Double Commander settings directory. Edit settings under the `[csvview_qt6.wlx]` section:
+The plugin configuration is stored in `wlx_csvview.ini` inside the Double Commander settings directory. Edit settings under the `[csvview_qt6.wlx]` section:
 
 | Key | Type | Description |
 |---|---|---|
