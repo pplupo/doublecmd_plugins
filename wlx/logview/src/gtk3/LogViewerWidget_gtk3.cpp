@@ -1,0 +1,776 @@
+/*
+ * Log Viewer WLX plugin — GTK3 UI layer.
+ *
+ * Built on LogEngine (src/core/) and LogTreeModel (this directory) — a
+ * custom virtual GtkTreeModel preserving the mmap-based scalability that
+ * is the entire point of LogEngine (materializing a huge log file into a
+ * GtkListStore would defeat it). Feature set mirrors LogViewerWidget.cpp
+ * (Qt6): regex search + filter mode, time-range filter, follow/tail,
+ * copy/delete/extract selected lines, and a highlight-rules settings
+ * dialog with color pickers.
+ */
+
+#include <gtk/gtk.h>
+#include <re2/re2.h>
+#include <sstream>
+#include <fstream>
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <memory>
+#include <functional>
+
+#include "wlxplugin.h"
+#include "LogEngine.h"
+#include "LogTreeModel.h"
+
+namespace {
+
+std::string formatTimestamp(const LogTimestamp &ts)
+{
+    if (!ts.valid) return "";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                  ts.year, ts.month, ts.day, ts.hour, ts.minute, ts.second);
+    return buf;
+}
+
+bool parseTimestampField(const std::string &text, LogTimestamp &out)
+{
+    int y, mo, d, h, mi, s;
+    if (std::sscanf(text.c_str(), "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6)
+        return false;
+    out = LogTimestamp{y, mo, d, h, mi, s, true};
+    return true;
+}
+
+bool tsLess(const LogTimestamp &a, const LogTimestamp &b)
+{
+    if (a.year != b.year) return a.year < b.year;
+    if (a.month != b.month) return a.month < b.month;
+    if (a.day != b.day) return a.day < b.day;
+    if (a.hour != b.hour) return a.hour < b.hour;
+    if (a.minute != b.minute) return a.minute < b.minute;
+    return a.second < b.second;
+}
+
+struct LogViewerState {
+    GtkWidget *root = nullptr;
+    GtkWidget *treeView = nullptr;
+    GtkWidget *searchEntry = nullptr;
+    GtkWidget *btnSearchStop = nullptr;
+    GtkWidget *timeStartEntry = nullptr;
+    GtkWidget *timeEndEntry = nullptr;
+    GtkWidget *chkFollow = nullptr;
+    GtkWidget *chkFilterMode = nullptr;
+    GtkWidget *statusLabel = nullptr;
+
+    std::unique_ptr<LogEngine> engine;
+    LogTreeModel *model = nullptr;
+    std::vector<int> activeFilter; // engine row indices currently shown, when filtering is active
+    bool filteringActive = false;
+    bool timeFilterActive = false;
+
+    std::string currentFile;
+    std::string lastSearchQuery;
+    int lastMatchRow = -1;
+
+    std::vector<EngineHighlightRule> rules;
+    std::string iniPath;
+};
+
+// Forward decls
+void refreshFilter(LogViewerState *st);
+void executeSearch(LogViewerState *st, bool jumpToNext);
+void loadHighlightRules(LogViewerState *st);
+void saveHighlightRules(LogViewerState *st);
+void rebuildEngineHighlightRules(LogViewerState *st);
+
+// ── Model row <-> tree path helpers ─────────────────────────────────
+
+int viewSourceRowAtPath(LogViewerState *st, GtkTreePath *path)
+{
+    if (gtk_tree_path_get_depth(path) != 1) return -1;
+    int modelRow = gtk_tree_path_get_indices(path)[0];
+    return log_tree_model_to_engine_row(st->model, modelRow);
+}
+
+void scrollToSourceRow(LogViewerState *st, int sourceRow)
+{
+    int modelRow = sourceRow;
+    if (st->model->filter) {
+        auto it = std::find(st->activeFilter.begin(), st->activeFilter.end(), sourceRow);
+        if (it == st->activeFilter.end()) return;
+        modelRow = (int)std::distance(st->activeFilter.begin(), it);
+    }
+    GtkTreePath *path = gtk_tree_path_new_from_indices(modelRow, -1);
+    gtk_tree_view_set_cursor(GTK_TREE_VIEW(st->treeView), path, nullptr, FALSE);
+    gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(st->treeView), path, nullptr, TRUE, 0.5, 0.0);
+    gtk_tree_path_free(path);
+}
+
+void scrollToBottom(LogViewerState *st)
+{
+    int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(st->model), nullptr);
+    if (n == 0) return;
+    GtkTreePath *path = gtk_tree_path_new_from_indices(n - 1, -1);
+    gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(st->treeView), path, nullptr, TRUE, 1.0, 0.0);
+    gtk_tree_path_free(path);
+}
+
+std::vector<int> selectedSourceRows(LogViewerState *st)
+{
+    GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(st->treeView));
+    GList *rows = gtk_tree_selection_get_selected_rows(sel, nullptr);
+    std::vector<int> result;
+    for (GList *l = rows; l; l = l->next) {
+        int src = viewSourceRowAtPath(st, static_cast<GtkTreePath *>(l->data));
+        if (src >= 0) result.push_back(src);
+    }
+    g_list_free_full(rows, (GDestroyNotify)gtk_tree_path_free);
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+void setStatus(LogViewerState *st, const std::string &text)
+{
+    gtk_label_set_text(GTK_LABEL(st->statusLabel), text.c_str());
+}
+
+// ── Filtering (regex filter-mode AND/OR time range, intersected) ───
+
+void refreshFilter(LogViewerState *st)
+{
+    if (!st->filteringActive && !st->timeFilterActive) {
+        log_tree_model_set_filter(st->model, nullptr);
+        return;
+    }
+
+    LogTimestamp startTs{}, endTs{};
+    bool haveRange = st->timeFilterActive
+        && parseTimestampField(gtk_entry_get_text(GTK_ENTRY(st->timeStartEntry)), startTs)
+        && parseTimestampField(gtk_entry_get_text(GTK_ENTRY(st->timeEndEntry)), endTs);
+
+    st->activeFilter.clear();
+    int total = st->engine->lineCount();
+    for (int r = 0; r < total; ++r) {
+        if (st->filteringActive && !st->engine->isMatch(r))
+            continue;
+        if (haveRange) {
+            LogTimestamp rowTs = st->engine->getInterpolatedTimestamp(r);
+            if (!rowTs.valid || tsLess(rowTs, startTs) || tsLess(endTs, rowTs))
+                continue;
+        }
+        st->activeFilter.push_back(r);
+    }
+    log_tree_model_set_filter(st->model, &st->activeFilter);
+}
+
+// ── Search ───────────────────────────────────────────────────────────
+
+void executeSearch(LogViewerState *st, bool jumpToNext)
+{
+    std::string query = gtk_entry_get_text(GTK_ENTRY(st->searchEntry));
+
+    if (query != st->lastSearchQuery) {
+        st->lastMatchRow = -1;
+        st->lastSearchQuery = query;
+
+        if (query.empty()) {
+            gtk_widget_set_sensitive(st->btnSearchStop, FALSE);
+            st->engine->startSearch("", [](int) {});
+            if (st->filteringActive) refreshFilter(st);
+            return;
+        }
+
+        gtk_widget_set_sensitive(st->btnSearchStop, TRUE);
+        setStatus(st, "Searching...");
+        st->engine->startSearch(query, [st](int matchCount) {
+            // LogEngine invokes this from its own search thread — GTK is
+            // not thread-safe, so marshal onto the main loop via
+            // g_idle_add before touching any widgets.
+            struct Ctx { LogViewerState *st; int matchCount; };
+            auto *ctx = new Ctx{st, matchCount};
+            g_idle_add(+[](gpointer data) -> gboolean {
+                auto *c = static_cast<Ctx *>(data);
+                LogViewerState *st = c->st;
+                int matchCount = c->matchCount;
+                delete c;
+
+                gtk_widget_set_sensitive(st->btnSearchStop, FALSE);
+                if (matchCount < 0) {
+                    setStatus(st, "Invalid regex pattern");
+                    st->lastSearchQuery.clear();
+                    return G_SOURCE_REMOVE;
+                }
+                setStatus(st, "Matches: " + std::to_string(matchCount) + " / " +
+                              std::to_string(st->engine->lineCount()) + " lines");
+                if (matchCount > 0) {
+                    int first = st->engine->nextMatch(-1);
+                    if (first >= 0) {
+                        st->lastMatchRow = first;
+                        scrollToSourceRow(st, first);
+                    }
+                }
+                if (st->filteringActive) refreshFilter(st);
+                return G_SOURCE_REMOVE;
+            }, ctx);
+        });
+        return;
+    }
+
+    if (query.empty() || !jumpToNext) return;
+
+    if (st->engine->matchCount() > 0) {
+        int next = st->engine->nextMatch(st->lastMatchRow);
+        if (next >= 0) {
+            st->lastMatchRow = next;
+            scrollToSourceRow(st, next);
+            setStatus(st, "Match at line " + std::to_string(next + 1) + " | " +
+                          std::to_string(st->engine->matchCount()) + " total");
+        }
+    }
+}
+
+// ── Cell rendering: apply LogEngine's per-row colors ────────────────
+
+void cellDataFunc(GtkTreeViewColumn *, GtkCellRenderer *cell, GtkTreeModel *treeModel, GtkTreeIter *iter, gpointer userData)
+{
+    auto *st = static_cast<LogViewerState *>(userData);
+    GtkTreePath *path = gtk_tree_model_get_path(treeModel, iter);
+    int modelRow = gtk_tree_path_get_indices(path)[0];
+    gtk_tree_path_free(path);
+    int engineRow = log_tree_model_to_engine_row(st->model, modelRow);
+
+    LogColor bg, fg;
+    st->engine->colorsForRow(engineRow, bg, fg);
+
+    if (bg.valid) {
+        GdkRGBA rgba{bg.r / 255.0, bg.g / 255.0, bg.b / 255.0, 1.0};
+        g_object_set(cell, "background-rgba", &rgba, nullptr);
+    } else {
+        g_object_set(cell, "background-set", FALSE, nullptr);
+    }
+    if (fg.valid) {
+        GdkRGBA rgba{fg.r / 255.0, fg.g / 255.0, fg.b / 255.0, 1.0};
+        g_object_set(cell, "foreground-rgba", &rgba, nullptr);
+    } else {
+        g_object_set(cell, "foreground-set", FALSE, nullptr);
+    }
+}
+
+// ── Highlight rules settings dialog ─────────────────────────────────
+
+struct RuleEditResult { bool accepted = false; std::string pattern; GdkRGBA fg{1,1,1,1}; GdkRGBA bg{0,0,0,1}; };
+
+RuleEditResult runRuleDialog(GtkWindow *parent, const std::string &initialPattern, GdkRGBA fg, GdkRGBA bg)
+{
+    RuleEditResult result;
+    GtkWidget *dlg = gtk_dialog_new_with_buttons("Edit Highlight Rule", parent, GTK_DIALOG_MODAL,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_OK", GTK_RESPONSE_OK, nullptr);
+    GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    gtk_container_set_border_width(GTK_CONTAINER(content), 8);
+
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget *patternRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_box_pack_start(GTK_BOX(patternRow), gtk_label_new("Regex Pattern:"), FALSE, FALSE, 0);
+    GtkWidget *patternEntry = gtk_entry_new();
+    gtk_entry_set_text(GTK_ENTRY(patternEntry), initialPattern.c_str());
+    gtk_widget_set_hexpand(patternEntry, TRUE);
+    gtk_box_pack_start(GTK_BOX(patternRow), patternEntry, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(box), patternRow, FALSE, FALSE, 0);
+
+    GtkWidget *colorRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *fgBtn = gtk_color_button_new_with_rgba(&fg);
+    GtkWidget *bgBtn = gtk_color_button_new_with_rgba(&bg);
+    GtkWidget *fgCol = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_pack_start(GTK_BOX(fgCol), gtk_label_new("Foreground"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(fgCol), fgBtn, FALSE, FALSE, 0);
+    GtkWidget *bgCol = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_pack_start(GTK_BOX(bgCol), gtk_label_new("Background"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bgCol), bgBtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(colorRow), fgCol, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(colorRow), bgCol, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), colorRow, FALSE, FALSE, 0);
+
+    gtk_container_add(GTK_CONTAINER(content), box);
+    gtk_widget_show_all(dlg);
+
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_OK) {
+        result.accepted = true;
+        result.pattern = gtk_entry_get_text(GTK_ENTRY(patternEntry));
+        gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(fgBtn), &result.fg);
+        gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(bgBtn), &result.bg);
+    }
+    gtk_widget_destroy(dlg);
+    return result;
+}
+
+LogColor toLogColor(const GdkRGBA &c) { return LogColor{(int)(c.red*255), (int)(c.green*255), (int)(c.blue*255), true}; }
+GdkRGBA toRgba(const LogColor &c) { return GdkRGBA{c.r/255.0, c.g/255.0, c.b/255.0, 1.0}; }
+
+void rebuildEngineHighlightRules(LogViewerState *st)
+{
+    std::vector<EngineHighlightRule> engineRules;
+    for (auto &r : st->rules) {
+        EngineHighlightRule er;
+        er.pattern = r.pattern;
+        er.foregroundColor = r.foregroundColor;
+        er.backgroundColor = r.backgroundColor;
+        er.compiledRegex = r.compiledRegex;
+        engineRules.push_back(er);
+    }
+    st->engine->setHighlightRules(engineRules);
+    gtk_widget_queue_draw(st->treeView);
+}
+
+void openSettingsDialog(LogViewerState *st)
+{
+    GtkWidget *dlg = gtk_dialog_new_with_buttons("Highlight Rules", GTK_WINDOW(gtk_widget_get_toplevel(st->root)),
+        GTK_DIALOG_MODAL, "_Close", GTK_RESPONSE_CLOSE, nullptr);
+    gtk_window_set_default_size(GTK_WINDOW(dlg), 500, 400);
+    GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_container_set_border_width(GTK_CONTAINER(vbox), 8);
+
+    GtkListStore *store = gtk_list_store_new(1, G_TYPE_STRING);
+    for (auto &r : st->rules) {
+        GtkTreeIter it;
+        gtk_list_store_append(store, &it);
+        gtk_list_store_set(store, &it, 0, r.pattern.c_str(), -1);
+    }
+    GtkWidget *listWidget = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    g_object_unref(store);
+    GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(listWidget), -1, "Pattern", renderer, "text", 0, nullptr);
+    GtkWidget *scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_widget_set_size_request(scroll, -1, 250);
+    gtk_container_add(GTK_CONTAINER(scroll), listWidget);
+    gtk_box_pack_start(GTK_BOX(vbox), scroll, TRUE, TRUE, 0);
+
+    auto refreshList = [store, st]() {
+        gtk_list_store_clear(store);
+        for (auto &r : st->rules) {
+            GtkTreeIter it;
+            gtk_list_store_append(store, &it);
+            gtk_list_store_set(store, &it, 0, r.pattern.c_str(), -1);
+        }
+    };
+
+    auto selectedIndex = [listWidget]() -> int {
+        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(listWidget));
+        GtkTreeModel *m; GtkTreeIter it;
+        if (!gtk_tree_selection_get_selected(sel, &m, &it)) return -1;
+        GtkTreePath *p = gtk_tree_model_get_path(m, &it);
+        int idx = gtk_tree_path_get_indices(p)[0];
+        gtk_tree_path_free(p);
+        return idx;
+    };
+
+    GtkWidget *btnRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    GtkWidget *btnAdd = gtk_button_new_with_label("Add");
+    GtkWidget *btnEdit = gtk_button_new_with_label("Edit");
+    GtkWidget *btnDelete = gtk_button_new_with_label("Delete");
+    GtkWidget *btnUp = gtk_button_new_with_label("Move Up");
+    GtkWidget *btnDown = gtk_button_new_with_label("Move Down");
+    for (GtkWidget *b : {btnAdd, btnEdit, btnDelete, btnUp, btnDown})
+        gtk_box_pack_start(GTK_BOX(btnRow), b, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), btnRow, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(content), vbox);
+
+    struct Ctx { LogViewerState *st; GtkWidget *listWidget; std::function<void()> refresh; std::function<int()> selIndex; GtkWidget *dlg; };
+    auto *ctx = new Ctx{st, listWidget, refreshList, selectedIndex, dlg};
+
+    g_signal_connect_data(btnAdd, "clicked", G_CALLBACK(+[](GtkButton *, gpointer data) {
+        auto *ctx = static_cast<Ctx *>(data);
+        auto res = runRuleDialog(GTK_WINDOW(ctx->dlg), "", GdkRGBA{1,1,1,1}, GdkRGBA{0,0,0,1});
+        if (res.accepted && !res.pattern.empty()) {
+            EngineHighlightRule r;
+            r.pattern = res.pattern;
+            r.foregroundColor = toLogColor(res.fg);
+            r.backgroundColor = toLogColor(res.bg);
+            r.compiledRegex = std::make_shared<re2::RE2>(r.pattern);
+            ctx->st->rules.push_back(r);
+            ctx->refresh();
+        }
+    }), ctx, nullptr, (GConnectFlags)0);
+
+    g_signal_connect_data(btnEdit, "clicked", G_CALLBACK(+[](GtkButton *, gpointer data) {
+        auto *ctx = static_cast<Ctx *>(data);
+        int idx = ctx->selIndex();
+        if (idx < 0 || idx >= (int)ctx->st->rules.size()) return;
+        auto &r = ctx->st->rules[idx];
+        auto res = runRuleDialog(GTK_WINDOW(ctx->dlg), r.pattern, toRgba(r.foregroundColor), toRgba(r.backgroundColor));
+        if (res.accepted && !res.pattern.empty()) {
+            r.pattern = res.pattern;
+            r.foregroundColor = toLogColor(res.fg);
+            r.backgroundColor = toLogColor(res.bg);
+            r.compiledRegex = std::make_shared<re2::RE2>(r.pattern);
+            ctx->refresh();
+        }
+    }), ctx, nullptr, (GConnectFlags)0);
+
+    g_signal_connect_data(btnDelete, "clicked", G_CALLBACK(+[](GtkButton *, gpointer data) {
+        auto *ctx = static_cast<Ctx *>(data);
+        int idx = ctx->selIndex();
+        if (idx < 0 || idx >= (int)ctx->st->rules.size()) return;
+        ctx->st->rules.erase(ctx->st->rules.begin() + idx);
+        ctx->refresh();
+    }), ctx, nullptr, (GConnectFlags)0);
+
+    g_signal_connect_data(btnUp, "clicked", G_CALLBACK(+[](GtkButton *, gpointer data) {
+        auto *ctx = static_cast<Ctx *>(data);
+        int idx = ctx->selIndex();
+        if (idx <= 0 || idx >= (int)ctx->st->rules.size()) return;
+        std::swap(ctx->st->rules[idx], ctx->st->rules[idx - 1]);
+        ctx->refresh();
+    }), ctx, nullptr, (GConnectFlags)0);
+
+    g_signal_connect_data(btnDown, "clicked", G_CALLBACK(+[](GtkButton *, gpointer data) {
+        auto *ctx = static_cast<Ctx *>(data);
+        int idx = ctx->selIndex();
+        if (idx < 0 || idx >= (int)ctx->st->rules.size() - 1) return;
+        std::swap(ctx->st->rules[idx], ctx->st->rules[idx + 1]);
+        ctx->refresh();
+    }), ctx, nullptr, (GConnectFlags)0);
+
+    gtk_widget_show_all(dlg);
+    gtk_dialog_run(GTK_DIALOG(dlg));
+    gtk_widget_destroy(dlg);
+    delete ctx;
+
+    rebuildEngineHighlightRules(st);
+    saveHighlightRules(st);
+}
+
+// ── Highlight rules persistence (simple INI, same shape as diagramview's) ──
+
+void loadHighlightRules(LogViewerState *st)
+{
+    std::ifstream f(st->iniPath);
+    if (!f) { rebuildEngineHighlightRules(st); return; }
+
+    std::string line;
+    EngineHighlightRule cur;
+    bool inRule = false;
+    auto flush = [&]() {
+        if (inRule && !cur.pattern.empty()) {
+            cur.compiledRegex = std::make_shared<re2::RE2>(cur.pattern);
+            st->rules.push_back(cur);
+        }
+        cur = EngineHighlightRule{};
+        inRule = false;
+    };
+    while (std::getline(f, line)) {
+        if (line.rfind("[rule", 0) == 0) { flush(); inRule = true; continue; }
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq), val = line.substr(eq + 1);
+        if (key == "pattern") cur.pattern = val;
+        else if (key == "fg") { int r,g,b; std::sscanf(val.c_str(), "%d,%d,%d", &r,&g,&b); cur.foregroundColor = LogColor{r,g,b,true}; }
+        else if (key == "bg") { int r,g,b; std::sscanf(val.c_str(), "%d,%d,%d", &r,&g,&b); cur.backgroundColor = LogColor{r,g,b,true}; }
+    }
+    flush();
+    rebuildEngineHighlightRules(st);
+}
+
+void saveHighlightRules(LogViewerState *st)
+{
+    std::ofstream f(st->iniPath, std::ios::trunc);
+    if (!f) return;
+    int i = 0;
+    for (auto &r : st->rules) {
+        f << "[rule" << i++ << "]\n";
+        f << "pattern=" << r.pattern << "\n";
+        f << "fg=" << r.foregroundColor.r << "," << r.foregroundColor.g << "," << r.foregroundColor.b << "\n";
+        f << "bg=" << r.backgroundColor.r << "," << r.backgroundColor.g << "," << r.backgroundColor.b << "\n";
+    }
+}
+
+// ── Copy / delete / extract / clean ─────────────────────────────────
+
+void copySelectedLines(LogViewerState *st)
+{
+    auto rows = selectedSourceRows(st);
+    if (rows.empty()) return;
+    std::ostringstream out;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (i > 0) out << "\n";
+        out << st->engine->lineText(rows[i]);
+    }
+    gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), out.str().c_str(), -1);
+    setStatus(st, "Copied " + std::to_string(rows.size()) + " line(s)");
+}
+
+void deleteSelectedLines(LogViewerState *st)
+{
+    auto rows = selectedSourceRows(st);
+    if (rows.empty()) return;
+    int count = (int)rows.size();
+    st->engine->deleteRows(rows);
+    if (st->filteringActive || st->timeFilterActive) refreshFilter(st);
+    else log_tree_model_set_filter(st->model, nullptr);
+    setStatus(st, "Deleted " + std::to_string(count) + " line(s)");
+}
+
+void extractSelectedLines(LogViewerState *st)
+{
+    auto rows = selectedSourceRows(st);
+    if (rows.empty()) { setStatus(st, "No lines selected for extraction"); return; }
+
+    GtkWidget *dlg = gtk_file_chooser_dialog_new("Extract Selected Lines", GTK_WINDOW(gtk_widget_get_toplevel(st->root)),
+        GTK_FILE_CHOOSER_ACTION_SAVE, "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, nullptr);
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+        char *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        for (int r : rows) out << st->engine->lineText(r) << "\n";
+        setStatus(st, "Extracted " + std::to_string(rows.size()) + " line(s) to " + path);
+        g_free(path);
+    }
+    gtk_widget_destroy(dlg);
+}
+
+void clearLogFile(LogViewerState *st)
+{
+    if (st->currentFile.empty()) return;
+    GtkWidget *dlg = gtk_message_dialog_new(GTK_WINDOW(gtk_widget_get_toplevel(st->root)), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO,
+        "This will delete all contents of:\n%s\n\nThe file will be kept but emptied. Continue?", st->currentFile.c_str());
+    int resp = gtk_dialog_run(GTK_DIALOG(dlg));
+    gtk_widget_destroy(dlg);
+    if (resp != GTK_RESPONSE_YES) return;
+
+    st->engine->clearFile();
+    log_tree_model_set_filter(st->model, nullptr);
+    setStatus(st, "Log cleaned: " + st->currentFile);
+}
+
+void destroyState(gpointer data)
+{
+    delete static_cast<LogViewerState *>(data);
+}
+
+} // namespace
+
+extern "C" {
+
+#define EXPORT __attribute__((visibility("default")))
+
+EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
+{
+    GtkWidget *parent = GTK_WIDGET(ParentWin);
+    auto *st = new LogViewerState();
+    st->currentFile = FileToLoad;
+    st->iniPath = std::string(g_get_user_config_dir()) + "/doublecmd/plugins/wlx/logview_gtk3.ini";
+
+    st->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_container_add(GTK_CONTAINER(parent), st->root);
+
+    // ── Header ──
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_container_set_border_width(GTK_CONTAINER(header), 2);
+
+    st->searchEntry = gtk_search_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(st->searchEntry), "Regex search...");
+    gtk_widget_set_hexpand(st->searchEntry, TRUE);
+    gtk_box_pack_start(GTK_BOX(header), st->searchEntry, TRUE, TRUE, 0);
+
+    GtkWidget *btnFilter = gtk_button_new_with_label("▽ Filter");
+    GtkWidget *btnSearchNext = gtk_button_new_with_label("⌕ Search / Next");
+    st->btnSearchStop = gtk_button_new_with_label("■ Stop");
+    gtk_widget_set_sensitive(st->btnSearchStop, FALSE);
+    for (GtkWidget *b : {btnFilter, btnSearchNext, st->btnSearchStop})
+        gtk_box_pack_start(GTK_BOX(header), b, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(header), gtk_label_new("From:"), FALSE, FALSE, 0);
+    st->timeStartEntry = gtk_entry_new();
+    gtk_entry_set_width_chars(GTK_ENTRY(st->timeStartEntry), 19);
+    gtk_box_pack_start(GTK_BOX(header), st->timeStartEntry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(header), gtk_label_new("To:"), FALSE, FALSE, 0);
+    st->timeEndEntry = gtk_entry_new();
+    gtk_entry_set_width_chars(GTK_ENTRY(st->timeEndEntry), 19);
+    gtk_box_pack_start(GTK_BOX(header), st->timeEndEntry, FALSE, FALSE, 0);
+
+    st->chkFilterMode = gtk_check_button_new_with_label("Filter");
+    GtkWidget *btnResetFilter = gtk_button_new_with_label("✖ Reset");
+    st->chkFollow = gtk_check_button_new_with_label("Follow");
+    GtkWidget *btnExtract = gtk_button_new_with_label("\U0001F5AB Extract");
+    GtkWidget *btnClearLog = gtk_button_new_with_label("Clean");
+    GtkWidget *btnSettings = gtk_button_new_with_label("⚙ Settings");
+    for (GtkWidget *b : {st->chkFilterMode, btnResetFilter, st->chkFollow, btnExtract, btnClearLog, btnSettings})
+        gtk_box_pack_start(GTK_BOX(header), b, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(st->root), header, FALSE, FALSE, 0);
+
+    // ── Log view ──
+    st->engine = std::make_unique<LogEngine>();
+    st->model = log_tree_model_new(st->engine.get());
+
+    GtkWidget *scroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    st->treeView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(st->model));
+    gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(st->treeView), FALSE);
+    gtk_tree_selection_set_mode(gtk_tree_view_get_selection(GTK_TREE_VIEW(st->treeView)), GTK_SELECTION_MULTIPLE);
+
+    GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes("Line", renderer, "text", LOG_TREE_MODEL_COL_TEXT, nullptr);
+    gtk_tree_view_column_set_cell_data_func(col, renderer, cellDataFunc, st, nullptr);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(st->treeView), col);
+
+    gtk_container_add(GTK_CONTAINER(scroll), st->treeView);
+    gtk_box_pack_start(GTK_BOX(st->root), scroll, TRUE, TRUE, 0);
+
+    // ── Status bar ──
+    st->statusLabel = gtk_label_new("Ready.");
+    gtk_widget_set_halign(st->statusLabel, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(st->root), st->statusLabel, FALSE, FALSE, 2);
+
+    // ── Context menu (right-click: copy/delete/extract) ──
+    g_signal_connect_data(st->treeView, "button-press-event", G_CALLBACK(+[](GtkWidget *, GdkEventButton *event, gpointer data) -> gboolean {
+        if (event->button != GDK_BUTTON_SECONDARY) return FALSE;
+        auto *st = static_cast<LogViewerState *>(data);
+        bool hasSelection = !selectedSourceRows(st).empty();
+
+        GtkWidget *menu = gtk_menu_new();
+        GtkWidget *copyItem = gtk_menu_item_new_with_label("⧉ Copy");
+        GtkWidget *deleteItem = gtk_menu_item_new_with_label("✕ Delete Selected Lines");
+        GtkWidget *extractItem = gtk_menu_item_new_with_label("\U0001F5AB Extract");
+        gtk_widget_set_sensitive(deleteItem, hasSelection);
+        gtk_widget_set_sensitive(extractItem, hasSelection);
+        g_signal_connect_swapped(copyItem, "activate", G_CALLBACK(+[](gpointer d) { copySelectedLines(static_cast<LogViewerState *>(d)); }), st);
+        g_signal_connect_swapped(deleteItem, "activate", G_CALLBACK(+[](gpointer d) { deleteSelectedLines(static_cast<LogViewerState *>(d)); }), st);
+        g_signal_connect_swapped(extractItem, "activate", G_CALLBACK(+[](gpointer d) { extractSelectedLines(static_cast<LogViewerState *>(d)); }), st);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), copyItem);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), deleteItem);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), extractItem);
+        gtk_widget_show_all(menu);
+        gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+        return TRUE;
+    }), st, nullptr, (GConnectFlags)0);
+
+    // ── Wiring ──
+    g_signal_connect_swapped(btnFilter, "clicked", G_CALLBACK(+[](gpointer d) {
+        auto *st = static_cast<LogViewerState *>(d);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->chkFilterMode), TRUE);
+        executeSearch(st, false);
+    }), st);
+    g_signal_connect_swapped(btnSearchNext, "clicked", G_CALLBACK(+[](gpointer d) {
+        auto *st = static_cast<LogViewerState *>(d);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->chkFollow), FALSE);
+        executeSearch(st, true);
+    }), st);
+    g_signal_connect_swapped(st->searchEntry, "activate", G_CALLBACK(+[](gpointer d) { executeSearch(static_cast<LogViewerState *>(d), true); }), st);
+    g_signal_connect_swapped(st->btnSearchStop, "clicked", G_CALLBACK(+[](gpointer d) {
+        auto *st = static_cast<LogViewerState *>(d);
+        st->engine->stopSearch();
+        gtk_widget_set_sensitive(st->btnSearchStop, FALSE);
+        setStatus(st, "Search interrupted");
+    }), st);
+    g_signal_connect_swapped(st->chkFilterMode, "toggled", G_CALLBACK(+[](gpointer d) {
+        auto *st = static_cast<LogViewerState *>(d);
+        st->filteringActive = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(st->chkFilterMode));
+        refreshFilter(st);
+    }), st);
+    g_signal_connect_swapped(st->timeStartEntry, "activate", G_CALLBACK(+[](gpointer d) {
+        auto *st = static_cast<LogViewerState *>(d);
+        st->timeFilterActive = true;
+        refreshFilter(st);
+    }), st);
+    g_signal_connect_swapped(st->timeEndEntry, "activate", G_CALLBACK(+[](gpointer d) {
+        auto *st = static_cast<LogViewerState *>(d);
+        st->timeFilterActive = true;
+        refreshFilter(st);
+    }), st);
+    g_signal_connect_swapped(btnResetFilter, "clicked", G_CALLBACK(+[](gpointer d) {
+        auto *st = static_cast<LogViewerState *>(d);
+        gtk_entry_set_text(GTK_ENTRY(st->searchEntry), "");
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->chkFilterMode), FALSE);
+        st->timeFilterActive = false;
+        LogTimestamp first = st->engine->firstTimestamp();
+        LogTimestamp last = st->engine->lastTimestamp();
+        gtk_entry_set_text(GTK_ENTRY(st->timeStartEntry), formatTimestamp(first).c_str());
+        gtk_entry_set_text(GTK_ENTRY(st->timeEndEntry), formatTimestamp(last).c_str());
+        st->filteringActive = false;
+        refreshFilter(st);
+        executeSearch(st, false);
+    }), st);
+    g_signal_connect_swapped(st->chkFollow, "toggled", G_CALLBACK(+[](gpointer d) {
+        auto *st = static_cast<LogViewerState *>(d);
+        bool on = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(st->chkFollow));
+        st->engine->setFollowEnabled(on);
+        if (on) scrollToBottom(st);
+    }), st);
+    g_signal_connect_swapped(btnClearLog, "clicked", G_CALLBACK(+[](gpointer d) { clearLogFile(static_cast<LogViewerState *>(d)); }), st);
+    g_signal_connect_swapped(btnExtract, "clicked", G_CALLBACK(+[](gpointer d) { extractSelectedLines(static_cast<LogViewerState *>(d)); }), st);
+    g_signal_connect_swapped(btnSettings, "clicked", G_CALLBACK(+[](gpointer d) { openSettingsDialog(static_cast<LogViewerState *>(d)); }), st);
+
+    g_object_set_data_full(G_OBJECT(st->root), "logview-state", st, destroyState);
+
+    gtk_widget_show_all(st->root);
+
+    // ── Load ──
+    loadHighlightRules(st);
+    if (st->engine->loadFile(st->currentFile)) {
+        log_tree_model_rows_changed(st->model);
+        LogTimestamp first = st->engine->firstTimestamp(), last = st->engine->lastTimestamp();
+        if (first.valid) gtk_entry_set_text(GTK_ENTRY(st->timeStartEntry), formatTimestamp(first).c_str());
+        if (last.valid) gtk_entry_set_text(GTK_ENTRY(st->timeEndEntry), formatTimestamp(last).c_str());
+        setStatus(st, "Lines: " + std::to_string(st->engine->lineCount()));
+    }
+
+    // Poll for file growth every second while "Follow" is on (GTK has no
+    // built-in file-watcher signal the way QFileSystemWatcher does — this
+    // is the simplest correct equivalent; a GFileMonitor-based push
+    // notification, as diagramview's GTK build uses, would also work but
+    // isn't necessary for a once-a-second tail check).
+    g_timeout_add(1000, +[](gpointer data) -> gboolean {
+        auto *st = static_cast<LogViewerState *>(data);
+        if (st->engine->followEnabled()) {
+            auto result = st->engine->refreshTail();
+            if (result.grew) {
+                log_tree_model_rows_inserted(st->model, result.oldLineCount, result.newLineCount - 1);
+                if (st->filteringActive || st->timeFilterActive) refreshFilter(st);
+                setStatus(st, "Lines: " + std::to_string(st->engine->lineCount()) + " (following)");
+                scrollToBottom(st);
+            }
+        }
+        return G_SOURCE_CONTINUE;
+    }, st);
+
+    return reinterpret_cast<HWND>(st->root);
+}
+
+EXPORT void DCPCALL ListCloseWindow(HWND ListWin)
+{
+    GtkWidget *root = GTK_WIDGET(ListWin);
+    if (root) gtk_widget_destroy(root);
+}
+
+EXPORT int DCPCALL ListSendCommand(HWND, int, int)
+{
+    return LISTPLUGIN_ERROR;
+}
+
+EXPORT int DCPCALL ListSearchText(HWND ListWin, char *SearchString, int)
+{
+    GtkWidget *root = GTK_WIDGET(ListWin);
+    auto *st = static_cast<LogViewerState *>(g_object_get_data(G_OBJECT(root), "logview-state"));
+    if (!st) return LISTPLUGIN_ERROR;
+    gtk_entry_set_text(GTK_ENTRY(st->searchEntry), SearchString);
+    executeSearch(st, true);
+    return LISTPLUGIN_OK;
+}
+
+EXPORT void DCPCALL ListGetDetectString(char *DetectString, int maxlen)
+{
+    snprintf(DetectString, maxlen - 1, "EXT=\"LOG\" | EXT=\"TXT\"");
+}
+
+EXPORT void DCPCALL ListSetDefaultParams(ListDefaultParamStruct *)
+{
+}
+
+} // extern "C"
