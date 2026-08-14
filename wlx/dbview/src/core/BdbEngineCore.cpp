@@ -20,13 +20,24 @@ public:
         }
 
         DB *db = m_db;
-        fetchAll = [db](std::vector<std::string> &keys, std::vector<std::string> &values) {
+        totalCount = [db]() -> int {
+            DBC *cur = nullptr;
+            if (db->cursor(db, nullptr, &cur, 0) != 0) return 0;
+            int count = 0;
+            DBT key, data;
+            memset(&key, 0, sizeof(DBT)); memset(&data, 0, sizeof(DBT));
+            while (cur->get(cur, &key, &data, DB_NEXT) == 0) count++;
+            cur->close(cur);
+            return count;
+        };
+        fetchWindow = [db](int startIndex, int count, std::vector<std::string> &keys, std::vector<std::string> &values) {
             DBC *cur = nullptr;
             if (db->cursor(db, nullptr, &cur, 0) != 0) return;
             DBT key, data;
             memset(&key, 0, sizeof(DBT)); memset(&data, 0, sizeof(DBT));
             int ret = cur->get(cur, &key, &data, DB_FIRST);
-            while (ret == 0) {
+            for (int i = 0; i < startIndex && ret == 0; i++) ret = cur->get(cur, &key, &data, DB_NEXT);
+            for (int i = 0; i < count && ret == 0; i++) {
                 keys.emplace_back((const char *)key.data, key.size);
                 values.emplace_back((const char *)data.data, data.size);
                 ret = cur->get(cur, &key, &data, DB_NEXT);

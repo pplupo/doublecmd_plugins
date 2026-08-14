@@ -12,11 +12,17 @@
 /// the UI layer (src/gtk3/) just calls into this for table lists, column
 /// metadata, and row data.
 ///
-/// Unlike the Qt QAbstractTableModel classes (which lazily/incrementally
-/// fetch rows for scalability), this loads a table's full result set into
-/// memory on selectTable()/selectQuery(), same as most of those Qt models
-/// already effectively did (SqliteTableModel, KeyValueModel's window is
-/// the exception) -- a deliberate simplification for the GTK port.
+/// Rows are fetched in chunks (fetchMore()/canFetchMore()), same principle
+/// as the Qt side's QAbstractTableModel::fetchMore()/canFetchMore() (which
+/// DuckDbModel already used, and KeyValueModel approximated with a
+/// recentering window) -- selectTable()/selectQuery() only prepares the
+/// query and loads the first chunk; rowCount() reports the *total* row
+/// count (known upfront via COUNT(*) or an equivalent), while
+/// fetchedRowCount() reports how many rows are actually materialized in
+/// memory right now. The UI is expected to call fetchMore() as the user
+/// scrolls close to the bottom of what's currently loaded, appending only
+/// the newly-fetched rows to its own widget rather than re-populating
+/// everything.
 
 struct DbColumnInfo {
     std::string name;
@@ -37,18 +43,29 @@ public:
     virtual std::vector<DbColumnInfo> columnInfos(const std::string &tableName) const { return {}; }
     virtual std::vector<std::string> indexes(const std::string &tableName) const { return {}; }
 
-    /// Loads a table's (or keyspace's) full row set. Returns false on error
-    /// (see lastError()).
+    /// Prepares a table's (or keyspace's) row set and loads the first
+    /// chunk. Returns false on error (see lastError()).
     virtual bool selectTable(const std::string &tableName) = 0;
-    /// Runs a custom query (SQL engines only) and loads its result set.
+    /// Runs a custom query (SQL engines only) and loads its first chunk.
     virtual bool selectQuery(const std::string &query) { return false; }
 
+    /// Total row count (known upfront), independent of how many rows are
+    /// currently fetched into memory.
     virtual int rowCount() const = 0;
+    /// How many rows are currently materialized (i.e. safe to index via
+    /// cellText() et al.) -- always <= rowCount().
+    virtual int fetchedRowCount() const = 0;
+    virtual bool canFetchMore() const = 0;
+    /// Loads the next chunk. Returns how many additional rows became
+    /// available (0 if none, e.g. already fully fetched or on error).
+    virtual int fetchMore() = 0;
+
     virtual int columnCount() const = 0;
     virtual std::string columnName(int col) const = 0;
 
     /// Display text for a cell -- "NULL" for SQL NULL, "[Binary Data - N
     /// bytes]" for BLOB/binary cells (matches the Qt side's placeholder).
+    /// Only valid for row < fetchedRowCount().
     virtual std::string cellText(int row, int col) const = 0;
     virtual bool cellIsBinary(int row, int col) const { return false; }
     virtual std::vector<uint8_t> cellRawBytes(int row, int col) const { return {}; }

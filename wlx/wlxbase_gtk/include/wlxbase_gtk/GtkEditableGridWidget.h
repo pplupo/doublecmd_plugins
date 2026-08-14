@@ -38,6 +38,11 @@ public:
     /// Replace all row data. Does not go through the undo stack (matches
     /// EditableGridWidget's behavior on a fresh load).
     void setRowData(const std::vector<std::vector<std::string>> &rows);
+    /// Appends rows without clearing existing ones first -- for
+    /// incremental/lazy-loaded data sources (see dbview's GTK3 UI) where
+    /// re-populating the whole store on every fetched chunk would defeat
+    /// the point of not materializing everything upfront.
+    void appendRows(const std::vector<std::vector<std::string>> &rows);
     std::vector<std::vector<std::string>> rowData() const;
 
     int rowCount() const;

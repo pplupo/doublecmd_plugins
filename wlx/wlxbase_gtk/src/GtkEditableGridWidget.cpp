@@ -73,6 +73,16 @@ void GtkEditableGridWidget::setRowData(const std::vector<std::vector<std::string
     }
 }
 
+void GtkEditableGridWidget::appendRows(const std::vector<std::vector<std::string>> &rows)
+{
+    for (const auto &row : rows) {
+        GtkTreeIter iter;
+        gtk_list_store_append(m_store, &iter);
+        for (int c = 0; c < m_columnCount; ++c)
+            gtk_list_store_set(m_store, &iter, c, c < (int)row.size() ? row[c].c_str() : "", -1);
+    }
+}
+
 std::vector<std::vector<std::string>> GtkEditableGridWidget::rowData() const
 {
     std::vector<std::vector<std::string>> result;

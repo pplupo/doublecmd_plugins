@@ -4,6 +4,8 @@
 #include <algorithm>
 
 namespace {
+constexpr int kChunkSize = 200;
+
 bool endsWithCI(const std::string &s, const std::string &suffix) {
     if (s.size() < suffix.size()) return false;
     return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin(),
@@ -17,6 +19,10 @@ std::string baseName(const std::string &path) {
 }
 }
 
+/// Rows fetched kChunkSize at a time via LIMIT/OFFSET (same principle as
+/// the original Qt DuckDbModel's fetchMore()/canFetchMore(), just without
+/// the extra ORDER BY/sort-column bookkeeping -- GTK's grid doesn't
+/// support click-to-sort yet).
 class DuckDbEngineCore : public DbEngineCore {
 public:
     ~DuckDbEngineCore() override { close(); }
@@ -67,7 +73,12 @@ public:
     void close() override {
         if (m_inTransaction && m_conn) { try { m_conn->Query("ROLLBACK"); } catch (...) {} m_inTransaction = false; }
         m_conn.reset(); m_db.reset();
+        resetState();
+    }
+
+    void resetState() {
         m_currentTable.clear(); m_columns.clear(); m_rows.clear(); m_binary.clear(); m_rowIds.clear();
+        m_isQuery = false; m_hasRowId = false; m_totalRows = 0; m_baseSql.clear();
     }
 
     std::vector<std::string> tableNames() const override {
@@ -99,15 +110,12 @@ public:
         return result;
     }
 
-    bool loadResult(duckdb::MaterializedQueryResult *result, bool hasRowId) {
-        m_columns.clear(); m_rows.clear(); m_binary.clear(); m_rowIds.clear();
-        int colCount = result->ColumnCount();
-        int startCol = hasRowId ? 1 : 0;
-        for (int i = startCol; i < colCount; i++) m_columns.push_back(result->ColumnName(i));
+    int appendResultRows(duckdb::MaterializedQueryResult *result, int startCol) {
+        int fetched = 0;
         for (auto &row : *result) {
-            if (hasRowId) m_rowIds.push_back(row.GetValue<int64_t>(0));
+            if (m_hasRowId) m_rowIds.push_back(row.GetValue<int64_t>(0));
             std::vector<std::string> r; std::vector<bool> b;
-            for (int c = startCol; c < colCount; c++) {
+            for (int c = startCol; c < result->ColumnCount(); c++) {
                 try {
                     auto val = row.GetValue<duckdb::Value>(c);
                     if (val.IsNull()) { r.push_back("NULL"); b.push_back(false); }
@@ -117,37 +125,69 @@ public:
             }
             m_rows.push_back(std::move(r));
             m_binary.push_back(std::move(b));
+            fetched++;
         }
-        return true;
+        return fetched;
+    }
+
+    int fetchChunk() {
+        if (!m_conn || m_baseSql.empty()) return 0;
+        try {
+            std::string sql = m_baseSql + " LIMIT " + std::to_string(kChunkSize) + " OFFSET " + std::to_string((int)m_rows.size());
+            auto result = m_conn->Query(sql);
+            if (!result || result->HasError()) { m_lastError = result ? result->GetError() : "query failed"; return 0; }
+            return appendResultRows(result.get(), m_hasRowId ? 1 : 0);
+        } catch (const std::exception &e) { m_lastError = e.what(); return 0; }
     }
 
     bool selectTable(const std::string &tableName) override {
         if (!m_conn) return false;
-        m_currentTable = tableName; m_isQuery = false;
-        m_hasRowId = false;
+        resetState();
+        m_currentTable = tableName;
         try {
             auto testResult = m_conn->Query("SELECT rowid FROM \"" + tableName + "\" LIMIT 0");
             m_hasRowId = testResult && !testResult->HasError();
         } catch (...) {}
-        std::string fields = m_hasRowId ? "rowid, *" : "*";
+
         try {
-            auto result = m_conn->Query("SELECT " + fields + " FROM \"" + tableName + "\"");
-            if (!result || result->HasError()) { m_lastError = result ? result->GetError() : "query failed"; return false; }
-            return loadResult(result.get(), m_hasRowId);
+            auto countResult = m_conn->Query("SELECT COUNT(*) FROM \"" + tableName + "\"");
+            if (countResult && !countResult->HasError())
+                for (auto &row : *countResult) m_totalRows = (int)row.GetValue<int64_t>(0);
+        } catch (...) {}
+
+        // Column names via a LIMIT 0 probe.
+        try {
+            std::string fields = m_hasRowId ? "rowid, *" : "*";
+            auto probe = m_conn->Query("SELECT " + fields + " FROM \"" + tableName + "\" LIMIT 0");
+            if (!probe || probe->HasError()) { m_lastError = probe ? probe->GetError() : "query failed"; return false; }
+            int startCol = m_hasRowId ? 1 : 0;
+            for (int i = startCol; i < probe->ColumnCount(); i++) m_columns.push_back(probe->ColumnName(i));
         } catch (const std::exception &e) { m_lastError = e.what(); return false; }
+
+        m_baseSql = "SELECT " + std::string(m_hasRowId ? "rowid, *" : "*") + " FROM \"" + tableName + "\"";
+        fetchChunk();
+        return true;
     }
 
     bool selectQuery(const std::string &query) override {
         if (!m_conn) return false;
-        m_isQuery = true; m_hasRowId = false;
+        resetState();
+        m_isQuery = true;
         try {
             auto result = m_conn->Query(query);
             if (!result || result->HasError()) { m_lastError = result ? result->GetError() : "query failed"; return false; }
-            return loadResult(result.get(), false);
+            for (int i = 0; i < result->ColumnCount(); i++) m_columns.push_back(result->ColumnName(i));
+            appendResultRows(result.get(), 0);
+            m_totalRows = (int)m_rows.size();
+            return true;
         } catch (const std::exception &e) { m_lastError = e.what(); return false; }
     }
 
-    int rowCount() const override { return (int)m_rows.size(); }
+    int rowCount() const override { return m_totalRows; }
+    int fetchedRowCount() const override { return (int)m_rows.size(); }
+    bool canFetchMore() const override { return (int)m_rows.size() < m_totalRows; }
+    int fetchMore() override { return canFetchMore() ? fetchChunk() : 0; }
+
     int columnCount() const override { return (int)m_columns.size(); }
     std::string columnName(int col) const override { return col >= 0 && col < (int)m_columns.size() ? m_columns[col] : ""; }
     std::string cellText(int row, int col) const override {
@@ -197,6 +237,8 @@ private:
     std::unique_ptr<duckdb::DuckDB> m_db;
     std::unique_ptr<duckdb::Connection> m_conn;
     bool m_inTransaction = false, m_isQuery = false, m_hasRowId = false;
+    int m_totalRows = 0;
+    std::string m_baseSql;
     std::string m_currentTable, m_lastError;
     std::vector<std::string> m_columns;
     std::vector<std::vector<std::string>> m_rows;

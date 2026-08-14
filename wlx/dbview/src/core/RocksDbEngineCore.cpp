@@ -45,11 +45,21 @@ public:
         }
 
         rocksdb::DB *dbp = m_db;
-        fetchAll = [dbp](std::vector<std::string> &keys, std::vector<std::string> &values) {
+        totalCount = [dbp]() -> int {
+            int count = 0;
             rocksdb::Iterator *it = dbp->NewIterator(rocksdb::ReadOptions());
-            for (it->SeekToFirst(); it->Valid(); it->Next()) {
+            for (it->SeekToFirst(); it->Valid(); it->Next()) count++;
+            delete it;
+            return count;
+        };
+        fetchWindow = [dbp](int startIndex, int count, std::vector<std::string> &keys, std::vector<std::string> &values) {
+            rocksdb::Iterator *it = dbp->NewIterator(rocksdb::ReadOptions());
+            it->SeekToFirst();
+            for (int i = 0; i < startIndex && it->Valid(); ++i) it->Next();
+            for (int i = 0; i < count && it->Valid(); ++i) {
                 keys.push_back(it->key().ToString());
                 values.push_back(it->value().ToString());
+                it->Next();
             }
             delete it;
         };
