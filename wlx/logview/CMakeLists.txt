@@ -27,6 +27,18 @@ FetchContent_MakeAvailable(re2)
 # Need Qt6::WaylandClient? If not just Widgets and Core
 # For inotify, it's native linux.
 
+# De-Qtified core: mmap/RE2/threading logic, zero Qt dependency —
+# LogModel is now a thin QAbstractListModel adapter over this (see
+# src/LogModel.cpp). Kept as its own static lib (rather than folded into
+# the src/core/ subdirectory tree other plugins use) to keep this change
+# minimal; a future GTK port would reuse it directly.
+add_library(logview_core STATIC
+    src/core/LogEngine.h
+    src/core/LogEngine.cpp
+)
+target_include_directories(logview_core PUBLIC src/core)
+target_link_libraries(logview_core PUBLIC re2::re2)
+
 # Build the shared library (WLX plugin)
 add_library(logviewer SHARED
     src/wlx_plugin.cpp
@@ -41,6 +53,7 @@ set_target_properties(logviewer PROPERTIES
 )
 
 target_link_libraries(logviewer PRIVATE
+    logview_core
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
