@@ -12,7 +12,15 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+// QtClassHelperMacros (just Q_DISABLE_COPY & friends, split out for
+// modularity) only exists from Qt 6.5 onward -- older Qt6 (6.4, as shipped
+// by e.g. Ubuntu 24.04) already gets these macros transitively via
+// qglobal.h through the QMap/QString/etc. includes above, so guard this
+// one instead of hard-requiring a Qt minor version this project doesn't
+// otherwise need.
+#if __has_include(<QtClassHelperMacros>)
 #include <QtClassHelperMacros>
+#endif
 
 namespace MD
 {

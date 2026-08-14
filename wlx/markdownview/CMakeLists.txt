@@ -10,13 +10,20 @@ set(CMAKE_AUTOUIC ON)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Find Qt6
+# Find Qt6. markdownview_core (below) only needs Core (QString, the AST type
+# in md4qt's MD4QT_QT_SUPPORT build mode) and Gui (QPainter/QPixmap/QImage,
+# used narrowly by MicroTeX's Qt Graphics2D backend for LaTeX math
+# rendering -- guarded at runtime by a qApp-null check, see markdownvisitor.
+# cpp's onMath()). Widgets is only needed by the Qt6 plugin's own UI layer.
 find_package(Qt6 6.2 REQUIRED COMPONENTS
+    Core
+    Gui
     Widgets
-    Svg
-    Network
-    PrintSupport
 )
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CAIRO REQUIRED cairo)
+pkg_check_modules(RSVG REQUIRED librsvg-2.0)
 
 # 3rdparty configurations - enforce static libraries for maximum portability across environments
 set(BUILD_MD4QT_TESTS OFF CACHE BOOL "" FORCE)
@@ -42,16 +49,20 @@ target_include_directories(markdownview_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/md4qt/src
     ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/MicroTeX/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
+    ${CAIRO_INCLUDE_DIRS}
+    ${RSVG_INCLUDE_DIRS}
 )
 
 target_link_libraries(markdownview_core PUBLIC
     md4qt::md4qt
     LaTeX
-    Qt6::Widgets
-    Qt6::Svg
-    Qt6::Network
-    Qt6::PrintSupport
+    Qt6::Core
+    Qt6::Gui
+    ${CAIRO_LIBRARIES}
+    ${RSVG_LIBRARIES}
 )
+target_link_directories(markdownview_core PUBLIC ${CAIRO_LIBRARY_DIRS} ${RSVG_LIBRARY_DIRS})
+target_compile_options(markdownview_core PUBLIC ${CAIRO_CFLAGS_OTHER} ${RSVG_CFLAGS_OTHER})
 
 # Qt6 Lister Plugin Target
 add_library(markdownview_qt6 MODULE
@@ -76,15 +87,19 @@ set_target_properties(markdownview_qt6 PROPERTIES
 )
 
 # Optional GTK3 Target
-# NOTE: markdownview_core (linked below) still pulls in Qt6::Widgets/Svg/
-# Network/PrintSupport transitively — markdownvisitor.cpp uses
-# QNetworkAccessManager (fetching Mermaid/PlantUML renders), QSvgRenderer/
-# QSvgGenerator/QPainter/QImage/QPixmap (SVG rasterization), and md4qt
-# itself is built in MD4QT_QT_SUPPORT mode (QString-based parser/AST). So
-# despite building "the GTK variant", markdownview_gtk3.wlx is not yet a
-# pure-GTK binary — verify with `ldd` before treating it as such. This is a
-# real, separate de-Qtify task (network client + SVG rasterization +
-# possibly flipping md4qt's build mode), tracked but not done here.
+# NOTE: markdownview_core (linked below) still pulls in Qt6::Core/Gui --
+# down from Core/Gui/Widgets/Svg/Network/PrintSupport. QtNetwork (Mermaid/
+# PlantUML web rendering) was replaced with a curl subprocess; QtSvg and the
+# rest of QtGui's painting API (SVG rasterization) were replaced with
+# librsvg+Cairo. What's left: md4qt itself is built in MD4QT_QT_SUPPORT mode
+# (QString-based parser/AST, requires Qt6::Core), and MicroTeX's LaTeX math
+# rendering uses its Qt Graphics2D backend (requires Qt6::Gui for QPainter/
+# QPixmap) -- guarded at runtime by a qApp-null check in onMath(), so it
+# degrades to plain-text math rendering rather than crashing when no
+# QGuiApplication exists (true for this GTK3 plugin's host process). Fully
+# eliminating Qt would mean flipping md4qt to its ICU/STL string mode and
+# building MicroTeX's Cairo backend (needs cairomm/pangomm) instead --
+# tracked as further work, not done here.
 option(BUILD_WLX_GTK "Build GTK3 WLX Target" ON)
 if(BUILD_WLX_GTK)
     find_package(PkgConfig REQUIRED)
