@@ -11,7 +11,12 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN 1)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+option(ENABLE_QT6 "Build Qt6 plugin variant" ON)
+option(ENABLE_GTK3 "Build GTK3 plugin variant" ON)
+
+if(ENABLE_QT6)
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+endif()
 include(FetchContent)
 FetchContent_Declare(
   re2
@@ -39,27 +44,58 @@ add_library(logview_core STATIC
 target_include_directories(logview_core PUBLIC src/core)
 target_link_libraries(logview_core PUBLIC re2::re2)
 
-# Build the shared library (WLX plugin)
-add_library(logviewer SHARED
-    src/wlx_plugin.cpp
-    src/LogViewerWidget.cpp
-    src/LogModel.cpp
-)
+# Build the shared library (WLX plugin) — Qt6 variant
+if(ENABLE_QT6)
+    add_library(logviewer SHARED
+        src/wlx_plugin.cpp
+        src/LogViewerWidget.cpp
+        src/LogModel.cpp
+    )
 
-set_target_properties(logviewer PROPERTIES
-    PREFIX ""
-    SUFFIX ".wlx"
-    OUTPUT_NAME "logviewer"
-)
+    set_target_properties(logviewer PROPERTIES
+        PREFIX ""
+        SUFFIX ".wlx"
+        OUTPUT_NAME "logviewer"
+    )
 
-target_link_libraries(logviewer PRIVATE
-    logview_core
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Widgets
-    re2::re2
-)
+    target_link_libraries(logviewer PRIVATE
+        logview_core
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Widgets
+        re2::re2
+    )
+endif()
 
 # Only export specific functions
 # This is usually handled by `extern "C" __attribute__((visibility("default")))` in the code,
 # combined with the hidden preset.
+
+# --- GTK3 Variant ---
+# LogTreeModel is a custom virtual GtkTreeModel over LogEngine directly
+# (not a GtkListStore) — preserves the mmap-based scalability that's the
+# entire point of LogEngine for huge log files.
+if(ENABLE_GTK3)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK3 gtk+-3.0)
+    if(GTK3_FOUND)
+        add_library(logviewer_gtk3 SHARED
+            src/gtk3/LogTreeModel.h
+            src/gtk3/LogTreeModel.cpp
+            src/gtk3/LogViewerWidget_gtk3.cpp
+        )
+        target_include_directories(logviewer_gtk3 PRIVATE
+            ${GTK3_INCLUDE_DIRS}
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
+        )
+        target_link_libraries(logviewer_gtk3 PRIVATE logview_core ${GTK3_LIBRARIES})
+        target_link_options(logviewer_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
+        set_target_properties(logviewer_gtk3 PROPERTIES
+            PREFIX ""
+            OUTPUT_NAME "logviewer_gtk3"
+            SUFFIX ".wlx"
+        )
+    else()
+        message(STATUS "logview: gtk+-3.0 not found — GTK3 variant skipped")
+    endif()
+endif()
