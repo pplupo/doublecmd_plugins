@@ -37,8 +37,10 @@
 #include <libintl.h>
 #include <locale.h>
 #include <algorithm>
+#include <vector>
 
 #include "wlxplugin.h"
+#include "CsvCore.h"
 
 // Pull in base library headers
 #include <wlxbase_wlqt/FocusManager.h>
@@ -63,6 +65,12 @@ static const int WasQuotedRole = Qt::UserRole + 2;
 
 using namespace QtWlPlugin;
 
+// Tokenizing itself now lives in CsvCore (src/core/CsvCore.cpp), shared
+// with the GTK build — this wrapper just handles the Qt-side encoding
+// conversion (EncodingUtils, still Qt-typed) and QStringList marshaling.
+// NOTE: preserves the original's gQuoted-gated behavior exactly, including
+// that parse_line() returns an empty list when gQuoted is false (a
+// pre-existing quirk, not something introduced by this refactor).
 QStringList parse_line(const QByteArray &line, const char *encoding, char separator, QList<bool> *wasQuotedOut = nullptr)
 {
 	QStringList list;
@@ -75,57 +83,13 @@ QStringList parse_line(const QByteArray &line, const char *encoding, char separa
 	else
 		utf8Line = line;
 
-	QString text = QString::fromUtf8(utf8Line);
-	
-	if (text.endsWith("\r\n"))
-		text.chop(2);
-	else if (text.endsWith("\n"))
-		text.chop(1);
-
-	QStringList rawlist = text.split(QLatin1Char(separator));
-	QString temp;
-
-	for (int c = 0; c < rawlist.size(); c++)
+	if (gQuoted)
 	{
-		if (gQuoted)
+		std::vector<CsvCore::Field> fields = CsvCore::parseLine(utf8Line.toStdString(), separator);
+		for (const auto &field : fields)
 		{
-			if (rawlist.at(c).startsWith('"') && !rawlist.at(c).endsWith('"'))
-			{
-				temp = rawlist.at(c);
-
-				if (c < rawlist.size() - 1)
-				{
-					for (int x = c + 1; x < rawlist.size(); x++)
-					{
-						const QString nitm = rawlist.at(x);
-
-						if (!nitm.isEmpty() && nitm.back() == '"')
-						{
-							temp = rawlist.mid(c, x - c + 1).join(QLatin1Char(separator)).remove(0, 1).remove(-1, 1);
-
-							if (temp.count(QLatin1Char('"')) % 2 == 0)
-							{
-								c = x;
-								break;
-							}
-						}
-					}
-				}
-
-				list.append(temp);
-				if (wasQuotedOut) wasQuotedOut->append(true);
-			}
-			else
-			{
-				QString val = rawlist.at(c).trimmed();
-				bool quoted = (val.size() >= 2 && val.startsWith('"') && val.endsWith('"'));
-				if (quoted)
-					val = val.mid(1, val.size() - 2);
-				list.append(val);
-				if (wasQuotedOut) wasQuotedOut->append(quoted);
-			}
-
-			list.last().replace("\"\"", "\"");
+			list.append(QString::fromUtf8(field.text.c_str()));
+			if (wasQuotedOut) wasQuotedOut->append(field.wasQuoted);
 		}
 	}
 
@@ -836,10 +800,7 @@ void CsvViewerWidget::saveFile(const QString& filePath)
 			QTableWidgetItem *hItem = m_view->horizontalHeaderItem(c);
 			QString text = hItem ? hItem->text() : "";
 			bool wasQuoted = hItem && hItem->data(WasQuotedRole).toBool();
-			if (wasQuoted || text.contains(m_separator)) {
-				text.replace("\"", "\"\"");
-				text = "\"" + text + "\"";
-			}
+			text = QString::fromUtf8(CsvCore::escapeField(text.toStdString(), m_separator, wasQuoted).c_str());
 			headerLine << text;
 		}
 		outText += headerLine.join(m_separator) + "\n";
@@ -853,10 +814,7 @@ void CsvViewerWidget::saveFile(const QString& filePath)
 			QTableWidgetItem *item = m_view->item(r, c);
 			QString text = item ? item->text() : "";
 			bool wasQuoted = item && item->data(WasQuotedRole).toBool();
-			if (wasQuoted || text.contains(m_separator)) {
-				text.replace("\"", "\"\"");
-				text = "\"" + text + "\"";
-			}
+			text = QString::fromUtf8(CsvCore::escapeField(text.toStdString(), m_separator, wasQuoted).c_str());
 			rowLine << text;
 		}
 		outText += rowLine.join(m_separator) + "\n";
