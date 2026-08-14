@@ -3,6 +3,10 @@
 #include "KeyValueModel.h"
 #include "DuckDbModel.h"
 #include "MdbEngine.h"
+#include "SqliteTableModel.h"
+#ifdef ENABLE_FIREBIRD
+#include "FirebirdTableModel.h"
+#endif
 #include <QKeyEvent>
 #include <QCoreApplication>
 
@@ -29,9 +33,6 @@
 #include <QPushButton>
 #include <QStyle>
 #include <QShortcut>
-#include <QSqlTableModel>
-#include <QSqlRecord>
-#include <QSqlField>
 #include <iostream>
 
 using namespace QtWlPlugin;
@@ -106,7 +107,11 @@ bool DbViewWidget::loadFile(const QString &filepath)
     QString firstTable = tables.isEmpty() ? views.first() : tables.first();
     setupUi(firstTable);
 
-    ThemeManager::applyTheme(this, ThemeManager::detectSystemTheme());
+    // FIXME (pre-existing, unrelated to this change): ThemeManager has no
+    // detectSystemTheme() — swapped to currentTheme() only to unblock
+    // building dbview_qt6 at all. Confirm the intended behavior (OS theme
+    // detection vs. the app's last-toggled theme) and fix properly.
+    ThemeManager::applyTheme(this, ThemeManager::currentTheme());
     return true;
 }
 
@@ -501,11 +506,14 @@ bool DbViewWidget::isCellBinary(const QModelIndex &idx) const
     if (auto *mdbModel = qobject_cast<MdbModel*>(model)) {
         return mdbModel->isBinaryValue(srcIdx.row(), srcIdx.column());
     }
-    if (auto *sqlModel = qobject_cast<QSqlTableModel*>(model)) {
-        QSqlRecord rec = sqlModel->record();
-        QSqlField f = rec.field(srcIdx.column());
-        return f.metaType().id() == QMetaType::QByteArray;
+    if (auto *sqliteModel = qobject_cast<SqliteTableModel*>(model)) {
+        return sqliteModel->isBinaryValue(srcIdx.row(), srcIdx.column());
     }
+#ifdef ENABLE_FIREBIRD
+    if (auto *fbModel = qobject_cast<FirebirdTableModel*>(model)) {
+        return fbModel->isBinaryValue(srcIdx.row(), srcIdx.column());
+    }
+#endif
     return false;
 }
 
@@ -528,9 +536,14 @@ QByteArray DbViewWidget::getCellRawValue(const QModelIndex &idx) const
     if (auto *mdbModel = qobject_cast<MdbModel*>(model)) {
         return mdbModel->rawValue(srcIdx.row(), srcIdx.column());
     }
-    if (auto *sqlModel = qobject_cast<QSqlTableModel*>(model)) {
-        return sqlModel->data(srcIdx, Qt::EditRole).toByteArray();
+    if (auto *sqliteModel = qobject_cast<SqliteTableModel*>(model)) {
+        return sqliteModel->rawValue(srcIdx.row(), srcIdx.column());
     }
+#ifdef ENABLE_FIREBIRD
+    if (auto *fbModel = qobject_cast<FirebirdTableModel*>(model)) {
+        return fbModel->rawValue(srcIdx.row(), srcIdx.column());
+    }
+#endif
     return {};
 }
 
@@ -550,9 +563,14 @@ bool DbViewWidget::setCellRawValue(const QModelIndex &idx, const QByteArray &byt
     if (auto *duckModel = qobject_cast<DuckDbModel*>(model)) {
         return duckModel->setData(srcIdx, bytes, Qt::EditRole);
     }
-    if (auto *sqlModel = qobject_cast<QSqlTableModel*>(model)) {
-        return sqlModel->setData(srcIdx, bytes, Qt::EditRole);
+    if (auto *sqliteModel = qobject_cast<SqliteTableModel*>(model)) {
+        return sqliteModel->setData(srcIdx, bytes, Qt::EditRole);
     }
+#ifdef ENABLE_FIREBIRD
+    if (auto *fbModel = qobject_cast<FirebirdTableModel*>(model)) {
+        return fbModel->setData(srcIdx, bytes, Qt::EditRole);
+    }
+#endif
     return false;
 }
 
