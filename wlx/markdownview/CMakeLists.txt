@@ -75,11 +75,20 @@ set_target_properties(markdownview_qt6 PROPERTIES
     SUFFIX ".wlx"
 )
 
-# Optional GTK3 Target (Disabled by default)
-option(BUILD_WLX_GTK "Build GTK3 WLX Target" OFF)
+# Optional GTK3 Target
+# NOTE: markdownview_core (linked below) still pulls in Qt6::Widgets/Svg/
+# Network/PrintSupport transitively — markdownvisitor.cpp uses
+# QNetworkAccessManager (fetching Mermaid/PlantUML renders), QSvgRenderer/
+# QSvgGenerator/QPainter/QImage/QPixmap (SVG rasterization), and md4qt
+# itself is built in MD4QT_QT_SUPPORT mode (QString-based parser/AST). So
+# despite building "the GTK variant", markdownview_gtk3.wlx is not yet a
+# pure-GTK binary — verify with `ldd` before treating it as such. This is a
+# real, separate de-Qtify task (network client + SVG rasterization +
+# possibly flipping md4qt's build mode), tracked but not done here.
+option(BUILD_WLX_GTK "Build GTK3 WLX Target" ON)
 if(BUILD_WLX_GTK)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GTK3 gtk+-3.0 webkit2gtk-4.0)
+    pkg_check_modules(GTK3 gtk+-3.0 webkit2gtk-4.1)
     if(GTK3_FOUND)
         add_library(markdownview_gtk3 MODULE
             src/gtk3/plugin_gtk3.cpp
