@@ -1,38 +1,187 @@
 #include "markdown_engine.h"
-#include "markdownvisitor.h"
+#include "diagram_render.h"
+#include "latex_render.h"
 
-#include <parser.h>
-#include <html.h>
+#include <md4c-html.h>
 #include "latex.h"
 
-#include <QString>
-
 #include <cstdlib>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <regex>
 #include <sys/stat.h>
 
+namespace MarkdownEngine {
+
 namespace {
-bool fileExists(const std::string &path) {
-    struct stat st;
-    return stat(path.c_str(), &st) == 0;
-}
+
+bool fileExists(const std::string &path) { struct stat st; return stat(path.c_str(), &st) == 0; }
+
 std::string readFileUtf8(const std::string &path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return {};
-    std::ostringstream ss;
-    ss << f.rdbuf();
+    std::ostringstream ss; ss << f.rdbuf();
     return ss.str();
 }
+
 std::string homeDir() {
     const char *h = std::getenv("HOME");
     return h ? h : "";
 }
+
+std::string htmlUnescape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ) {
+        if (s.compare(i, 5, "&amp;") == 0) { out += '&'; i += 5; }
+        else if (s.compare(i, 4, "&lt;") == 0) { out += '<'; i += 4; }
+        else if (s.compare(i, 4, "&gt;") == 0) { out += '>'; i += 4; }
+        else if (s.compare(i, 6, "&quot;") == 0) { out += '"'; i += 6; }
+        else if (s.compare(i, 5, "&#39;") == 0) { out += '\''; i += 5; }
+        else { out += s[i]; i += 1; }
+    }
+    return out;
 }
 
-namespace MarkdownEngine {
+std::string base64Encode(const std::vector<uint8_t> &data) {
+    static const char *tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    size_t i = 0;
+    for (; i + 2 < data.size(); i += 3) {
+        unsigned v = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+        out += tbl[(v >> 18) & 0x3F]; out += tbl[(v >> 12) & 0x3F];
+        out += tbl[(v >> 6) & 0x3F]; out += tbl[v & 0x3F];
+    }
+    if (i + 1 == data.size()) {
+        unsigned v = data[i] << 16;
+        out += tbl[(v >> 18) & 0x3F]; out += tbl[(v >> 12) & 0x3F]; out += "==";
+    } else if (i + 2 == data.size()) {
+        unsigned v = (data[i] << 16) | (data[i + 1] << 8);
+        out += tbl[(v >> 18) & 0x3F]; out += tbl[(v >> 12) & 0x3F]; out += tbl[(v >> 6) & 0x3F]; out += "=";
+    }
+    return out;
+}
 
-static const char* DEFAULT_LIGHT_CSS = R"(
+void replaceAll(std::string &s, const std::string &from, const std::string &to) {
+    size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) { s.replace(pos, from.size(), to); pos += to.size(); }
+}
+
+std::string htmlEscape(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+// --- md_html() driver ---
+
+void mdHtmlOutputCallback(const MD_CHAR *text, MD_SIZE size, void *userdata) {
+    static_cast<std::string *>(userdata)->append(text, size);
+}
+
+std::string parseMarkdownToHtml(const std::string &markdown) {
+    std::string html;
+    unsigned parserFlags = MD_DIALECT_GITHUB | MD_FLAG_LATEXMATHSPANS;
+    md_html(markdown.data(), (MD_SIZE)markdown.size(), mdHtmlOutputCallback, &html, parserFlags, 0);
+    return html;
+}
+
+// --- Fenced code block post-processing: mermaid/plantuml -> rendered image ---
+
+std::string renderDiagramImgTag(const std::string &lang, const std::string &code, bool darkMode) {
+    std::string svg;
+    if (lang == "mermaid") {
+        svg = DiagramRender::renderMermaidWeb(code, darkMode);
+        if (!svg.empty()) svg = DiagramRender::fixMermaidSvgText(svg, darkMode);
+    } else { // plantuml / puml
+        svg = DiagramRender::renderPlantUmlWeb(code, darkMode);
+        if (!svg.empty() && darkMode) svg = DiagramRender::fixPlantUmlSvgDark(svg);
+    }
+    if (svg.empty()) return {};
+
+    int w = 0, h = 0;
+    std::vector<uint8_t> png = DiagramRender::svgToHighDpiPng(svg, 2.0f, darkMode, w, h);
+    if (png.empty()) return {};
+
+    std::string b64 = base64Encode(png);
+    std::string tag = "<p align=\"center\">\n<img src=\"data:image/png;base64," + b64 + "\"";
+    if (w > 0 && h > 0) tag += " width=\"" + std::to_string(w) + "\" height=\"" + std::to_string(h) + "\"";
+    tag += " />\n</p>\n";
+    return tag;
+}
+
+std::string replaceDiagramBlocks(const std::string &htmlIn, bool darkMode) {
+    static const std::regex codeBlockRe(
+        R"RX(<pre><code class="language-(mermaid|plantuml|puml)">([\s\S]*?)</code></pre>\n?)RX");
+    std::string out;
+    auto begin = std::sregex_iterator(htmlIn.begin(), htmlIn.end(), codeBlockRe);
+    auto end = std::sregex_iterator();
+    size_t lastEnd = 0;
+    for (auto it = begin; it != end; ++it) {
+        auto &m = *it;
+        std::string lang = m[1].str();
+        std::string code = htmlUnescape(m[2].str());
+        std::string rendered = renderDiagramImgTag(lang, code, darkMode);
+        out.append(htmlIn, lastEnd, m.position(0) - lastEnd);
+        out += rendered.empty() ? m.str(0) : rendered; // fall back to the plain code block on failure
+        lastEnd = m.position(0) + m.length(0);
+    }
+    out.append(htmlIn, lastEnd, std::string::npos);
+    return out;
+}
+
+// --- <x-equation> post-processing: LaTeX math -> rendered image ---
+// md4c-html renders MD_FLAG_LATEXMATHSPANS spans as <x-equation>...</x-equation>
+// (inline) / <x-equation type="display">...</x-equation> (display) -- a
+// non-standard tag by design (HTML has no native math element), meant to be
+// post-processed by the consumer. That's us.
+
+std::string renderMathTag(const std::string &tex, bool isDisplay, bool darkMode) {
+    int w = 0, h = 0;
+    std::vector<uint8_t> png = renderLatexToPng(tex, darkMode, w, h);
+    if (png.empty()) {
+        // Fallback: plain text, same shape as the original md4qt-based code's
+        // non-LaTeX/parse-failure fallback. `tex` is the raw (unescaped)
+        // source at this point, so it needs re-escaping for safe embedding.
+        std::string escaped = htmlEscape(tex);
+        return isDisplay ? ("<pre class=\"math block\"><code>" + escaped + "</code></pre>\n")
+                          : ("<span class=\"math inline\">$" + escaped + "$</span>");
+    }
+    std::string b64 = base64Encode(png);
+    std::string imgTag = "<img src=\"data:image/png;base64," + b64 + "\" />";
+    return isDisplay ? ("<p align=\"center\">" + imgTag + "</p>") : ("<span class=\"math inline\">" + imgTag + "</span>");
+}
+
+std::string replaceMathTags(const std::string &htmlIn, bool darkMode) {
+    static const std::regex mathRe(R"(<x-equation( type="display")?>([\s\S]*?)</x-equation>)");
+    std::string out;
+    auto begin = std::sregex_iterator(htmlIn.begin(), htmlIn.end(), mathRe);
+    auto end = std::sregex_iterator();
+    size_t lastEnd = 0;
+    for (auto it = begin; it != end; ++it) {
+        auto &m = *it;
+        bool isDisplay = m[1].matched;
+        std::string rawTex = htmlUnescape(m[2].str());
+        out.append(htmlIn, lastEnd, m.position(0) - lastEnd);
+        out += renderMathTag(rawTex, isDisplay, darkMode);
+        lastEnd = m.position(0) + m.length(0);
+    }
+    out.append(htmlIn, lastEnd, std::string::npos);
+    return out;
+}
+
+// --- Theming + final document wrap ---
+
+const char *DEFAULT_LIGHT_CSS = R"(
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: #24292e;
@@ -99,7 +248,7 @@ hr {
 }
 )";
 
-static const char* DEFAULT_DARK_CSS = R"(
+const char *DEFAULT_DARK_CSS = R"(
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: #c9d1d9;
@@ -166,6 +315,60 @@ hr {
 }
 )";
 
+std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std::string &customCssPath) {
+    std::string html = rawHtml;
+
+    if (darkMode) {
+        replaceAll(html, "<blockquote>",
+            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#2f81f7\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td style=\"font-style: italic; color: #c9d1d9;\">");
+        replaceAll(html, "<pre>",
+            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; color:#e6edf3; margin:0; padding:0;\">");
+        replaceAll(html, "<pre class=",
+            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; color:#e6edf3; margin:0; padding:0;\" class=");
+    } else {
+        replaceAll(html, "<blockquote>",
+            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#1B2B3C\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td style=\"font-style: italic; color: #24292e;\">");
+        replaceAll(html, "<pre>",
+            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; color:#24292e; margin:0; padding:0;\">");
+        replaceAll(html, "<pre class=",
+            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; color:#24292e; margin:0; padding:0;\" class=");
+    }
+
+    replaceAll(html, "</blockquote>", "</td></tr></table>");
+    replaceAll(html, "</pre>", "</pre></td></tr></table>");
+
+    std::string hrReplacement = darkMode ? "<hr color=\"#30363d\" size=\"2\" />" : "<hr color=\"#1A2B3C\" size=\"2\" />";
+    replaceAll(html, "<hr />", hrReplacement);
+    replaceAll(html, "<hr>", hrReplacement);
+
+    // CSS lookup precedence: customCssPath -> plugin CSS -> markdownpart.css -> built-in default.
+    std::string cssStr, targetCssFile;
+    if (!customCssPath.empty() && fileExists(customCssPath)) {
+        targetCssFile = customCssPath;
+    } else {
+        std::string home = homeDir();
+        std::string pluginDirCss = home + "/.config/doublecmd/plugins/wlx/markdownview.css";
+        std::string pluginPartCss = home + "/.config/doublecmd/plugins/wlx/markdownpart.css";
+        std::string userPartCss = home + "/.config/markdownpart.css";
+        if (fileExists(pluginDirCss)) targetCssFile = pluginDirCss;
+        else if (fileExists(pluginPartCss)) targetCssFile = pluginPartCss;
+        else if (fileExists(userPartCss)) targetCssFile = userPartCss;
+    }
+    if (!targetCssFile.empty()) cssStr = readFileUtf8(targetCssFile);
+    if (cssStr.empty()) cssStr = darkMode ? DEFAULT_DARK_CSS : DEFAULT_LIGHT_CSS;
+
+    return "<!DOCTYPE html><html><head><style>" + cssStr + "</style></head><body>" + html + "</body></html>";
+}
+
+std::string renderMarkdown(const std::string &markdown, bool darkMode, const std::string &customCssPath) {
+    std::string html = parseMarkdownToHtml(markdown);
+    html = replaceDiagramBlocks(html, darkMode);
+    html = replaceMathTags(html, darkMode);
+    return postProcessHtml(html, darkMode, customCssPath);
+}
+
+} // namespace
+
 void init() {
     static bool microtex_initialized = false;
     if (!microtex_initialized) {
@@ -174,92 +377,14 @@ void init() {
     }
 }
 
-static QString postProcessHtml(const QString& rawHtml, bool darkMode, const std::string& customCssPath) {
-    QString html = rawHtml;
-
-    // Table/blockquote replacements matching identical structure (no outer outline in either theme)
-    if (darkMode) {
-        // Dark mode blockquote: Vibrant blue left accent bar (#2f81f7), no outer border/outline, italic light text (#c9d1d9)
-        html.replace(QStringLiteral("<blockquote>"), 
-                     QStringLiteral("<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#2f81f7\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td style=\"font-style: italic; color: #c9d1d9;\">"));
-        
-        // Wrap <pre> in solid HTML table cell to guarantee 100% continuous #2d333b background with ZERO line gap stripes
-        html.replace(QStringLiteral("<pre>"), QStringLiteral("<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; color:#e6edf3; margin:0; padding:0;\">"));
-        html.replace(QStringLiteral("<pre class="), QStringLiteral("<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; color:#e6edf3; margin:0; padding:0;\" class="));
-    } else {
-        // Light mode blockquote: Dark navy left accent bar (#1B2B3C), no outer border/outline, italic dark text (#24292e)
-        html.replace(QStringLiteral("<blockquote>"), 
-                     QStringLiteral("<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#1B2B3C\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td style=\"font-style: italic; color: #24292e;\">"));
-
-        // Wrap <pre> in solid HTML table cell to guarantee 100% continuous #eef1f5 background with ZERO line gap stripes
-        html.replace(QStringLiteral("<pre>"), QStringLiteral("<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; color:#24292e; margin:0; padding:0;\">"));
-        html.replace(QStringLiteral("<pre class="), QStringLiteral("<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; color:#24292e; margin:0; padding:0;\" class="));
-    }
-    
-    html.replace(QStringLiteral("</blockquote>"), QStringLiteral("</td></tr></table>"));
-    html.replace(QStringLiteral("</pre>"), QStringLiteral("</pre></td></tr></table>"));
-
-    html.replace(QStringLiteral("<hr />"), darkMode ? QStringLiteral("<hr color=\"#30363d\" size=\"2\" />") : QStringLiteral("<hr color=\"#1A2B3C\" size=\"2\" />"));
-    html.replace(QStringLiteral("<hr>"), darkMode ? QStringLiteral("<hr color=\"#30363d\" size=\"2\" />") : QStringLiteral("<hr color=\"#1A2B3C\" size=\"2\" />"));
-
-    // Prepare CSS with strict lookup precedence:
-    // 1. theme_file_path (customCssPath argument if provided and file exists)
-    // 2. Plugin CSS (~/.config/doublecmd/plugins/wlx/markdownview.css)
-    // 3. markdownpart.css (~/.config/doublecmd/plugins/wlx/markdownpart.css or ~/.config/markdownpart.css)
-    // 4. Binary String Constants (DEFAULT_LIGHT_CSS / DEFAULT_DARK_CSS)
-    std::string cssStr;
-    std::string targetCssFile;
-
-    if (!customCssPath.empty() && fileExists(customCssPath)) {
-        targetCssFile = customCssPath;
-    } else {
-        std::string home = homeDir();
-        std::string pluginDirCss = home + "/.config/doublecmd/plugins/wlx/markdownview.css";
-        std::string pluginPartCss = home + "/.config/doublecmd/plugins/wlx/markdownpart.css";
-        std::string userPartCss = home + "/.config/markdownpart.css";
-
-        if (fileExists(pluginDirCss)) targetCssFile = pluginDirCss;
-        else if (fileExists(pluginPartCss)) targetCssFile = pluginPartCss;
-        else if (fileExists(userPartCss)) targetCssFile = userPartCss;
-    }
-
-    if (!targetCssFile.empty())
-        cssStr = readFileUtf8(targetCssFile);
-
-    QString cssQStr = cssStr.empty()
-        ? (darkMode ? QString::fromUtf8(DEFAULT_DARK_CSS) : QString::fromUtf8(DEFAULT_LIGHT_CSS))
-        : QString::fromStdString(cssStr);
-
-    // Wrap in standard HTML template
-    QString docHtml = QStringLiteral("<!DOCTYPE html><html><head><style>")
-                     + cssQStr
-                     + QStringLiteral("</style></head><body>")
-                     + html
-                     + QStringLiteral("</body></html>");
-    return docHtml;
+std::string renderFileToHtml(const std::string &filePath, bool darkMode, const std::string &customCssPath) {
+    init();
+    return renderMarkdown(readFileUtf8(filePath), darkMode, customCssPath);
 }
 
-std::string renderFileToHtml(const std::string& filePath, bool darkMode, const std::string& customCssPath) {
+std::string renderTextToHtml(const std::string &markdownText, bool darkMode, const std::string &customCssPath) {
     init();
-
-    MD::Parser parser;
-    auto doc = parser.parse(QString::fromStdString(filePath), true);
-    MarkdownVisitor visitor(darkMode);
-    QString rawHtml = visitor.toHtml(doc, QString(), false, nullptr);
-
-    return postProcessHtml(rawHtml, darkMode, customCssPath).toStdString();
-}
-
-std::string renderTextToHtml(const std::string& markdownText, bool darkMode, const std::string& customCssPath) {
-    init();
-
-    MD::Parser parser;
-    QString qText = QString::fromStdString(markdownText);
-    auto doc = parser.parse(qText, true);
-    MarkdownVisitor visitor(darkMode);
-    QString rawHtml = visitor.toHtml(doc, QString(), false, nullptr);
-
-    return postProcessHtml(rawHtml, darkMode, customCssPath).toStdString();
+    return renderMarkdown(markdownText, darkMode, customCssPath);
 }
 
 } // namespace MarkdownEngine

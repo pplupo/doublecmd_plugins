@@ -10,112 +10,171 @@ set(CMAKE_AUTOUIC ON)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Find Qt6. markdownview_core (below) only needs Core (QString, the AST type
-# in md4qt's MD4QT_QT_SUPPORT build mode) and Gui (QPainter/QPixmap/QImage,
-# used narrowly by MicroTeX's Qt Graphics2D backend for LaTeX math
-# rendering -- guarded at runtime by a qApp-null check, see markdownvisitor.
-# cpp's onMath()). Widgets is only needed by the Qt6 plugin's own UI layer.
-find_package(Qt6 6.2 REQUIRED COMPONENTS
-    Core
-    Gui
-    Widgets
-)
+option(ENABLE_QT6 "Build the Qt6 markdownview plugin" ON)
+option(ENABLE_GTK3 "Build the GTK3 markdownview plugin" ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CAIRO REQUIRED cairo)
 pkg_check_modules(RSVG REQUIRED librsvg-2.0)
 
-# 3rdparty configurations - enforce static libraries for maximum portability across environments
-set(BUILD_MD4QT_TESTS OFF CACHE BOOL "" FORCE)
-add_subdirectory(3rdparty/md4qt)
+include(FetchContent)
+
+# md4c: a plain-C, toolkit-agnostic CommonMark/GFM parser (replaces md4qt,
+# which forced Qt6::Core on both plugin targets via its QString-typed AST
+# and turned out to need Qt 6.5+ APIs this project doesn't otherwise
+# require). md4c-html is its official HTML-renderer companion, used as-is
+# for everything except fenced ```mermaid/plantuml code blocks and
+# $...$/$$...$$ LaTeX math spans (rendered via md_html()'s
+# MD_FLAG_LATEXMATHSPANS as <x-equation> tags) -- both are post-processed
+# out of the resulting HTML in markdown_engine.cpp. See
+# https://github.com/mity/md4c.
+FetchContent_Declare(md4c
+    GIT_REPOSITORY https://github.com/mity/md4c.git
+    GIT_TAG        release-0.5.2
+    GIT_SHALLOW    TRUE
+)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_MD2HTML_EXECUTABLE OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(md4c)
 
 set(tinyxml2_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(tinyxml2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/tinyxml2)
 
-set(QT ON CACHE BOOL "" FORCE)
+# MICROTEX_NO_AUTO_BACKEND: build the LaTeX static library with no
+# Graphics2D backend baked in at all -- each plugin target links its own
+# backend implementation directly (src/qt6/latex_render_qt.cpp using
+# MicroTeX's Qt backend, src/gtk3/latex_render_cairo.cpp using its Cairo
+# backend) instead of forcing one choice onto the shared library. See the
+# comment on that option in 3rdparty/MicroTeX/CMakeLists.txt.
+# MicroTeX defaults both of these ON, which dumps its entire font/symbol
+# tables (thousands of lines) to stdout on every single render -- fine for
+# its own sample apps, not for a plugin embedded in a file manager.
+set(GRAPHICS_DEBUG OFF CACHE BOOL "" FORCE)
+set(HAVE_LOG OFF CACHE BOOL "" FORCE)
+set(MICROTEX_NO_AUTO_BACKEND ON CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/MicroTeX)
 
-add_definitions(-DQT_NO_CONTEXTLESS_CONNECT -DMD4QT_QT_SUPPORT)
-
-# Core Markdown Rendering Library (Static Library)
+# Core Markdown Rendering Library (Static Library) -- toolkit-neutral:
+# md4c (parsing), librsvg+Cairo (SVG rasterization for Mermaid/PlantUML),
+# a curl subprocess (fetching those web renders), MicroTeX's core (LaTeX
+# layout, backend-agnostic) -- no Qt, no GTK. Each plugin target supplies
+# its own renderLatexToPng() implementation (see src/qt6/, src/gtk3/) and
+# links it alongside this.
 add_library(markdownview_core STATIC
-    src/core/markdownvisitor.cpp
     src/core/markdown_engine.cpp
+    src/core/diagram_render.cpp
 )
 
 target_include_directories(markdownview_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/md4qt/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/MicroTeX/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
     ${CAIRO_INCLUDE_DIRS}
     ${RSVG_INCLUDE_DIRS}
+    # Explicit rather than relying on md4c-html's PUBLIC usage requirement
+    # propagating through target_link_libraries -- observed to not always
+    # take effect (environment/CMake-version sensitive), so pinned directly.
+    ${md4c_SOURCE_DIR}/src
 )
 
 target_link_libraries(markdownview_core PUBLIC
-    md4qt::md4qt
+    md4c-html
     LaTeX
-    Qt6::Core
-    Qt6::Gui
     ${CAIRO_LIBRARIES}
     ${RSVG_LIBRARIES}
 )
 target_link_directories(markdownview_core PUBLIC ${CAIRO_LIBRARY_DIRS} ${RSVG_LIBRARY_DIRS})
 target_compile_options(markdownview_core PUBLIC ${CAIRO_CFLAGS_OTHER} ${RSVG_CFLAGS_OTHER})
 
+# ---------------------------------------------------------------------
 # Qt6 Lister Plugin Target
-add_library(markdownview_qt6 MODULE
-    src/qt6/plugin_qt6.cpp
-)
+# ---------------------------------------------------------------------
+if(ENABLE_QT6)
+    find_package(Qt6 6.2 COMPONENTS Core Gui Widgets)
+    if(Qt6_FOUND)
+        add_library(markdownview_qt6 MODULE
+            src/qt6/plugin_qt6.cpp
+            src/qt6/latex_render_qt.cpp
+            3rdparty/MicroTeX/src/platform/qt/graphic_qt.cpp
+        )
+        set_target_properties(markdownview_qt6 PROPERTIES AUTOMOC ON)
+        # graphic_qt.h's tex::Graphics2D_qt is compiled out unless BUILD_QT
+        # is defined -- normally set PUBLIC on the LaTeX target itself by
+        # its own CMakeLists' `if(QT)` branch, but MICROTEX_NO_AUTO_BACKEND
+        # skips that (see the option's comment above), so this target
+        # defines it directly instead, same as markdownview_gtk3 does with
+        # BUILD_GTK for graphic_cairo.h.
+        target_compile_definitions(markdownview_qt6 PRIVATE BUILD_QT)
 
-target_link_libraries(markdownview_qt6 PRIVATE
-    markdownview_core
-    Qt6::Widgets
-)
+        target_link_libraries(markdownview_qt6 PRIVATE
+            markdownview_core
+            Qt6::Core
+            Qt6::Gui
+            Qt6::Widgets
+        )
 
-# Statically link standard C++ runtime to prevent GLIBCXX version mismatches across environments
-target_link_options(markdownview_qt6 PRIVATE
-    -static-libstdc++
-    -static-libgcc
-)
+        # Statically link standard C++ runtime to prevent GLIBCXX version
+        # mismatches across environments.
+        target_link_options(markdownview_qt6 PRIVATE
+            -static-libstdc++
+            -static-libgcc
+        )
 
-set_target_properties(markdownview_qt6 PROPERTIES
-    PREFIX ""
-    OUTPUT_NAME "markdownview_qt6"
-    SUFFIX ".wlx"
-)
+        set_target_properties(markdownview_qt6 PROPERTIES
+            PREFIX ""
+            OUTPUT_NAME "markdownview_qt6"
+            SUFFIX ".wlx"
+        )
+    else()
+        message(WARNING "markdownview: Qt6 not found, skipping Qt6 build")
+    endif()
+endif()
 
-# Optional GTK3 Target
-# NOTE: markdownview_core (linked below) still pulls in Qt6::Core/Gui --
-# down from Core/Gui/Widgets/Svg/Network/PrintSupport. QtNetwork (Mermaid/
-# PlantUML web rendering) was replaced with a curl subprocess; QtSvg and the
-# rest of QtGui's painting API (SVG rasterization) were replaced with
-# librsvg+Cairo. What's left: md4qt itself is built in MD4QT_QT_SUPPORT mode
-# (QString-based parser/AST, requires Qt6::Core), and MicroTeX's LaTeX math
-# rendering uses its Qt Graphics2D backend (requires Qt6::Gui for QPainter/
-# QPixmap) -- guarded at runtime by a qApp-null check in onMath(), so it
-# degrades to plain-text math rendering rather than crashing when no
-# QGuiApplication exists (true for this GTK3 plugin's host process). Fully
-# eliminating Qt would mean flipping md4qt to its ICU/STL string mode and
-# building MicroTeX's Cairo backend (needs cairomm/pangomm) instead --
-# tracked as further work, not done here.
-option(BUILD_WLX_GTK "Build GTK3 WLX Target" ON)
-if(BUILD_WLX_GTK)
-    find_package(PkgConfig REQUIRED)
+# ---------------------------------------------------------------------
+# GTK3 Lister Plugin Target
+# ---------------------------------------------------------------------
+if(ENABLE_GTK3)
     pkg_check_modules(GTK3 gtk+-3.0 webkit2gtk-4.1)
-    if(GTK3_FOUND)
+    pkg_check_modules(CairoMM cairomm-1.0)
+    pkg_check_modules(PangoMM pangomm-1.4)
+    pkg_check_modules(Freetype2 freetype2)
+    find_package(Fontconfig)
+    if(GTK3_FOUND AND CairoMM_FOUND AND PangoMM_FOUND AND Fontconfig_FOUND AND Freetype2_FOUND)
         add_library(markdownview_gtk3 MODULE
             src/gtk3/plugin_gtk3.cpp
+            src/gtk3/latex_render_cairo.cpp
+            3rdparty/MicroTeX/src/platform/cairo/graphic_cairo.cpp
         )
-        target_compile_definitions(markdownview_gtk3 PRIVATE BUILD_GTK_TARGET)
-        target_include_directories(markdownview_gtk3 PRIVATE ${GTK3_INCLUDE_DIRS})
-        target_link_libraries(markdownview_gtk3 PRIVATE markdownview_core ${GTK3_LIBRARIES})
+        target_compile_definitions(markdownview_gtk3 PRIVATE BUILD_GTK_TARGET BUILD_GTK)
+        target_include_directories(markdownview_gtk3 PRIVATE
+            ${GTK3_INCLUDE_DIRS}
+            ${CairoMM_INCLUDE_DIRS}
+            ${PangoMM_INCLUDE_DIRS}
+            ${Freetype2_INCLUDE_DIRS}
+        )
+        target_link_directories(markdownview_gtk3 PRIVATE
+            ${GTK3_LIBRARY_DIRS} ${CairoMM_LIBRARY_DIRS} ${PangoMM_LIBRARY_DIRS} ${Freetype2_LIBRARY_DIRS}
+        )
+        target_compile_options(markdownview_gtk3 PRIVATE
+            ${GTK3_CFLAGS_OTHER} ${CairoMM_CFLAGS_OTHER} ${PangoMM_CFLAGS_OTHER} ${Freetype2_CFLAGS_OTHER}
+        )
+        target_link_libraries(markdownview_gtk3 PRIVATE
+            markdownview_core
+            ${GTK3_LIBRARIES}
+            ${CairoMM_LIBRARIES}
+            ${PangoMM_LIBRARIES}
+            ${Freetype2_LIBRARIES}
+            Fontconfig::Fontconfig
+        )
         target_link_options(markdownview_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
         set_target_properties(markdownview_gtk3 PROPERTIES
             PREFIX ""
             OUTPUT_NAME "markdownview_gtk3"
             SUFFIX ".wlx"
         )
+    else()
+        message(WARNING "markdownview: GTK3/cairomm-1.0/pangomm-1.4 not found, skipping GTK3 build")
     endif()
 endif()

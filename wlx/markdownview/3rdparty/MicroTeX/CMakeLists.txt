@@ -147,7 +147,18 @@ target_include_directories(LaTeX PUBLIC src)
 
 # check operating system
 
-if (QT)
+# When set, none of the branches below run: no Graphics2D backend source is
+# added to LaTeX, no backend library is linked, and neither sample
+# executable is built. The consumer (markdownview) links its own choice of
+# graphic_qt.cpp/graphic_cairo.cpp directly into whichever plugin target
+# needs it instead of forcing one backend on the whole shared LaTeX library
+# -- see wlx/markdownview/src/qt6/latex_render_qt.cpp and
+# src/gtk3/latex_render_cairo.cpp.
+option(MICROTEX_NO_AUTO_BACKEND "Skip automatic Graphics2D backend selection below" OFF)
+
+if (MICROTEX_NO_AUTO_BACKEND)
+    message(STATUS "MicroTeX: backend selection skipped (MICROTEX_NO_AUTO_BACKEND)")
+elseif (QT)
     message(STATUS, "Cross platform build using Qt")
     target_compile_definitions(LaTeX PUBLIC -DBUILD_QT)
     target_sources(LaTeX PRIVATE
