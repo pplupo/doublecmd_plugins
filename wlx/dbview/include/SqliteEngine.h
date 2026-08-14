@@ -1,17 +1,21 @@
 #pragma once
 
 #include "DbEngine.h"
-#include <QSqlDatabase>
 
-class QSqlTableModel;
+struct sqlite3;
+class SqliteTableModel;
 
-/// SQLite engine: wraps Qt's QSQLITE driver via QSqlTableModel.
+/// SQLite engine: talks to SQLite directly via the vendored sqlite3 C API
+/// (see src/libsqlite3/), not through Qt's QSqlDatabase/QSQLITE driver
+/// plugin as before. This removes a runtime dependency on the Qt6 SQL
+/// module and its driver plugins entirely for SQLite files — the plugin
+/// only needs to load, not Qt6Sql + libqsqlite.
 ///
-/// Uses OnManualSubmit editing strategy so changes are buffered
-/// until explicit submitAll() (wired to Ctrl+S in the toolbar).
-///
-/// Each instance creates a unique QSqlDatabase connection name
-/// via QUuid to avoid collisions when multiple plugin windows are open.
+/// Keeps a single open transaction the whole time a database is open
+/// (mirrors DuckDbEngine's approach): edits made through SqliteTableModel
+/// write immediately inside that transaction, submitAll() commits it and
+/// opens a new one, revertAll() rolls it back, opens a new one, and
+/// reloads the current model.
 class SqliteEngine : public DbEngine {
     Q_OBJECT
 public:
@@ -41,10 +45,12 @@ public:
     QString lastError() const override;
 
 private:
-    QSqlDatabase m_db;
-    QString m_connectionName;
+    QStringList tablesOrViews(const QString &type) const;
+
+    sqlite3 *m_db = nullptr;
+    bool m_inTransaction = false;
     QString m_currentTable;
-    QSqlTableModel *m_currentModel = nullptr;
+    SqliteTableModel *m_currentModel = nullptr;
     bool m_lastQueryError = false;
     QString m_lastError;
 };

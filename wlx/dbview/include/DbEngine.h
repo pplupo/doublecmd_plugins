@@ -19,8 +19,10 @@ struct ColumnInfo {
 /// Provides a polymorphic API that DbViewWidget programs against,
 /// decoupling the UI from any specific database technology.
 ///
-/// SQL engines (SQLite, DuckDB) return QSqlTableModel or custom models
-/// with multiple tables. KV engines (LevelDB, RocksDB) return a two-column
+/// SQL engines (SQLite, DuckDB, Firebird) return a custom
+/// QAbstractTableModel with multiple tables (SqliteTableModel,
+/// DuckDbModel, FirebirdTableModel — none of them route through Qt's SQL
+/// module). KV engines (LevelDB, RocksDB) return a two-column
 /// KeyValueModel with a single "table".
 class DbEngine : public QObject {
     Q_OBJECT
