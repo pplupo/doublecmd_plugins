@@ -1,2 +1,0 @@
-/usr/bin/ar qc libwlxbase_gtk.a CMakeFiles/wlxbase_gtk.dir/src/GtkFocusManager.cpp.o CMakeFiles/wlxbase_gtk.dir/src/GtkPluginToolBar.cpp.o CMakeFiles/wlxbase_gtk.dir/src/GtkEditableGridWidget.cpp.o CMakeFiles/wlxbase_gtk.dir/src/GtkFindReplacePanel.cpp.o CMakeFiles/wlxbase_gtk.dir/src/GtkScopedFindReplacePanel.cpp.o
-/usr/bin/ranlib libwlxbase_gtk.a

@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/pplupo/repos/plugins/wlx/wlxbase_gtk/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
