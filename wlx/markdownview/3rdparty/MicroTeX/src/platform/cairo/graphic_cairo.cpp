@@ -5,11 +5,32 @@
 #include "platform/cairo/graphic_cairo.h"
 
 #include <fontconfig/fontconfig.h>
+// FcFreeTypeQuery() (used below) is declared here, not in fontconfig.h --
+// missing on some fontconfig-dev packagings that don't transitively pull
+// this in (confirmed missing on Ubuntu 24.04's libfontconfig-dev).
+#include <fontconfig/fcfreetype.h>
+
+#include <ft2build.h>
+#include FT_FREETYPE_H
 
 #include <utility>
 
 using namespace tex;
 using namespace std;
+
+// Lazily-initialized, process-lifetime FreeType library handle used as a
+// fallback path below (see loadFont()) when Fontconfig can't produce a
+// usable pattern for one of our own bundled font files. Never torn down --
+// matches Fontconfig's own de-facto "leak for process lifetime" handling of
+// its global config elsewhere in this file.
+static FT_Library ftLibrary() {
+  static FT_Library lib = [] {
+    FT_Library l = nullptr;
+    FT_Init_FreeType(&l);
+    return l;
+  }();
+  return lib;
+}
 
 map<string, string> Font_cairo::_families;
 map<string, Cairo::RefPtr<Cairo::FtFontFace>> Font_cairo::_cairoFtFaces;
@@ -42,10 +63,18 @@ void Font_cairo::loadFont(const string& file) {
   FcChar8* family = NULL;
   FcBlanks* blanks = FcConfigGetBlanks(NULL);
   FcPattern* p = FcFreeTypeQuery(f, 0, blanks, &count);
-  FcPatternGetString(p, FC_FAMILY, 0, &family);
+  // FcFreeTypeQuery can return NULL (font file Fontconfig couldn't parse),
+  // and even when it doesn't, FcPatternGetString finding no FC_FAMILY entry
+  // leaves `family` untouched (still NULL) rather than erroring loudly --
+  // the original code didn't check either return value, so a NULL `family`
+  // reached `(const char*) family` below and crashed std::string's
+  // assignment operator on strlen(nullptr). Confirmed against this
+  // project's own vendored LaTeX symbol fonts (cmmi10.ttf etc.), which
+  // Fontconfig apparently doesn't always report a family name for.
+  if (p) FcPatternGetString(p, FC_FAMILY, 0, &family);
 #ifdef HAVE_LOG
   __dbg("Load font: %s, count: %d\n", file.c_str(), count);
-  FcPatternPrint(p);
+  if (p) FcPatternPrint(p);
 #endif
 
   // load font to fontconfig
@@ -54,14 +83,38 @@ void Font_cairo::loadFont(const string& file) {
   if (!status) __dbg(ANSI_COLOR_RED "Load %s failed\n" ANSI_RESET, file.c_str());
 #endif
 
-  _family = (const char*) family;
+  _family = family ? (const char*) family : file;
   _families[file] = _family;
 
-  _fface = Cairo::FtFontFace::create(p);
+  if (p) {
+    _fface = Cairo::FtFontFace::create(p);
+  } else {
+    // Fontconfig couldn't produce a pattern for this file (observed against
+    // this project's own vendored LaTeX symbol fonts, e.g. cmmi10.ttf) --
+    // rather than leaving _fface null (which later crashes
+    // Cairo::Context::set_font_face() in drawText(), since cairomm doesn't
+    // guard against a null RefPtr there), load the face directly via
+    // FreeType and hand cairomm that instead. The FT_Face is intentionally
+    // never released -- it must outlive the Cairo::FtFontFace built from it,
+    // and both are cached for the process lifetime via the static maps
+    // here, same as the Fontconfig-pattern path above.
+    static map<string, FT_Face> ftFaces;
+    FT_Face ftFace = nullptr;
+    FT_Error err = FT_New_Face(ftLibrary(), file.c_str(), 0, &ftFace);
+    if (err == 0 && ftFace) {
+      ftFaces[file] = ftFace;
+      _fface = Cairo::FtFontFace::create(ftFace, 0);
+    } else {
+      _fface = Cairo::RefPtr<Cairo::FtFontFace>();
+#ifdef HAVE_LOG
+      __dbg(ANSI_COLOR_RED "FreeType fallback also failed to load %s\n" ANSI_RESET, file.c_str());
+#endif
+    }
+  }
   _cairoFtFaces[file] = _fface;
 
   // release
-  FcPatternDestroy(p);
+  if (p) FcPatternDestroy(p);
 }
 
 string Font_cairo::getFamily() const {
@@ -289,7 +342,13 @@ void Graphics2D_cairo::drawChar(wchar_t c, float x, float y) {
 }
 
 void Graphics2D_cairo::drawText(const wstring& t, float x, float y) {
-  _context->set_font_face(_font->getCairoFontFace());
+  // getCairoFontFace() can still legitimately be a null RefPtr if both the
+  // Fontconfig and FreeType-direct load paths in Font_cairo::loadFont()
+  // failed for this font file -- cairomm's set_font_face() doesn't
+  // null-check and segfaults, so skip it here and fall back to whatever
+  // font face cairo already has selected (its own default toy font).
+  auto fface = _font->getCairoFontFace();
+  if (fface) _context->set_font_face(fface);
   _context->set_font_size(_font->getSize());
   _context->move_to(x, y);
   _context->show_text(wide2utf8(t));
