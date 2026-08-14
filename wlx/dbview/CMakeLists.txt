@@ -14,19 +14,35 @@ if(ENABLE_ROCKSDB_LEVELDB)
     add_compile_options(-include stdint.h)
 endif()
 
-# Firebird support requires libfbclient (the Firebird client library) at
-# build and runtime — per project policy (see the Runtime Dependency
-# Footprint notes) this is a documented system dependency, not vendored:
-# Firebird client libraries are conventionally linked dynamically rather
-# than statically. Degrades gracefully (FirebirdEngine excluded from the
-# build) when libfbclient isn't installed, matching the existing
-# ENABLE_ROCKSDB_LEVELDB pattern rather than hard-failing the whole plugin.
-option(ENABLE_FIREBIRD "Enable Firebird support (requires libfbclient)" ON)
+# Firebird support: this plugin only ever deals with file-based, in-process
+# databases (same as SQLite/DuckDB/LMDB/Berkeley DB) — it was never meant to
+# talk to a Firebird *server*. Firebird's client library (libfbclient) can
+# do both: given a bare filesystem path (no "host:" prefix) it loads its
+# storage engine plugin (libEngine13.so) in-process and never touches the
+# network, exactly like SQLite's amalgamation does. What it needs to behave
+# that way is its own plugins/firebird.conf/firebird.msg alongside it, which
+# a bare `find_library(fbclient)` against a system package does not
+# guarantee (a distro's libfbclient may be paired with an
+# admin-configured/server-oriented firebird.conf, or missing the engine
+# plugin's client entirely). So — same as sqlite3/lmdb/duckdb/Berkeley DB
+# above — this vendors a minimal, known-working embedded Firebird 5.0.4
+# runtime (thirdparty/firebird-embedded/: lib/libfbclient.so + its
+# libtomcrypt dependency, plugins/{libEngine13,libChaCha,libLegacy_Auth,
+# libLegacy_UserManager,libSrp}.so, firebird.conf, firebird.msg) instead of
+# depending on whatever the system happens to provide. Firebird's client
+# library self-locates its conf/msg/plugins relative to its own resolved
+# .so path via dladdr (confirmed: works with zero FIREBIRD/ISC_* env vars
+# set, purely from the vendored directory's lib/plugins/conf/msg layout),
+# so shipping this directory next to the built .wlx and pointing
+# BUILD/INSTALL_RPATH at its lib/ via $ORIGIN is sufficient — no system
+# Firebird install, server process, or network access is ever involved.
+option(ENABLE_FIREBIRD "Enable Firebird support (vendored embedded engine)" ON)
 if(ENABLE_FIREBIRD)
-    find_library(FBCLIENT_LIBRARY NAMES fbclient)
-    find_path(FBCLIENT_INCLUDE_DIR NAMES ibase.h)
-    if(NOT FBCLIENT_LIBRARY OR NOT FBCLIENT_INCLUDE_DIR)
-        message(STATUS "dbview: libfbclient/ibase.h not found — Firebird support disabled for this build")
+    set(FIREBIRD_EMBEDDED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/firebird-embedded")
+    set(FBCLIENT_LIBRARY "${FIREBIRD_EMBEDDED_DIR}/lib/libfbclient.so")
+    set(FBCLIENT_INCLUDE_DIR "${FIREBIRD_EMBEDDED_DIR}/include")
+    if(NOT EXISTS "${FBCLIENT_LIBRARY}")
+        message(STATUS "dbview: vendored thirdparty/firebird-embedded/ not found — Firebird support disabled for this build")
         set(ENABLE_FIREBIRD OFF)
     endif()
 endif()
@@ -270,6 +286,21 @@ set_target_properties(dbview_qt6 PROPERTIES
     SUFFIX ".wlx"
 )
 
+if(ENABLE_FIREBIRD)
+    # $ORIGIN-relative RPATH so the built .wlx finds the vendored
+    # libfbclient.so next to it at runtime without LD_LIBRARY_PATH; see the
+    # copy command below that places firebird-embedded/ alongside it.
+    set_target_properties(dbview_qt6 PROPERTIES
+        BUILD_RPATH "$ORIGIN/firebird-embedded/lib"
+        INSTALL_RPATH "$ORIGIN/firebird-embedded/lib"
+    )
+    add_custom_command(TARGET dbview_qt6 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${FIREBIRD_EMBEDDED_DIR}" "$<TARGET_FILE_DIR:dbview_qt6>/firebird-embedded"
+        COMMENT "dbview: copying vendored firebird-embedded/ next to dbview_qt6.wlx"
+    )
+endif()
+
 target_include_directories(dbview_qt6 PRIVATE
     include
     include/mdbtools
@@ -387,6 +418,18 @@ if(ENABLE_GTK3)
         # exported from the .wlx by default and can be interposed by
         # whatever the host process already loaded of the same library.
         target_link_options(dbview_gtk3 PRIVATE -Wl,-Bsymbolic -Wl,-Bsymbolic-functions)
+
+        if(ENABLE_FIREBIRD)
+            set_target_properties(dbview_gtk3 PROPERTIES
+                BUILD_RPATH "$ORIGIN/firebird-embedded/lib"
+                INSTALL_RPATH "$ORIGIN/firebird-embedded/lib"
+            )
+            add_custom_command(TARGET dbview_gtk3 POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "${FIREBIRD_EMBEDDED_DIR}" "$<TARGET_FILE_DIR:dbview_gtk3>/firebird-embedded"
+                COMMENT "dbview: copying vendored firebird-embedded/ next to dbview_gtk3.wlx"
+            )
+        endif()
     else()
         message(WARNING "dbview: GTK3 (gtk+-3.0) not found, skipping GTK3 build")
     endif()

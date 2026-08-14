@@ -5,10 +5,16 @@
 
 /// Shared base for the key/value engines (LMDB, Berkeley DB, optionally
 /// RocksDB/LevelDB): a single "<keys>" pseudo-table, 2 columns (Key,
-/// Value), full eager load into memory (simpler than the Qt side's
-/// windowed KeyValueModel -- a deliberate GTK-port simplification).
+/// Value), fetched kChunkSize entries at a time via a cursor-based
+/// fetchWindow callback (mirrors the Qt side's KeyValueModel::IteratorOps,
+/// just sequential/append-only instead of a recentering random-access
+/// window -- the GTK grid only ever scrolls forward through what's been
+/// appended, so a simpler forward cursor is sufficient and avoids
+/// re-walking the cursor from the start on every window move).
 class KeyValueEngineCoreBase : public DbEngineCore {
 public:
+    static constexpr int kChunkSize = 200;
+
     std::vector<std::string> tableNames() const override { return {"<keys>"}; }
     std::string currentTableName() const override { return "<keys>"; }
     bool supportsMultipleTables() const override { return false; }
@@ -17,15 +23,26 @@ public:
 
     bool selectTable(const std::string &) override {
         m_keys.clear(); m_values.clear(); m_binary.clear();
-        if (!fetchAll) return false;
-        fetchAll(m_keys, m_values);
-        m_binary.resize(m_values.size());
-        for (size_t i = 0; i < m_values.size(); i++)
-            m_binary[i] = !isValidUtf8(m_values[i]);
+        m_totalRows = totalCount ? totalCount() : 0;
+        fetchMore();
         return true;
     }
 
-    int rowCount() const override { return (int)m_keys.size(); }
+    int rowCount() const override { return m_totalRows; }
+    int fetchedRowCount() const override { return (int)m_keys.size(); }
+    bool canFetchMore() const override { return (int)m_keys.size() < m_totalRows; }
+    int fetchMore() override {
+        if (!canFetchMore() || !fetchWindow) return 0;
+        std::vector<std::string> keys, values;
+        fetchWindow((int)m_keys.size(), kChunkSize, keys, values);
+        for (size_t i = 0; i < keys.size(); i++) {
+            m_keys.push_back(keys[i]);
+            m_values.push_back(values[i]);
+            m_binary.push_back(!isValidUtf8(values[i]));
+        }
+        return (int)keys.size();
+    }
+
     int columnCount() const override { return 2; }
     std::string columnName(int col) const override { return col == 0 ? "Key" : "Value"; }
 
@@ -48,8 +65,11 @@ public:
     bool submitAll() override { return true; } // writes are immediate (see setCellText)
     bool revertAll() override { return selectTable(""); }
 
-    std::function<void(std::vector<std::string> &keys, std::vector<std::string> &values)> fetchAll;
+    /// Appends up to `count` (key, value) pairs starting at the `startIndex`-th
+    /// entry (0-based, in the engine's natural cursor order) to keys/values.
+    std::function<void(int startIndex, int count, std::vector<std::string> &keys, std::vector<std::string> &values)> fetchWindow;
     std::function<bool(const std::string &key, const std::string &value)> putValue;
+    std::function<int()> totalCount;
 
 protected:
     static bool isValidUtf8(const std::string &s) {
@@ -83,5 +103,6 @@ protected:
 
     std::vector<std::string> m_keys, m_values;
     std::vector<bool> m_binary;
+    int m_totalRows = 0;
     std::string m_lastError;
 };

@@ -5,7 +5,12 @@
 #include <cstdlib>
 #include <algorithm>
 
-/// MS Access engine. Always read-only, same as the Qt side.
+namespace { constexpr int kChunkSize = 200; }
+
+/// MS Access engine. Always read-only, same as the Qt side. libmdb's row
+/// cursor (mdb_fetch_row) is forward-only, so the table cursor is kept
+/// open across fetchMore() calls instead of re-rewinding+skipping each
+/// time (which would make later chunks progressively more expensive).
 class MdbEngineCore : public DbEngineCore {
 public:
     MdbEngineCore() { m_readOnly = true; }
@@ -18,8 +23,22 @@ public:
     }
 
     void close() override {
+        closeCursor();
         if (m_mdb) { mdb_close(m_mdb); m_mdb = nullptr; }
         m_currentTable.clear(); m_columns.clear(); m_rows.clear(); m_binary.clear();
+        m_totalRows = 0;
+    }
+
+    void closeCursor() {
+        if (m_table) {
+            for (unsigned int i = 0; i < m_table->num_cols; i++) {
+                auto *col = (MdbColumn *)g_ptr_array_index(m_table->columns, i);
+                free(col->bind_ptr); free(col->len_ptr);
+                col->bind_ptr = nullptr; col->len_ptr = nullptr;
+            }
+            mdb_free_tabledef(m_table);
+            m_table = nullptr;
+        }
     }
 
     std::vector<std::string> tableNames() const override {
@@ -56,53 +75,52 @@ public:
     }
 
     bool selectTable(const std::string &tableName) override {
+        closeCursor();
         m_currentTable = tableName;
-        m_columns.clear(); m_rows.clear(); m_binary.clear();
+        m_columns.clear(); m_rows.clear(); m_binary.clear(); m_totalRows = 0;
         if (!m_mdb) return false;
 
         auto *entry = mdb_get_catalogentry_by_name(m_mdb, tableName.c_str());
         if (!entry) return false;
-        auto *table = mdb_read_table(entry);
-        if (!table) return false;
+        m_table = mdb_read_table(entry);
+        if (!m_table) return false;
 
-        mdb_read_columns(table);
-        for (unsigned int i = 0; i < table->num_cols; i++) {
-            auto *col = (MdbColumn *)g_ptr_array_index(table->columns, i);
+        mdb_read_columns(m_table);
+        m_totalRows = (int)m_table->num_rows;
+        for (unsigned int i = 0; i < m_table->num_cols; i++) {
+            auto *col = (MdbColumn *)g_ptr_array_index(m_table->columns, i);
             m_columns.push_back(col->name);
             col->bind_ptr = malloc(MDB_BIND_SIZE);
             col->len_ptr = (int *)malloc(sizeof(int));
             memset(col->bind_ptr, 0, MDB_BIND_SIZE);
             *col->len_ptr = 0;
         }
+        mdb_rewind_table(m_table);
 
-        mdb_rewind_table(table);
-        while (mdb_fetch_row(table)) {
-            std::vector<std::string> row;
-            std::vector<bool> bin;
-            for (unsigned int i = 0; i < table->num_cols; i++) {
-                auto *col = (MdbColumn *)g_ptr_array_index(table->columns, i);
-                if (col->col_type == MDB_OLE || col->col_type == MDB_BINARY) {
-                    row.push_back("[Binary Data]");
-                    bin.push_back(true);
-                } else {
-                    row.push_back((const char *)col->bind_ptr);
-                    bin.push_back(false);
-                }
-            }
-            m_rows.push_back(std::move(row));
-            m_binary.push_back(std::move(bin));
-        }
-
-        for (unsigned int i = 0; i < table->num_cols; i++) {
-            auto *col = (MdbColumn *)g_ptr_array_index(table->columns, i);
-            free(col->bind_ptr); free(col->len_ptr);
-            col->bind_ptr = nullptr; col->len_ptr = nullptr;
-        }
-        mdb_free_tabledef(table);
+        fetchMore();
         return true;
     }
 
-    int rowCount() const override { return (int)m_rows.size(); }
+    int fetchMore() override {
+        if (!m_table) return 0;
+        int fetched = 0;
+        while (fetched < kChunkSize && mdb_fetch_row(m_table)) {
+            std::vector<std::string> row; std::vector<bool> bin;
+            for (unsigned int i = 0; i < m_table->num_cols; i++) {
+                auto *col = (MdbColumn *)g_ptr_array_index(m_table->columns, i);
+                if (col->col_type == MDB_OLE || col->col_type == MDB_BINARY) { row.push_back("[Binary Data]"); bin.push_back(true); }
+                else { row.push_back((const char *)col->bind_ptr); bin.push_back(false); }
+            }
+            m_rows.push_back(std::move(row));
+            m_binary.push_back(std::move(bin));
+            fetched++;
+        }
+        return fetched;
+    }
+    bool canFetchMore() const override { return (int)m_rows.size() < m_totalRows; }
+
+    int rowCount() const override { return m_totalRows; }
+    int fetchedRowCount() const override { return (int)m_rows.size(); }
     int columnCount() const override { return (int)m_columns.size(); }
     std::string columnName(int col) const override { return col >= 0 && col < (int)m_columns.size() ? m_columns[col] : ""; }
     std::string cellText(int row, int col) const override {
@@ -119,6 +137,8 @@ public:
 
 private:
     MdbHandle *m_mdb = nullptr;
+    MdbTableDef *m_table = nullptr;
+    int m_totalRows = 0;
     std::string m_currentTable;
     std::vector<std::string> m_columns;
     std::vector<std::vector<std::string>> m_rows;

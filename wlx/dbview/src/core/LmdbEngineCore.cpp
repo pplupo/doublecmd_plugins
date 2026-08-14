@@ -5,7 +5,6 @@
 
 namespace {
 bool isDir(const std::string &path) { struct stat st; return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }
-bool fileExists(const std::string &path) { struct stat st; return stat(path.c_str(), &st) == 0; }
 std::string dirOf(const std::string &path) { auto p = path.find_last_of('/'); return p == std::string::npos ? "." : path.substr(0, p); }
 std::string baseOf(const std::string &path) { auto p = path.find_last_of('/'); return p == std::string::npos ? path : path.substr(p + 1); }
 }
@@ -37,7 +36,20 @@ public:
         if (mdb_dbi_open(txn, nullptr, 0, &m_dbi) != 0) { mdb_txn_abort(txn); close(); return false; }
         mdb_txn_commit(txn);
 
-        fetchAll = [this](std::vector<std::string> &keys, std::vector<std::string> &values) {
+        totalCount = [this]() -> int {
+            if (!m_env) return 0;
+            MDB_txn *t = nullptr;
+            if (mdb_txn_begin(m_env, nullptr, MDB_RDONLY, &t) != 0) return 0;
+            MDB_cursor *cur = nullptr;
+            if (mdb_cursor_open(t, m_dbi, &cur) != 0) { mdb_txn_abort(t); return 0; }
+            int count = 0;
+            MDB_val k, v;
+            while (mdb_cursor_get(cur, &k, &v, MDB_NEXT) == 0) count++;
+            mdb_cursor_close(cur); mdb_txn_abort(t);
+            return count;
+        };
+
+        fetchWindow = [this](int startIndex, int count, std::vector<std::string> &keys, std::vector<std::string> &values) {
             if (!m_env) return;
             MDB_txn *t = nullptr;
             if (mdb_txn_begin(m_env, nullptr, MDB_RDONLY, &t) != 0) return;
@@ -45,7 +57,8 @@ public:
             if (mdb_cursor_open(t, m_dbi, &cur) != 0) { mdb_txn_abort(t); return; }
             MDB_val k, v;
             int rc = mdb_cursor_get(cur, &k, &v, MDB_FIRST);
-            while (rc == 0) {
+            for (int i = 0; i < startIndex && rc == 0; i++) rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT);
+            for (int i = 0; i < count && rc == 0; i++) {
                 keys.emplace_back((const char *)k.mv_data, k.mv_size);
                 values.emplace_back((const char *)v.mv_data, v.mv_size);
                 rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT);

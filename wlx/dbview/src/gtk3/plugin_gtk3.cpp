@@ -40,9 +40,32 @@ enum { COL_NAME = 0, N_COLS };
 
 void updateStatus(DbViewState *st) {
     if (!st->statusLabel || !st->engine) return;
-    std::string text = st->engine->engineName() + " - " + st->engine->currentTableName();
-    if (st->engine->isReadOnly()) text += " (read-only)";
+    std::string text = st->engine->engineName() + " - " + st->engine->currentTableName() +
+        " (" + std::to_string(st->engine->fetchedRowCount()) + "/" + std::to_string(st->engine->rowCount()) + " rows)";
+    if (st->engine->isReadOnly()) text += " [read-only]";
     gtk_label_set_text(GTK_LABEL(st->statusLabel), text.c_str());
+}
+
+// Pulls rows [alreadyRead, engine->fetchedRowCount()) out of the engine
+// and appends them to the grid -- called once after selectTable()'s first
+// chunk, and again each time fetchMoreIfNearBottom() pulls in another
+// chunk. Rows already materialized in the engine's own chunk cache are
+// converted to grid rows here; the engine itself never holds more than a
+// few chunks' worth of rows in memory for a table the UI hasn't scrolled
+// through yet (see DbEngineCore::fetchMore()).
+void appendEngineRowsToGrid(DbViewState *st, int fromRow) {
+    int toRow = st->engine->fetchedRowCount();
+    if (toRow <= fromRow) return;
+    std::vector<std::vector<std::string>> rows;
+    rows.reserve(toRow - fromRow);
+    for (int r = fromRow; r < toRow; r++) {
+        std::vector<std::string> row;
+        row.reserve(st->engine->columnCount());
+        for (int c = 0; c < st->engine->columnCount(); c++)
+            row.push_back(st->engine->cellText(r, c));
+        rows.push_back(std::move(row));
+    }
+    st->grid->appendRows(rows);
 }
 
 void loadGridFromEngine(DbViewState *st) {
@@ -52,23 +75,36 @@ void loadGridFromEngine(DbViewState *st) {
     }
     int cols = std::max(1, st->engine->columnCount());
     st->grid = std::make_unique<GtkWlPlugin::GtkEditableGridWidget>(cols, st->focusManager.get());
-    for (int c = 0; c < st->engine->columnCount(); c++)
+    for (int c = 0; c < st->engine->columnCount(); c++) {
         st->grid->setColumnTitle(c, st->engine->columnName(c));
-
-    std::vector<std::vector<std::string>> rows;
-    int nrows = st->engine->rowCount();
-    rows.reserve(nrows);
-    for (int r = 0; r < nrows; r++) {
-        std::vector<std::string> row;
-        row.reserve(st->engine->columnCount());
-        for (int c = 0; c < st->engine->columnCount(); c++)
-            row.push_back(st->engine->cellText(r, c));
-        rows.push_back(std::move(row));
+        // Editability is effectively per-table, not per-cell, for every
+        // engine we have (a row either all has a rowid/DB_KEY or none do);
+        // row 0 (if any rows are loaded) is representative.
+        bool editable = st->engine->fetchedRowCount() > 0 && st->engine->cellEditable(0, c);
+        st->grid->setColumnEditable(c, editable);
     }
-    st->grid->setRowData(rows);
+
+    appendEngineRowsToGrid(st, 0);
 
     gtk_box_pack_start(GTK_BOX(st->gridContainer), st->grid->widget(), TRUE, TRUE, 0);
     gtk_widget_show_all(st->grid->widget());
+
+    // Trigger fetchMore() as the user scrolls near the bottom of what's
+    // currently loaded, appending only the newly-fetched rows -- mirrors
+    // QAbstractItemModel::canFetchMore()/fetchMore() on the Qt side.
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(st->grid->widget()));
+    g_signal_connect(vadj, "value-changed", G_CALLBACK(+[](GtkAdjustment *adj, gpointer data) {
+        auto *st2 = (DbViewState *)data;
+        if (!st2->engine || !st2->engine->canFetchMore()) return;
+        double value = gtk_adjustment_get_value(adj);
+        double upper = gtk_adjustment_get_upper(adj);
+        double page = gtk_adjustment_get_page_size(adj);
+        if (value + page >= upper - page * 0.5) { // within half a page of the bottom
+            int before = st2->engine->fetchedRowCount();
+            st2->engine->fetchMore();
+            appendEngineRowsToGrid(st2, before);
+        }
+    }), st);
 }
 
 void selectTable(DbViewState *st, const std::string &name) {
@@ -119,7 +155,10 @@ void onTreeSelectionChanged(GtkTreeSelection *sel, gpointer data) {
 
 void onSubmitClicked(GtkButton *, gpointer data) {
     auto *st = (DbViewState *)data;
-    if (st->engine->submitAll()) updateStatus(st);
+    // submitAll() may reopen the cursor internally (Firebird: statements
+    // must be freed before COMMIT), which resets the engine's own fetched-
+    // rows cache -- reload the grid from scratch to match, same as revert.
+    if (st->engine->submitAll()) { loadGridFromEngine(st); updateStatus(st); }
 }
 void onRevertClicked(GtkButton *, gpointer data) {
     auto *st = (DbViewState *)data;

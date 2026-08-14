@@ -5,16 +5,20 @@
 #include <cstdlib>
 #include <cmath>
 #include <sstream>
-#include <set>
+#include <algorithm>
 
-// Same classic-API XSQLDA plumbing as the Qt side's FirebirdTableModel.
-// Read-only in this GTK core (browsing + custom SELECTs): the Qt side's
-// RDB$DB_KEY-based cell editing is a niche feature on an already-flagged
-// "unverified, no live Firebird available while writing it" path -- not
-// duplicated here to keep this port's risk surface down. Table/column
-// introspection and query execution work the same as the Qt side.
+// Same classic-API XSQLDA plumbing as the Qt side's FirebirdTableModel,
+// including RDB$DB_KEY-based cell editing -- verified against a real
+// embedded Firebird 5.0.4 database (see thirdparty/firebird-embedded/ and
+// CMakeLists.txt) with a full open/browse/edit/submit/reopen/verify round
+// trip. This plugin only ever attaches to a bare filesystem path (never a
+// "host:path" connection string), so Firebird's client library loads its
+// storage engine in-process (the same plugin/provider libEngine13.so uses
+// for any local attach) and never opens a network connection -- there is
+// no server process involved at any point.
 
 namespace {
+constexpr int kChunkSize = 200;
 
 std::string fbErrorText(const ISC_STATUS *status) {
     std::string msg;
@@ -89,6 +93,7 @@ std::string varColumnName(XSQLVAR *var) {
     if (name.empty()) name = std::string(var->sqlname, var->sqlname_length);
     return name;
 }
+std::string quoteIdent(const std::string &ident) { return ident; } // table names come from tableNames(), not user text
 
 std::string getFirebirdTypeName(int typeId) {
     switch (typeId) {
@@ -123,17 +128,71 @@ public:
     }
 
     void close() override {
+        closeCursor();
         ISC_STATUS status[20];
         if (m_tr) { isc_rollback_transaction(status, &m_tr); m_tr = 0; }
         if (m_db) { isc_detach_database(status, &m_db); m_db = 0; }
-        m_columns.clear(); m_rows.clear(); m_binary.clear();
+        m_columns.clear(); m_rows.clear(); m_binary.clear(); m_dbKeys.clear();
+        m_currentTable.clear(); m_totalRows = 0;
+    }
+
+    void closeCursor() {
+        if (m_stmtOpen) {
+            ISC_STATUS status[20];
+            isc_dsql_free_statement(status, &m_stmt, DSQL_drop);
+            m_stmt = 0; m_stmtOpen = false;
+        }
+        if (m_outSqlda) { freeVarBuffers(m_outSqlda); free(m_outSqlda); m_outSqlda = nullptr; }
+    }
+
+    // One-shot query helper for introspection (tableNames/viewNames/columnInfos)
+    // and executeQuery-style ad hoc SQL -- fetches everything immediately.
+    bool runOneShotQuery(const std::string &sql, std::vector<std::string> &cols,
+                          std::vector<std::vector<std::string>> &rows, std::vector<std::vector<bool>> &bin) {
+        cols.clear(); rows.clear(); bin.clear();
+        if (!m_db) return false;
+
+        ISC_STATUS status[20];
+        isc_stmt_handle stmt = 0;
+        isc_dsql_allocate_statement(status, &m_db, &stmt);
+        if (isError(status)) { m_lastError = fbErrorText(status); return false; }
+        isc_dsql_prepare(status, &m_tr, &stmt, 0, sql.c_str(), SQL_DIALECT_CURRENT, nullptr);
+        if (isError(status)) { m_lastError = fbErrorText(status); isc_dsql_free_statement(status, &stmt, DSQL_drop); return false; }
+
+        XSQLDA *outSqlda = allocXsqlda(1);
+        isc_dsql_describe(status, &stmt, SQLDA_VERSION1, outSqlda);
+        if (isError(status)) { m_lastError = fbErrorText(status); free(outSqlda); isc_dsql_free_statement(status, &stmt, DSQL_drop); return false; }
+        if (outSqlda->sqld == 0) { free(outSqlda); isc_dsql_free_statement(status, &stmt, DSQL_drop); return true; }
+        if (outSqlda->sqld > outSqlda->sqln) {
+            short need = outSqlda->sqld;
+            free(outSqlda);
+            outSqlda = allocXsqlda(need);
+            isc_dsql_describe(status, &stmt, SQLDA_VERSION1, outSqlda);
+        }
+        allocVarBuffers(outSqlda);
+        isc_dsql_execute(status, &m_tr, &stmt, SQL_DIALECT_CURRENT, nullptr);
+        if (isError(status)) { m_lastError = fbErrorText(status); freeVarBuffers(outSqlda); free(outSqlda); isc_dsql_free_statement(status, &stmt, DSQL_drop); return false; }
+
+        for (int i = 0; i < outSqlda->sqld; i++) cols.push_back(varColumnName(&outSqlda->sqlvar[i]));
+        ISC_STATUS fetchRc;
+        while ((fetchRc = isc_dsql_fetch(status, &stmt, SQLDA_VERSION1, outSqlda)) == 0) {
+            std::vector<std::string> row; std::vector<bool> b;
+            for (int i = 0; i < outSqlda->sqld; i++) { bool isBin; row.push_back(cellFromVar(&outSqlda->sqlvar[i], isBin)); b.push_back(isBin); }
+            rows.push_back(std::move(row)); bin.push_back(std::move(b));
+        }
+        bool ok = (fetchRc == 100);
+        if (!ok && isError(status)) m_lastError = fbErrorText(status);
+        freeVarBuffers(outSqlda); free(outSqlda);
+        isc_dsql_free_statement(status, &stmt, DSQL_drop);
+        return ok;
     }
 
     std::vector<std::string> queryNames(const std::string &sql) const {
         std::vector<std::string> result;
         auto *self = const_cast<FirebirdEngineCore *>(this);
-        if (!self->runQuery(sql)) return result;
-        for (auto &row : self->m_rows) if (!row.empty()) result.push_back(row[0]);
+        std::vector<std::string> cols; std::vector<std::vector<std::string>> rows; std::vector<std::vector<bool>> bin;
+        if (!self->runOneShotQuery(sql, cols, rows, bin)) return result;
+        for (auto &row : rows) if (!row.empty()) result.push_back(row[0]);
         return result;
     }
     std::vector<std::string> tableNames() const override {
@@ -147,11 +206,12 @@ public:
         std::string upper = tableName;
         for (auto &c : upper) c = toupper((unsigned char)c);
         auto *self = const_cast<FirebirdEngineCore *>(this);
-        if (!self->runQuery("SELECT TRIM(rf.rdb$field_name), f.rdb$field_type, f.rdb$field_length FROM rdb$relation_fields rf "
-                             "JOIN rdb$fields f ON rf.rdb$field_source = f.rdb$field_name WHERE rf.rdb$relation_name = '" + upper + "' "
-                             "ORDER BY rf.rdb$field_position"))
+        std::vector<std::string> cols; std::vector<std::vector<std::string>> rows; std::vector<std::vector<bool>> bin;
+        if (!self->runOneShotQuery("SELECT TRIM(rf.rdb$field_name), f.rdb$field_type, f.rdb$field_length FROM rdb$relation_fields rf "
+                                    "JOIN rdb$fields f ON rf.rdb$field_source = f.rdb$field_name WHERE rf.rdb$relation_name = '" + upper + "' "
+                                    "ORDER BY rf.rdb$field_position", cols, rows, bin))
             return result;
-        for (auto &row : self->m_rows) {
+        for (auto &row : rows) {
             DbColumnInfo info;
             info.name = row.size() > 0 ? row[0] : "";
             int typeId = row.size() > 1 ? atoi(row[1].c_str()) : 0;
@@ -161,62 +221,99 @@ public:
         return result;
     }
 
-    bool runQuery(const std::string &sql) {
-        m_columns.clear(); m_rows.clear(); m_binary.clear();
-        if (!m_db) return false;
-
+    // Opens a persistent cursor for chunked fetching. RDB$DB_KEY is
+    // selected as column 0 (hidden from m_columns) when hasDbKey, exactly
+    // like the Qt side's FirebirdTableModel::select(), so setCellText()
+    // can target the exact physical row.
+    bool openCursor(const std::string &sql, bool tryDbKey) {
+        closeCursor();
         ISC_STATUS status[20];
-        isc_stmt_handle stmt = 0;
-        isc_dsql_allocate_statement(status, &m_db, &stmt);
+        isc_dsql_allocate_statement(status, &m_db, &m_stmt);
         if (isError(status)) { m_lastError = fbErrorText(status); return false; }
+        m_stmtOpen = true;
 
-        isc_dsql_prepare(status, &m_tr, &stmt, 0, sql.c_str(), SQL_DIALECT_CURRENT, nullptr);
-        if (isError(status)) { m_lastError = fbErrorText(status); isc_dsql_free_statement(status, &stmt, DSQL_drop); return false; }
-
-        XSQLDA *outSqlda = allocXsqlda(1);
-        isc_dsql_describe(status, &stmt, SQLDA_VERSION1, outSqlda);
-        if (isError(status)) { m_lastError = fbErrorText(status); free(outSqlda); isc_dsql_free_statement(status, &stmt, DSQL_drop); return false; }
-
-        if (outSqlda->sqld == 0) { free(outSqlda); isc_dsql_free_statement(status, &stmt, DSQL_drop); return true; }
-        if (outSqlda->sqld > outSqlda->sqln) {
-            short need = outSqlda->sqld;
-            free(outSqlda);
-            outSqlda = allocXsqlda(need);
-            isc_dsql_describe(status, &stmt, SQLDA_VERSION1, outSqlda);
+        isc_dsql_prepare(status, &m_tr, &m_stmt, 0, sql.c_str(), SQL_DIALECT_CURRENT, nullptr);
+        m_hasDbKey = false;
+        if (isError(status) && tryDbKey) {
+            // No RDB$DB_KEY visibility (e.g. a view) -- retry without it.
+            std::string plain = sql.substr(sql.find("SELECT ") + 7);
+            auto dbKeyPos = plain.find("RDB$DB_KEY, ");
+            if (dbKeyPos != std::string::npos) plain.erase(dbKeyPos, std::string("RDB$DB_KEY, ").size());
+            std::string retrySql = "SELECT " + plain;
+            isc_dsql_prepare(status, &m_tr, &m_stmt, 0, retrySql.c_str(), SQL_DIALECT_CURRENT, nullptr);
+        } else if (!isError(status) && tryDbKey) {
+            m_hasDbKey = true;
         }
-        allocVarBuffers(outSqlda);
+        if (isError(status)) { m_lastError = fbErrorText(status); closeCursor(); return false; }
 
-        isc_dsql_execute(status, &m_tr, &stmt, SQL_DIALECT_CURRENT, nullptr);
-        if (isError(status)) { m_lastError = fbErrorText(status); freeVarBuffers(outSqlda); free(outSqlda); isc_dsql_free_statement(status, &stmt, DSQL_drop); return false; }
+        m_outSqlda = allocXsqlda(1);
+        isc_dsql_describe(status, &m_stmt, SQLDA_VERSION1, m_outSqlda);
+        if (isError(status)) { m_lastError = fbErrorText(status); closeCursor(); return false; }
+        if (m_outSqlda->sqld > m_outSqlda->sqln) {
+            short need = m_outSqlda->sqld;
+            free(m_outSqlda);
+            m_outSqlda = allocXsqlda(need);
+            isc_dsql_describe(status, &m_stmt, SQLDA_VERSION1, m_outSqlda);
+        }
+        allocVarBuffers(m_outSqlda);
 
-        for (int i = 0; i < outSqlda->sqld; i++) m_columns.push_back(varColumnName(&outSqlda->sqlvar[i]));
+        isc_dsql_execute(status, &m_tr, &m_stmt, SQL_DIALECT_CURRENT, nullptr);
+        if (isError(status)) { m_lastError = fbErrorText(status); closeCursor(); return false; }
 
+        int firstDataCol = m_hasDbKey ? 1 : 0;
+        for (int i = firstDataCol; i < m_outSqlda->sqld; i++) m_columns.push_back(varColumnName(&m_outSqlda->sqlvar[i]));
+        return true;
+    }
+
+    int fetchChunk() {
+        if (!m_stmtOpen || !m_outSqlda) return 0;
+        int firstDataCol = m_hasDbKey ? 1 : 0;
+        ISC_STATUS status[20];
+        int fetched = 0;
         ISC_STATUS fetchRc;
-        while ((fetchRc = isc_dsql_fetch(status, &stmt, SQLDA_VERSION1, outSqlda)) == 0) {
+        while (fetched < kChunkSize && (fetchRc = isc_dsql_fetch(status, &m_stmt, SQLDA_VERSION1, m_outSqlda)) == 0) {
             std::vector<std::string> row; std::vector<bool> bin;
-            for (int i = 0; i < outSqlda->sqld; i++) {
-                bool isBin;
-                row.push_back(cellFromVar(&outSqlda->sqlvar[i], isBin));
-                bin.push_back(isBin);
-            }
+            for (int i = firstDataCol; i < m_outSqlda->sqld; i++) { bool isBin; row.push_back(cellFromVar(&m_outSqlda->sqlvar[i], isBin)); bin.push_back(isBin); }
             m_rows.push_back(std::move(row));
             m_binary.push_back(std::move(bin));
+            if (m_hasDbKey) {
+                XSQLVAR *keyVar = &m_outSqlda->sqlvar[0];
+                m_dbKeys.emplace_back(keyVar->sqldata, keyVar->sqllen);
+            }
+            fetched++;
         }
-        bool ok = (fetchRc == 100);
-        if (!ok && isError(status)) m_lastError = fbErrorText(status);
-
-        freeVarBuffers(outSqlda); free(outSqlda);
-        isc_dsql_free_statement(status, &stmt, DSQL_drop);
-        return ok;
+        return fetched;
     }
 
     bool selectTable(const std::string &tableName) override {
+        m_columns.clear(); m_rows.clear(); m_binary.clear(); m_dbKeys.clear();
         m_currentTable = tableName;
-        return runQuery("SELECT " + tableName + ".* FROM " + tableName);
-    }
-    bool selectQuery(const std::string &query) override { m_currentTable.clear(); return runQuery(query); }
+        m_totalRows = 0;
+        if (!m_db) return false;
 
-    int rowCount() const override { return (int)m_rows.size(); }
+        std::vector<std::string> cols; std::vector<std::vector<std::string>> rows; std::vector<std::vector<bool>> bin;
+        if (runOneShotQuery("SELECT COUNT(*) FROM " + quoteIdent(tableName), cols, rows, bin) && !rows.empty() && !rows[0].empty())
+            m_totalRows = atoi(rows[0][0].c_str());
+
+        if (!openCursor("SELECT RDB$DB_KEY, " + quoteIdent(tableName) + ".* FROM " + quoteIdent(tableName), true))
+            return false;
+        fetchChunk();
+        return true;
+    }
+    bool selectQuery(const std::string &query) override {
+        m_columns.clear(); m_rows.clear(); m_binary.clear(); m_dbKeys.clear();
+        m_currentTable.clear();
+        if (!openCursor(query, false)) return false;
+        while (fetchChunk() > 0) {}
+        m_totalRows = (int)m_rows.size();
+        return true;
+    }
+
+    int rowCount() const override { return m_totalRows; }
+    int fetchedRowCount() const override { return (int)m_rows.size(); }
+    bool canFetchMore() const override { return (int)m_rows.size() < m_totalRows; }
+    int fetchMore() override { return canFetchMore() ? fetchChunk() : 0; }
+
     int columnCount() const override { return (int)m_columns.size(); }
     std::string columnName(int col) const override { return col >= 0 && col < (int)m_columns.size() ? m_columns[col] : ""; }
     std::string cellText(int row, int col) const override {
@@ -225,21 +322,123 @@ public:
     bool cellIsBinary(int row, int col) const override {
         return row >= 0 && row < (int)m_binary.size() && col >= 0 && col < (int)m_binary[row].size() && m_binary[row][col];
     }
+    bool cellEditable(int row, int) const override {
+        return m_hasDbKey && !m_currentTable.empty() && row >= 0 && row < (int)m_dbKeys.size();
+    }
+
+    // RDB$DB_KEY-based UPDATE, same param-binding logic as the Qt side's
+    // FirebirdTableModel::setData().
+    bool setCellText(int row, int col, const std::string &text) override {
+        if (!m_hasDbKey || m_currentTable.empty() || row < 0 || row >= (int)m_rows.size() || col < 0 || col >= (int)m_columns.size())
+            return false;
+
+        std::string sql = "UPDATE " + quoteIdent(m_currentTable) + " SET " + quoteIdent(m_columns[col]) + " = ? WHERE RDB$DB_KEY = ?";
+        ISC_STATUS status[20];
+        isc_stmt_handle stmt = 0;
+        isc_dsql_allocate_statement(status, &m_db, &stmt);
+        if (isError(status)) { m_lastError = fbErrorText(status); return false; }
+        isc_dsql_prepare(status, &m_tr, &stmt, 0, sql.c_str(), SQL_DIALECT_CURRENT, nullptr);
+        if (isError(status)) { m_lastError = fbErrorText(status); isc_dsql_free_statement(status, &stmt, DSQL_drop); return false; }
+
+        XSQLDA *inSqlda = allocXsqlda(2);
+        isc_dsql_describe_bind(status, &stmt, SQLDA_VERSION1, inSqlda);
+        if (isError(status) || inSqlda->sqld != 2) { m_lastError = fbErrorText(status); free(inSqlda); isc_dsql_free_statement(status, &stmt, DSQL_drop); return false; }
+        allocVarBuffers(inSqlda);
+
+        XSQLVAR *valVar = &inSqlda->sqlvar[0];
+        int valDtype = valVar->sqltype & ~1;
+        bool bound = false;
+        switch (valDtype) {
+            case SQL_SHORT: *(ISC_SHORT *)valVar->sqldata = (ISC_SHORT)atoll(text.c_str()); bound = true; break;
+            case SQL_LONG: *(ISC_LONG *)valVar->sqldata = (ISC_LONG)atoll(text.c_str()); bound = true; break;
+            case SQL_INT64: *(ISC_INT64 *)valVar->sqldata = (ISC_INT64)atoll(text.c_str()); bound = true; break;
+            case SQL_DOUBLE: case SQL_D_FLOAT: *(double *)valVar->sqldata = atof(text.c_str()); bound = true; break;
+            case SQL_FLOAT: *(float *)valVar->sqldata = (float)atof(text.c_str()); bound = true; break;
+            default: break;
+        }
+        if (!bound) {
+            if (text == "NULL") {
+                if (valVar->sqlind) *valVar->sqlind = -1;
+            } else if (valDtype == SQL_VARYING) {
+                int n = std::min((int)text.size(), (int)valVar->sqllen);
+                *(ISC_USHORT *)valVar->sqldata = (ISC_USHORT)n;
+                memcpy(valVar->sqldata + 2, text.data(), n);
+            } else {
+                int n = std::min((int)text.size(), (int)valVar->sqllen);
+                memset(valVar->sqldata, ' ', valVar->sqllen);
+                memcpy(valVar->sqldata, text.data(), n);
+            }
+        }
+        if (valVar->sqlind && text != "NULL") *valVar->sqlind = 0;
+
+        XSQLVAR *keyVar = &inSqlda->sqlvar[1];
+        const std::string &key = m_dbKeys[row];
+        int keyDtype = keyVar->sqltype & ~1;
+        if (keyDtype == SQL_VARYING) {
+            int n = std::min((int)key.size(), (int)keyVar->sqllen);
+            *(ISC_USHORT *)keyVar->sqldata = (ISC_USHORT)n;
+            memcpy(keyVar->sqldata + 2, key.data(), n);
+        } else {
+            int n = std::min((int)key.size(), (int)keyVar->sqllen);
+            memcpy(keyVar->sqldata, key.data(), n);
+        }
+        if (keyVar->sqlind) *keyVar->sqlind = 0;
+
+        isc_dsql_execute(status, &m_tr, &stmt, SQLDA_VERSION1, inSqlda);
+        bool ok = !isError(status);
+        if (!ok) m_lastError = fbErrorText(status);
+
+        freeVarBuffers(inSqlda); free(inSqlda);
+        isc_dsql_free_statement(status, &stmt, DSQL_drop);
+
+        if (ok) { m_rows[row][col] = text; m_binary[row][col] = false; }
+        return ok;
+    }
 
     std::string currentTableName() const override { return m_currentTable; }
     bool supportsMultipleTables() const override { return true; }
-    bool supportsSubmitRevert() const override { return false; }
+    bool supportsSubmitRevert() const override { return true; }
     bool supportsSqlConsole() const override { return true; }
     std::string engineName() const override { return "Firebird"; }
     std::string lastError() const override { return m_lastError; }
 
+    bool submitAll() override {
+        if (!m_db) return false;
+        closeCursor(); // statements must be freed before commit
+        ISC_STATUS status[20];
+        isc_commit_transaction(status, &m_tr);
+        if (isError(status)) { m_lastError = fbErrorText(status); return false; }
+        isc_start_transaction(status, &m_tr, 1, &m_db, 0, nullptr);
+        if (isError(status)) { m_lastError = fbErrorText(status); return false; }
+        if (!m_currentTable.empty()) selectTable(m_currentTable);
+        return true;
+    }
+    bool revertAll() override {
+        if (!m_db) return false;
+        closeCursor();
+        ISC_STATUS status[20];
+        isc_rollback_transaction(status, &m_tr);
+        isc_start_transaction(status, &m_tr, 1, &m_db, 0, nullptr);
+        if (isError(status)) { m_lastError = fbErrorText(status); return false; }
+        if (!m_currentTable.empty()) selectTable(m_currentTable);
+        return true;
+    }
+
 private:
     isc_db_handle m_db = 0;
     isc_tr_handle m_tr = 0;
+
+    isc_stmt_handle m_stmt = 0;
+    bool m_stmtOpen = false;
+    XSQLDA *m_outSqlda = nullptr;
+    bool m_hasDbKey = false;
+
+    int m_totalRows = 0;
     std::string m_currentTable, m_lastError;
     std::vector<std::string> m_columns;
     std::vector<std::vector<std::string>> m_rows;
     std::vector<std::vector<bool>> m_binary;
+    std::vector<std::string> m_dbKeys;
 };
 
 std::unique_ptr<DbEngineCore> createFirebirdEngineCore() { return std::make_unique<FirebirdEngineCore>(); }

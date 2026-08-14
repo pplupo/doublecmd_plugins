@@ -3,8 +3,11 @@
 #include <sqlite3.h>
 #include <sstream>
 #include <cstring>
+#include <algorithm>
 
 namespace {
+constexpr int kChunkSize = 200;
+
 std::string quoteIdent(const std::string &ident) {
     std::string escaped;
     for (char c : ident) { if (c == '"') escaped += '"'; escaped += c; }
@@ -26,6 +29,10 @@ std::string cellToString(sqlite3_stmt *stmt, int col, bool &isNull, bool &isBina
 }
 }
 
+/// Rows are fetched LIMIT/OFFSET-chunked, kChunkSize at a time (matches
+/// DuckDbEngineCore's approach), rather than eagerly loading the whole
+/// table -- a large table only ever materializes as much as the UI has
+/// actually scrolled to.
 class SqliteEngineCore : public DbEngineCore {
 public:
     ~SqliteEngineCore() override { close(); }
@@ -51,8 +58,13 @@ public:
             sqlite3_close(m_db);
             m_db = nullptr;
         }
-        m_currentTable.clear(); m_isQuery = false;
+        resetState();
+    }
+
+    void resetState() {
+        m_currentTable.clear(); m_isQuery = false; m_hasRowId = false;
         m_columns.clear(); m_rows.clear(); m_binary.clear(); m_rowIds.clear();
+        m_totalRows = 0; m_baseSql.clear();
     }
 
     std::vector<std::string> tablesOrViews(const std::string &type) const {
@@ -89,19 +101,18 @@ public:
         return result;
     }
 
-    bool runSelect(const std::string &sql, bool isQuery) {
-        m_columns.clear(); m_rows.clear(); m_binary.clear(); m_rowIds.clear();
-        m_hasRowId = false; m_isQuery = isQuery;
-
+    // Fetches one more chunk of rows starting at m_rows.size(), appending
+    // to the existing cache.
+    int fetchChunk() {
+        if (!m_db || m_baseSql.empty()) return 0;
+        std::string sql = m_baseSql + " LIMIT " + std::to_string(kChunkSize) + " OFFSET " + std::to_string((int)m_rows.size());
         sqlite3_stmt *stmt = nullptr;
-        int rc = sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr);
-        if (rc != SQLITE_OK) { m_lastError = sqlite3_errmsg(m_db); if (stmt) sqlite3_finalize(stmt); return false; }
-        if (!isQuery) m_hasRowId = true;
+        if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) { m_lastError = sqlite3_errmsg(m_db); return 0; }
 
         int totalCols = sqlite3_column_count(stmt);
         int firstDataCol = m_hasRowId ? 1 : 0;
-        for (int i = firstDataCol; i < totalCols; i++) m_columns.push_back(sqlite3_column_name(stmt, i));
-
+        int fetched = 0;
+        int rc;
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
             std::vector<std::string> row; std::vector<bool> binRow;
             for (int i = firstDataCol; i < totalCols; i++) {
@@ -113,31 +124,68 @@ public:
             m_rows.push_back(std::move(row));
             m_binary.push_back(std::move(binRow));
             if (m_hasRowId) m_rowIds.push_back(sqlite3_column_int64(stmt, 0));
+            fetched++;
         }
-        bool ok = (rc == SQLITE_DONE);
-        if (!ok) m_lastError = sqlite3_errmsg(m_db);
+        if (rc != SQLITE_DONE) m_lastError = sqlite3_errmsg(m_db);
         sqlite3_finalize(stmt);
-        return ok;
+        return fetched;
+    }
+
+    bool prepareSelect(const std::string &baseSql, const std::string &countSql, bool isQuery) {
+        resetState();
+        m_isQuery = isQuery;
+        if (!isQuery) m_hasRowId = true;
+
+        // Column names via a LIMIT 0 probe.
+        sqlite3_stmt *stmt = nullptr;
+        std::string probe = baseSql + " LIMIT 0";
+        int rc = sqlite3_prepare_v2(m_db, probe.c_str(), -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) { m_lastError = sqlite3_errmsg(m_db); if (stmt) sqlite3_finalize(stmt); return false; }
+        int totalCols = sqlite3_column_count(stmt);
+        int firstDataCol = m_hasRowId ? 1 : 0;
+        for (int i = firstDataCol; i < totalCols; i++) m_columns.push_back(sqlite3_column_name(stmt, i));
+        sqlite3_finalize(stmt);
+
+        m_totalRows = 0;
+        if (!countSql.empty()) {
+            sqlite3_stmt *cstmt = nullptr;
+            if (sqlite3_prepare_v2(m_db, countSql.c_str(), -1, &cstmt, nullptr) == SQLITE_OK) {
+                if (sqlite3_step(cstmt) == SQLITE_ROW) m_totalRows = (int)sqlite3_column_int64(cstmt, 0);
+                sqlite3_finalize(cstmt);
+            }
+        }
+
+        m_baseSql = baseSql;
+        fetchChunk();
+        return true;
     }
 
     bool selectTable(const std::string &tableName) override {
         if (!m_db) return false;
         m_currentTable = tableName;
-        std::string sql = "SELECT rowid, * FROM " + quoteIdent(tableName);
-        if (!runSelect(sql, false)) {
-            // WITHOUT ROWID fallback
-            sql = "SELECT * FROM " + quoteIdent(tableName);
-            m_hasRowId = false;
-            return runSelect(sql, false);
-        }
-        return true;
+        m_hasRowId = true;
+        if (prepareSelect("SELECT rowid, * FROM " + quoteIdent(tableName), "SELECT COUNT(*) FROM " + quoteIdent(tableName), false))
+            return true;
+        // WITHOUT ROWID fallback.
+        m_hasRowId = false;
+        return prepareSelect("SELECT * FROM " + quoteIdent(tableName), "SELECT COUNT(*) FROM " + quoteIdent(tableName), false);
     }
     bool selectQuery(const std::string &query) override {
         if (!m_db) return false;
-        return runSelect(query, true);
+        // No cheap COUNT(*) for an arbitrary statement without executing it
+        // twice; fetch everything in this path (ad hoc SQL console queries
+        // are user-driven and typically bounded, unlike whole-table browsing).
+        if (!prepareSelect(query, "", true)) return false;
+        while (fetchChunk() > 0) {}
+        m_totalRows = (int)m_rows.size();
+        return true;
     }
 
-    int rowCount() const override { return (int)m_rows.size(); }
+    int rowCount() const override { return m_totalRows; }
+    int fetchedRowCount() const override { return (int)m_rows.size(); }
+    bool canFetchMore() const override { return (int)m_rows.size() < m_totalRows; }
+    int fetchMore() override { return canFetchMore() ? fetchChunk() : 0; }
+
     int columnCount() const override { return (int)m_columns.size(); }
     std::string columnName(int col) const override { return col >= 0 && col < (int)m_columns.size() ? m_columns[col] : ""; }
     std::string cellText(int row, int col) const override {
@@ -147,7 +195,7 @@ public:
     bool cellIsBinary(int row, int col) const override {
         return row >= 0 && row < (int)m_binary.size() && col >= 0 && col < (int)m_binary[row].size() && m_binary[row][col];
     }
-    bool cellEditable(int row, int col) const override { return !m_isQuery && m_hasRowId; }
+    bool cellEditable(int, int) const override { return !m_isQuery && m_hasRowId; }
 
     bool setCellText(int row, int col, const std::string &text) override {
         if (m_isQuery || !m_hasRowId || row < 0 || row >= (int)m_rows.size()) return false;
@@ -189,6 +237,8 @@ private:
     bool m_inTransaction = false;
     bool m_isQuery = false;
     bool m_hasRowId = false;
+    int m_totalRows = 0;
+    std::string m_baseSql;
     std::string m_currentTable;
     std::vector<std::string> m_columns;
     std::vector<std::vector<std::string>> m_rows;

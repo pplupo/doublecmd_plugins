@@ -1,0 +1,3 @@
+/home/pplupo/repos/plugins/wlx/wlxbase_gtk/build/CMakeFiles/wlxbase_gtk.dir
+/home/pplupo/repos/plugins/wlx/wlxbase_gtk/build/CMakeFiles/edit_cache.dir
+/home/pplupo/repos/plugins/wlx/wlxbase_gtk/build/CMakeFiles/rebuild_cache.dir
