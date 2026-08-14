@@ -317,3 +317,77 @@ target_link_libraries(dbview_qt6 PRIVATE ${DBVIEW_LINK_LIBS})
 # target alone is not reliably propagated to consumers across CMake/generator
 # versions, so state it directly here too.
 add_dependencies(dbview_qt6 bdb_ext)
+
+# ---------------------------------------------------------------------------
+# Qt-free core (src/core/) + GTK3 UI
+# ---------------------------------------------------------------------------
+option(ENABLE_GTK3 "Build the GTK3 dbview plugin" ON)
+
+if(ENABLE_GTK3)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK3 gtk+-3.0)
+    if(GTK3_FOUND)
+        set(DBVIEW_CORE_SOURCES
+            src/core/DbEngineCoreFactory.cpp
+            src/core/SqliteEngineCore.cpp
+            src/core/DuckDbEngineCore.cpp
+            src/core/LmdbEngineCore.cpp
+            src/core/BdbEngineCore.cpp
+            src/core/MdbEngineCore.cpp
+            src/core/RocksDbEngineCore.cpp
+            src/core/LevelDbEngineCore.cpp
+        )
+        if(ENABLE_FIREBIRD)
+            list(APPEND DBVIEW_CORE_SOURCES src/core/FirebirdEngineCore.cpp)
+        endif()
+
+        add_library(dbview_core STATIC ${DBVIEW_CORE_SOURCES})
+        target_include_directories(dbview_core PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/mdbtools
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${duckdb_SOURCE_DIR}/src/include
+        )
+        if(ENABLE_ROCKSDB_LEVELDB)
+            target_include_directories(dbview_core PUBLIC ${rocksdb_SOURCE_DIR}/include)
+            target_compile_definitions(dbview_core PUBLIC ENABLE_ROCKSDB_LEVELDB)
+        endif()
+        if(ENABLE_FIREBIRD)
+            target_include_directories(dbview_core PUBLIC ${FBCLIENT_INCLUDE_DIR})
+            target_compile_definitions(dbview_core PUBLIC ENABLE_FIREBIRD)
+        endif()
+
+        set(DBVIEW_CORE_LINK_LIBS duckdb_static mdb sqlite3 lmdb db)
+        if(ENABLE_ROCKSDB_LEVELDB)
+            list(APPEND DBVIEW_CORE_LINK_LIBS rocksdb)
+        endif()
+        if(ENABLE_FIREBIRD)
+            list(APPEND DBVIEW_CORE_LINK_LIBS ${FBCLIENT_LIBRARY})
+        endif()
+        target_link_libraries(dbview_core PUBLIC ${DBVIEW_CORE_LINK_LIBS})
+        add_dependencies(dbview_core bdb_ext)
+
+        add_library(dbview_gtk3 SHARED src/gtk3/plugin_gtk3.cpp)
+        set_target_properties(dbview_gtk3 PROPERTIES PREFIX "" SUFFIX ".wlx")
+        target_include_directories(dbview_gtk3 PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
+            ${CMAKE_CURRENT_SOURCE_DIR}/../wlxbase_gtk/include
+            ${GTK3_INCLUDE_DIRS}
+        )
+        target_link_directories(dbview_gtk3 PRIVATE ${GTK3_LIBRARY_DIRS})
+        target_compile_options(dbview_gtk3 PRIVATE ${GTK3_CFLAGS_OTHER})
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../wlxbase_gtk ${CMAKE_CURRENT_BINARY_DIR}/wlxbase_gtk)
+        target_link_libraries(dbview_gtk3 PRIVATE
+            dbview_core
+            wlxbase_gtk
+            ${GTK3_LIBRARIES}
+        )
+        # See officeview's CMakeLists.txt for why: statically-linked
+        # third-party libs (sqlite3/lmdb/db/duckdb's own bundled deps) get
+        # exported from the .wlx by default and can be interposed by
+        # whatever the host process already loaded of the same library.
+        target_link_options(dbview_gtk3 PRIVATE -Wl,-Bsymbolic -Wl,-Bsymbolic-functions)
+    else()
+        message(WARNING "dbview: GTK3 (gtk+-3.0) not found, skipping GTK3 build")
+    endif()
+endif()
