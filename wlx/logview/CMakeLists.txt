@@ -18,6 +18,30 @@ if(ENABLE_QT6)
     find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 endif()
 include(FetchContent)
+
+# Must be set before Abseil/RE2 are fetched below: both build as static
+# libs that end up linked into a shared .wlx, so they need -fPIC too.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# RE2 needs Abseil's CMake targets (absl::absl_check et al.), which are
+# newer than what apt ships on e.g. Ubuntu 24.04's libabsl-dev (20220623) --
+# fetch a matching-era Abseil ourselves instead of depending on whatever the
+# system happens to have, same self-contained-dependency policy used
+# elsewhere in this project.
+FetchContent_Declare(
+  absl
+  GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+  GIT_TAG 20240722.0
+)
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+# RE2's own install(EXPORT re2Targets ...) rule requires every Abseil target
+# it depends on to be in an export set too -- ON (not OFF) is what actually
+# satisfies that at configure time, even though this project never runs
+# `make install` itself.
+set(ABSL_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(absl)
+
 FetchContent_Declare(
   re2
   GIT_REPOSITORY https://github.com/google/re2.git
