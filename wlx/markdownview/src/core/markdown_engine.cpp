@@ -5,12 +5,30 @@
 #include <html.h>
 #include "latex.h"
 
-#include <QFile>
-#include <QTextStream>
 #include <QString>
-#include <QFileInfo>
-#include <QDir>
-#include <QStandardPaths>
+
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <sys/stat.h>
+
+namespace {
+bool fileExists(const std::string &path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0;
+}
+std::string readFileUtf8(const std::string &path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+std::string homeDir() {
+    const char *h = std::getenv("HOME");
+    return h ? h : "";
+}
+}
 
 namespace MarkdownEngine {
 
@@ -189,41 +207,32 @@ static QString postProcessHtml(const QString& rawHtml, bool darkMode, const std:
     // 2. Plugin CSS (~/.config/doublecmd/plugins/wlx/markdownview.css)
     // 3. markdownpart.css (~/.config/doublecmd/plugins/wlx/markdownpart.css or ~/.config/markdownpart.css)
     // 4. Binary String Constants (DEFAULT_LIGHT_CSS / DEFAULT_DARK_CSS)
-    QString cssStr;
-    QString targetCssFile;
+    std::string cssStr;
+    std::string targetCssFile;
 
-    if (!customCssPath.empty() && QFile::exists(QString::fromStdString(customCssPath))) {
-        targetCssFile = QString::fromStdString(customCssPath);
+    if (!customCssPath.empty() && fileExists(customCssPath)) {
+        targetCssFile = customCssPath;
     } else {
-        QString homeDir = QDir::homePath();
-        QString pluginDirCss = homeDir + QStringLiteral("/.config/doublecmd/plugins/wlx/markdownview.css");
-        QString pluginPartCss = homeDir + QStringLiteral("/.config/doublecmd/plugins/wlx/markdownpart.css");
-        QString userPartCss = homeDir + QStringLiteral("/.config/markdownpart.css");
+        std::string home = homeDir();
+        std::string pluginDirCss = home + "/.config/doublecmd/plugins/wlx/markdownview.css";
+        std::string pluginPartCss = home + "/.config/doublecmd/plugins/wlx/markdownpart.css";
+        std::string userPartCss = home + "/.config/markdownpart.css";
 
-        if (QFile::exists(pluginDirCss)) {
-            targetCssFile = pluginDirCss;
-        } else if (QFile::exists(pluginPartCss)) {
-            targetCssFile = pluginPartCss;
-        } else if (QFile::exists(userPartCss)) {
-            targetCssFile = userPartCss;
-        }
+        if (fileExists(pluginDirCss)) targetCssFile = pluginDirCss;
+        else if (fileExists(pluginPartCss)) targetCssFile = pluginPartCss;
+        else if (fileExists(userPartCss)) targetCssFile = userPartCss;
     }
 
-    if (!targetCssFile.isEmpty()) {
-        QFile cssFile(targetCssFile);
-        if (cssFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QTextStream stream(&cssFile);
-            cssStr = stream.readAll();
-        }
-    }
+    if (!targetCssFile.empty())
+        cssStr = readFileUtf8(targetCssFile);
 
-    if (cssStr.isEmpty()) {
-        cssStr = darkMode ? QString::fromUtf8(DEFAULT_DARK_CSS) : QString::fromUtf8(DEFAULT_LIGHT_CSS);
-    }
+    QString cssQStr = cssStr.empty()
+        ? (darkMode ? QString::fromUtf8(DEFAULT_DARK_CSS) : QString::fromUtf8(DEFAULT_LIGHT_CSS))
+        : QString::fromStdString(cssStr);
 
     // Wrap in standard HTML template
     QString docHtml = QStringLiteral("<!DOCTYPE html><html><head><style>")
-                     + cssStr
+                     + cssQStr
                      + QStringLiteral("</style></head><body>")
                      + html
                      + QStringLiteral("</body></html>");

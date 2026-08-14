@@ -20,6 +20,10 @@ private:
     QByteArray runPlantUmlWeb(const QString& puml);
     QByteArray fixMermaidSvgText(const QByteArray& svgData);
     QString fixPlantUmlSvgDark(const QString& svgStr);
+    // Rasterizes SVG bytes to PNG bytes via librsvg + Cairo (toolkit-neutral
+    // -- replaces the previous QSvgRenderer/QPainter/QImage pipeline, which
+    // pulled in QtSvg/QtGui and doesn't work when this core is linked into
+    // the GTK3 plugin, whose host process has no Qt runtime at all).
     QByteArray svgToHighDpiPng(const QByteArray& svgData, float scale, int& logicalWidth, int& logicalHeight);
 
     bool m_darkMode = false;

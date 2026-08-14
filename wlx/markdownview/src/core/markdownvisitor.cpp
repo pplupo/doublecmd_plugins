@@ -1,24 +1,132 @@
+// librsvg (included below) pulls in GLib/GObject/Gio headers transitively,
+// some of which (gio/gdbusintrospection.h) declare a struct field literally
+// named `signals` -- which collides with Qt's `signals` keyword macro
+// (expands to `public`, for MOC's benefit) once both header sets land in
+// the same translation unit. QT_NO_KEYWORDS disables that macro; must be
+// defined before the *first* Qt header is included anywhere in this file
+// (including transitively via markdownvisitor.h -> html.h -> doc.h).
+// Safe here since this file declares no QObject subclass and never uses
+// the signals:/slots:/emit keywords itself (only Q_* macros, which
+// QT_NO_KEYWORDS doesn't touch).
+#define QT_NO_KEYWORDS
+
 #include "markdownvisitor.h"
 #include <QRegularExpression>
-#include <QProcess>
-#include <QSvgRenderer>
 #include <QDebug>
-#include <QGuiApplication>
-#include <QFont>
 
-#include <QSvgGenerator>
-#include <QBuffer>
+// Qt is only still used here for two narrow, disclosed reasons: (1) QString
+// is md4qt's MD::String in the MD4QT_QT_SUPPORT build mode this project
+// uses, so the AST/visitor interface itself is QString-typed; (2) MicroTeX's
+// LaTeX math rendering below uses its Qt Graphics2D backend (graphic_qt.h),
+// since MicroTeX's alternative Cairo backend needs cairomm/pangomm, which
+// aren't set up in this build yet. Everything else previously pulled in by
+// this file -- QtNetwork (Mermaid/PlantUML web rendering) and QtSvg/the rest
+// of QtGui's painting API (SVG rasterization) -- has been replaced below
+// with a curl subprocess and librsvg+Cairo respectively, which are real
+// toolkit-neutral replacements, not stubs. onMath() guards against no
+// QGuiApplication existing (true for the GTK3 host process, which never
+// constructs one) and falls back to the existing plain-text rendering
+// instead of calling into Qt painting APIs that would abort without one.
+#include <QGuiApplication>
 #include <QPainter>
 #include <QPixmap>
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
-#include <QEventLoop>
-#include <QUrl>
+#include <QImage>
+#include <QColor>
+#include <QBuffer>
+#include <QIODevice>
 
 // MicroTeX includes
 #include "latex.h"
 #include "platform/qt/graphic_qt.h"
+
+#include <cairo.h>
+#include <librsvg/rsvg.h>
+
+#include <unistd.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <poll.h>
+#include <signal.h>
+#include <vector>
+#include <cstring>
+#include <chrono>
+#include <algorithm>
+
+extern char **environ;
+
+namespace {
+
+// Minimal subprocess runner (replaces QProcess), same posix_spawn+poll
+// pattern used elsewhere in this project (e.g. diagramview's DiagramRenderer)
+// for CLI subprocess invocation without a Qt event loop.
+QByteArray runProcessCapture(const std::string &exe, const std::vector<std::string> &args, int timeoutMs)
+{
+    QByteArray result;
+    int outPipe[2];
+    if (pipe(outPipe) != 0) return result;
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, outPipe[0]);
+    posix_spawn_file_actions_addclose(&actions, outPipe[1]);
+
+    std::vector<char *> argv;
+    argv.push_back(const_cast<char *>(exe.c_str()));
+    for (auto &a : args) argv.push_back(const_cast<char *>(a.c_str()));
+    argv.push_back(nullptr);
+
+    pid_t pid = -1;
+    int rc = posix_spawnp(&pid, exe.c_str(), &actions, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(outPipe[1]);
+    if (rc != 0) { close(outPipe[0]); return result; }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    bool timedOut = false;
+    char buf[8192];
+    while (true) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) { timedOut = true; break; }
+        struct pollfd pfd { outPipe[0], POLLIN, 0 };
+        int pr = poll(&pfd, 1, (int)remaining);
+        if (pr < 0) break;
+        if (pr == 0) { timedOut = true; break; }
+        if (pfd.revents & (POLLIN | POLLHUP)) {
+            ssize_t n = read(outPipe[0], buf, sizeof(buf));
+            if (n > 0) result.append(buf, (int)n);
+            else break;
+        } else break;
+    }
+    close(outPipe[0]);
+    if (timedOut) kill(pid, SIGKILL);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (timedOut || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return QByteArray();
+    return result;
+}
+
+// Fetches a URL via `curl` (replaces QNetworkAccessManager -- no Qt event
+// loop needed, works identically whether this core is linked into the Qt6
+// or GTK3 plugin).
+QByteArray httpGet(const std::string &url, int timeoutMs = 15000)
+{
+    return runProcessCapture("curl", {"-s", "-L", "--max-time", std::to_string(timeoutMs / 1000), url}, timeoutMs + 2000);
+}
+
+// Rasterizes SVG bytes to a Cairo ARGB32 surface via librsvg, then encodes
+// to PNG bytes. Used both by svgToHighDpiPng() (Mermaid/PlantUML) below and
+// available as the one non-Qt image pipeline this file needs.
+cairo_status_t writeToQByteArray(void *closure, const unsigned char *data, unsigned int length)
+{
+    auto *out = static_cast<QByteArray *>(closure);
+    out->append(reinterpret_cast<const char *>(data), (int)length);
+    return CAIRO_STATUS_SUCCESS;
+}
+
+} // namespace
 
 MarkdownVisitor::MarkdownVisitor(bool darkMode) 
     : MD::details::HtmlVisitor()
@@ -30,9 +138,24 @@ MarkdownVisitor::~MarkdownVisitor() {
 
 void MarkdownVisitor::onMath(MD::Math *m) {
     if (!m) return;
-    
+
+    // MicroTeX's Qt Graphics2D backend needs a live QGuiApplication (QPixmap
+    // /QPainter abort without one); the GTK3 plugin's host process never
+    // constructs one. Fall back to the existing plain-text rendering rather
+    // than crash -- LaTeX math blocks render as their source text instead
+    // of a typeset image under GTK3, a disclosed, narrower gap than the
+    // outright missing-library crash this replaces.
+    if (!qApp) {
+        if (m->isInline()) {
+            m_html += QStringLiteral("<span class=\"math inline\">$") + prepareTextForHtml(m->text()) + QStringLiteral("$</span>");
+        } else {
+            m_html += QStringLiteral("<pre class=\"math block\"><code>") + prepareTextForHtml(m->text()) + QStringLiteral("</code></pre>\n");
+        }
+        return;
+    }
+
     std::wstring tex = m->text().toStdWString();
-    
+
     constexpr int oversample = 8;
     constexpr float baseTextSize = 20.0f;
     constexpr float renderTextSize = baseTextSize * oversample;
@@ -162,20 +285,7 @@ QByteArray MarkdownVisitor::runMermaidWeb(const QString& code)
     QByteArray base64 = fullCode.toUtf8().toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
     QString url = QStringLiteral("https://mermaid.ink/svg/") + QString::fromUtf8(base64);
 
-    QNetworkAccessManager manager;
-    QNetworkRequest request((QUrl(url)));
-    QNetworkReply *reply = manager.get(request);
-    
-    QEventLoop loop;
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-    
-    QByteArray data;
-    if (reply->error() == QNetworkReply::NoError) {
-        data = reply->readAll();
-    }
-    reply->deleteLater();
-    return data;
+    return httpGet(url.toStdString());
 }
 
 QByteArray MarkdownVisitor::runPlantUmlWeb(const QString& code)
@@ -225,20 +335,7 @@ QByteArray MarkdownVisitor::runPlantUmlWeb(const QString& code)
     QString hexStr = QStringLiteral("~h") + QString::fromUtf8(modifiedCode.toUtf8().toHex());
     QString url = QStringLiteral("http://www.plantuml.com/plantuml/svg/") + hexStr;
 
-    QNetworkAccessManager manager;
-    QNetworkRequest request((QUrl(url)));
-    QNetworkReply *reply = manager.get(request);
-    
-    QEventLoop loop;
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-    
-    QByteArray data;
-    if (reply->error() == QNetworkReply::NoError) {
-        data = reply->readAll();
-    }
-    reply->deleteLater();
-    return data;
+    return httpGet(url.toStdString());
 }
 
 QString MarkdownVisitor::fixPlantUmlSvgDark(const QString& svgInput)
@@ -349,41 +446,57 @@ QByteArray MarkdownVisitor::fixMermaidSvgText(const QByteArray& svgData)
 
 QByteArray MarkdownVisitor::svgToHighDpiPng(const QByteArray& svgData, float scale, int& logicalWidth, int& logicalHeight)
 {
-    QSvgRenderer renderer(svgData);
-    if (!renderer.isValid()) return QByteArray();
-    
-    QSize defaultSize = renderer.defaultSize();
-    if (defaultSize.isEmpty()) {
-        QRectF viewBox = renderer.viewBoxF();
-        if (!viewBox.isEmpty()) {
-            defaultSize = viewBox.size().toSize();
-        } else {
-            defaultSize = QSize(800, 600);
-        }
+    GError *error = nullptr;
+    RsvgHandle *handle = rsvg_handle_new_from_data(
+        reinterpret_cast<const guint8 *>(svgData.constData()), (gsize)svgData.size(), &error);
+    if (!handle) {
+        if (error) g_error_free(error);
+        return QByteArray();
     }
-    
-    logicalWidth = defaultSize.width();
-    logicalHeight = defaultSize.height();
-    
-    QSize scaledSize = defaultSize * scale;
-    QImage image(scaledSize, QImage::Format_ARGB32_Premultiplied);
-    QColor fillCol = m_darkMode ? QColor(0x0d, 0x11, 0x17, 0) : QColor(0xFA, 0xFA, 0xFA, 0);
-    image.fill(fillCol);
-    
-    QPainter painter(&image);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setRenderHint(QPainter::TextAntialiasing);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    
-    renderer.render(&painter);
-    painter.end();
-    
-    QByteArray ba;
-    QBuffer buffer(&ba);
-    buffer.open(QIODevice::WriteOnly);
-    image.save(&buffer, "PNG");
-    
-    return ba;
+
+    gdouble w = 0, h = 0;
+    gboolean hasSize = rsvg_handle_get_intrinsic_size_in_pixels(handle, &w, &h);
+    if (!hasSize || w <= 0 || h <= 0) {
+        RsvgRectangle vb{};
+        gboolean hasViewbox = FALSE, dummyW = FALSE, dummyH = FALSE;
+        rsvg_handle_get_intrinsic_dimensions(handle, &dummyW, nullptr, &dummyH, nullptr, &hasViewbox, &vb);
+        if (hasViewbox && vb.width > 0 && vb.height > 0) { w = vb.width; h = vb.height; }
+        else { w = 800; h = 600; }
+    }
+
+    logicalWidth = (int)w;
+    logicalHeight = (int)h;
+
+    int pixelWidth = std::max(1, (int)(w * scale));
+    int pixelHeight = std::max(1, (int)(h * scale));
+
+    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixelWidth, pixelHeight);
+    cairo_t *cr = cairo_create(surface);
+
+    // Fully transparent background (alpha 0), same intent as the previous
+    // QImage::fill() with a zero-alpha color -- only affects what shows
+    // through outside the rendered SVG shapes, not the shapes themselves.
+    cairo_set_source_rgba(cr, m_darkMode ? 0x0d / 255.0 : 0xFA / 255.0,
+                              m_darkMode ? 0x11 / 255.0 : 0xFA / 255.0,
+                              m_darkMode ? 0x17 / 255.0 : 0xFA / 255.0, 0.0);
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    cairo_scale(cr, (double)pixelWidth / w, (double)pixelHeight / h);
+
+    RsvgRectangle viewport{0, 0, w, h};
+    rsvg_handle_render_document(handle, cr, &viewport, &error);
+    if (error) { g_error_free(error); error = nullptr; }
+
+    QByteArray result;
+    cairo_surface_write_to_png_stream(surface, writeToQByteArray, &result);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+    g_object_unref(handle);
+
+    return result;
 }
 
 void MarkdownVisitor::onImage(MD::Image *i)
@@ -403,8 +516,11 @@ void MarkdownVisitor::onImage(MD::Image *i)
         m_html.push_back(QStringLiteral(" />"));
         
         if (!caption.isEmpty()) {
-            int baseSize = QGuiApplication::font().pointSize();
-            if (baseSize <= 0) baseSize = 10;
+            // Previously read the default QGuiApplication font's point size
+            // as a base; that instance never exists in the GTK3 host
+            // process, so this is now a fixed default matching that
+            // fallback's own default (10pt) instead of a live query.
+            constexpr int baseSize = 10;
             int captionSize = qMax(1, baseSize - 2);
             
             m_html.push_back(QStringLiteral("<br />"));
