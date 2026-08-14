@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(ENABLE_QT6 "Build Qt6 plugin variant" ON)
-option(ENABLE_GTK3 "Build GTK3 plugin variant" OFF)
+option(ENABLE_GTK3 "Build GTK3 plugin variant" ON)
 
 set(MDK_SDK_INCLUDE "$ENV{HOME}/mdk-sdk/include" CACHE PATH "Path to the MDK SDK include directory")
 
@@ -49,7 +49,26 @@ if(ENABLE_QT6)
     )
 endif()
 
-# --- GTK3 Variant (not yet implemented — see plan §3.7 / §9 checklist) ---
+# --- GTK3 Variant ---
 if(ENABLE_GTK3)
-    message(FATAL_ERROR "mdk: GTK3 variant not implemented yet")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK3 gtk+-3.0 epoxy)
+    if(GTK3_FOUND)
+        add_library(mdk_gtk3 MODULE
+            src/gtk3/plugin_gtk3.cpp
+        )
+        target_include_directories(mdk_gtk3 PRIVATE
+            ${GTK3_INCLUDE_DIRS}
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
+        )
+        target_link_libraries(mdk_gtk3 PRIVATE mdk_core ${GTK3_LIBRARIES})
+        target_link_options(mdk_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
+        set_target_properties(mdk_gtk3 PROPERTIES
+            PREFIX ""
+            OUTPUT_NAME "mdk_gtk3"
+            SUFFIX ".wlx"
+        )
+    else()
+        message(STATUS "mdk: gtk+-3.0/epoxy not found — GTK3 variant skipped for this build")
+    endif()
 endif()
