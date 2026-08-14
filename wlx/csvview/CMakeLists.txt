@@ -52,15 +52,18 @@ if(ENABLE_QT6)
 endif()
 
 # --- GTK3 Variant ---
-# NOTE: no wlxbase_gtk yet — this is a self-contained GTK3 UI (plain
-# GtkTreeView grid + toolbar), not a port of EditableGridWidget/
-# FocusManager/ScopedFindReplacePanel. Undo/redo and the find/replace
-# panel are intentionally not included in this pass; see the plugin's
-# commit message for scope notes.
+# Full parity build on wlxbase_gtk (GtkFocusManager, GtkEditableGridWidget
+# with undo/redo, GtkScopedFindReplacePanel) — the GTK counterpart to
+# wlxbase_wlqt used by the Qt6 build above.
 if(ENABLE_GTK3)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(GTK3 gtk+-3.0)
     if(GTK3_FOUND)
+        add_subdirectory(
+            ${CMAKE_CURRENT_SOURCE_DIR}/../wlxbase_gtk
+            ${CMAKE_CURRENT_BINARY_DIR}/wlxbase_gtk
+        )
+
         add_library(csvview_gtk3 MODULE
             src/gtk3/plugin_gtk3.cpp
         )
@@ -68,7 +71,7 @@ if(ENABLE_GTK3)
             ${GTK3_INCLUDE_DIRS}
             ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
         )
-        target_link_libraries(csvview_gtk3 PRIVATE csvview_core ${GTK3_LIBRARIES})
+        target_link_libraries(csvview_gtk3 PRIVATE csvview_core wlxbase_gtk ${GTK3_LIBRARIES})
         target_link_options(csvview_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
         set_target_properties(csvview_gtk3 PROPERTIES
             PREFIX ""
