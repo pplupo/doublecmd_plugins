@@ -77,6 +77,7 @@ mkdir -p release/wlx/csvview
 mkdir -p wlx/csvview/build
 (cd wlx/csvview/build && cmake .. && make)
 install -m 644 wlx/csvview/build/csvview_qt6.wlx release/wlx/csvview/
+[ -f wlx/csvview/build/csvview_gtk3.wlx ] && install -m 644 wlx/csvview/build/csvview_gtk3.wlx release/wlx/csvview/
 cp -r wlx/csvview/langs release/wlx/csvview/
 install -m 644 wlx/csvview/*.md release/wlx/csvview/
 install -m 644 wlx/csvview/*.png release/wlx/csvview/
@@ -100,7 +101,8 @@ install -m 644 wlx/officeview/*.md release/wlx/officeview/
 mkdir -p release/wlx/logview
 mkdir -p wlx/logview/build
 (cd wlx/logview/build && cmake .. && make)
-install -m 644 wlx/logview/build/logviewer_wlx.wlx release/wlx/logview/
+install -m 644 wlx/logview/build/logviewer.wlx release/wlx/logview/
+[ -f wlx/logview/build/logviewer_gtk3.wlx ] && install -m 644 wlx/logview/build/logviewer_gtk3.wlx release/wlx/logview/
 install -m 644 wlx/logview/*.md release/wlx/logview/
 install -m 644 wlx/logview/*.png release/wlx/logview/
 
@@ -108,7 +110,8 @@ install -m 644 wlx/logview/*.png release/wlx/logview/
 mkdir -p release/wlx/mpv_wayland
 mkdir -p wlx/mpv_wayland/build
 (cd wlx/mpv_wayland/build && cmake .. && make)
-install -m 644 wlx/mpv_wayland/build/mpv_wayland.wlx release/wlx/mpv_wayland/
+install -m 644 wlx/mpv_wayland/build/mpv_wayland_qt6.wlx release/wlx/mpv_wayland/
+[ -f wlx/mpv_wayland/build/mpv_wayland_gtk3.wlx ] && install -m 644 wlx/mpv_wayland/build/mpv_wayland_gtk3.wlx release/wlx/mpv_wayland/
 install -m 644 wlx/mpv_wayland/*.md release/wlx/mpv_wayland/
 install -m 644 wlx/mpv_wayland/*.png release/wlx/mpv_wayland/
 
@@ -122,16 +125,20 @@ install -m 644 wlx/kate/*.png release/wlx/kate/
 
 # diagramview
 mkdir -p release/wlx/diagramview
-make -C wlx/diagramview/src clean all
-install -m 644 wlx/diagramview/diagramview_qt6.wlx release/wlx/diagramview/
+mkdir -p wlx/diagramview/build
+(cd wlx/diagramview/build && cmake .. && make)
+install -m 644 wlx/diagramview/build/diagramview_qt6.wlx release/wlx/diagramview/
+[ -f wlx/diagramview/build/diagramview_gtk3.wlx ] && install -m 644 wlx/diagramview/build/diagramview_gtk3.wlx release/wlx/diagramview/
 install -m 644 wlx/diagramview/config.json release/wlx/diagramview/
 install -m 644 wlx/diagramview/*.md release/wlx/diagramview/
 install -m 644 wlx/diagramview/*.png release/wlx/diagramview/
 
 # mdk
 mkdir -p release/wlx/mdk
-make -C wlx/mdk clean all
-install -m 644 wlx/mdk/wlx_mdk_wayland.wlx release/wlx/mdk/
+mkdir -p wlx/mdk/build
+(cd wlx/mdk/build && cmake .. && make)
+install -m 644 wlx/mdk/build/mdk_qt6.wlx release/wlx/mdk/
+[ -f wlx/mdk/build/mdk_gtk3.wlx ] && install -m 644 wlx/mdk/build/mdk_gtk3.wlx release/wlx/mdk/
 install -m 644 wlx/mdk/*.md release/wlx/mdk/
 
 # markdownview

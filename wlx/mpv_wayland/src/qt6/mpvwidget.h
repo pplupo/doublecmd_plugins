@@ -5,8 +5,8 @@
 #include <QOpenGLFunctions>
 #include <QString>
 #include <QPointer>
-#include <mpv/client.h>
-#include <mpv/render_gl.h>
+#include "MpvEngine.h"
+#include <memory>
 
 class MpvWidget : public QOpenGLWidget
 {
@@ -38,15 +38,13 @@ private slots:
     void doLoadFile();
 
 private:
-    static void on_update(void *ctx);
     static void *get_proc_address(void *ctx, const char *name);
     QString mapQtKeyToMpvKey(QKeyEvent *event);
 
     void installFocusGuard();
     void restoreFocusToDC();
 
-    mpv_handle *m_mpv;
-    mpv_render_context *m_mpvGL;
+    std::unique_ptr<MpvEngine> m_engine;
     QString m_pendingFile;
     bool m_glReady;
     bool m_isActive = false;
