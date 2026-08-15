@@ -174,6 +174,10 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
     st->engine = std::move(engine);
 
     st->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    // gtk_layout_put() (not gtk_container_add()) is required here: DC's
+    // ResizeWindow later calls gtk_layout_move() on this widget, which
+    // asserts the widget's parent is exactly this GtkLayout.
+    gtk_layout_put(GTK_LAYOUT(ParentWin), st->root, 0, 0);
 
     // Toolbar
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
