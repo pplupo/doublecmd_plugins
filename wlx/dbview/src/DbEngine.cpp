@@ -2,9 +2,6 @@
 
 #include "SqliteEngine.h"
 #include "DuckDbEngine.h"
-#ifdef ENABLE_FIREBIRD
-#include "FirebirdEngine.h"
-#endif
 #include "MdbEngine.h"
 #include "BdbEngine.h"
 #include "LmdbEngine.h"
@@ -39,15 +36,6 @@ std::unique_ptr<DbEngine> DbEngine::createForFile(const QString &filepath)
         if (engine->open(filepath))
             return engine;
     }
-
-    // Firebird Embedded
-#ifdef ENABLE_FIREBIRD
-    if (ext == QStringLiteral("fdb")) {
-        auto engine = std::make_unique<FirebirdEngine>();
-        if (engine->open(filepath))
-            return engine;
-    }
-#endif
 
     // --- KV engines ---
 
