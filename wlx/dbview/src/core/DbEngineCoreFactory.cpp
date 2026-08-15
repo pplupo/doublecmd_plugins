@@ -5,9 +5,6 @@
 
 std::unique_ptr<DbEngineCore> createSqliteEngineCore();
 std::unique_ptr<DbEngineCore> createDuckDbEngineCore();
-#ifdef ENABLE_FIREBIRD
-std::unique_ptr<DbEngineCore> createFirebirdEngineCore();
-#endif
 std::unique_ptr<DbEngineCore> createLmdbEngineCore();
 std::unique_ptr<DbEngineCore> createBdbEngineCore();
 std::unique_ptr<DbEngineCore> createMdbEngineCore();
@@ -48,13 +45,6 @@ std::unique_ptr<DbEngineCore> DbEngineCore::createForFile(const std::string &fil
         auto engine = createDuckDbEngineCore();
         if (engine->open(filepath)) return engine;
     }
-
-#ifdef ENABLE_FIREBIRD
-    if (ext == "fdb") {
-        auto engine = createFirebirdEngineCore();
-        if (engine->open(filepath)) return engine;
-    }
-#endif
 
     if (ext == "lmdb" || baseName(filepath) == "data.mdb") {
         auto engine = createLmdbEngineCore();

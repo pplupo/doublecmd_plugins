@@ -4,9 +4,6 @@
 #include "DuckDbModel.h"
 #include "MdbEngine.h"
 #include "SqliteTableModel.h"
-#ifdef ENABLE_FIREBIRD
-#include "FirebirdTableModel.h"
-#endif
 #include <QKeyEvent>
 #include <QCoreApplication>
 
@@ -509,11 +506,6 @@ bool DbViewWidget::isCellBinary(const QModelIndex &idx) const
     if (auto *sqliteModel = qobject_cast<SqliteTableModel*>(model)) {
         return sqliteModel->isBinaryValue(srcIdx.row(), srcIdx.column());
     }
-#ifdef ENABLE_FIREBIRD
-    if (auto *fbModel = qobject_cast<FirebirdTableModel*>(model)) {
-        return fbModel->isBinaryValue(srcIdx.row(), srcIdx.column());
-    }
-#endif
     return false;
 }
 
@@ -539,11 +531,6 @@ QByteArray DbViewWidget::getCellRawValue(const QModelIndex &idx) const
     if (auto *sqliteModel = qobject_cast<SqliteTableModel*>(model)) {
         return sqliteModel->rawValue(srcIdx.row(), srcIdx.column());
     }
-#ifdef ENABLE_FIREBIRD
-    if (auto *fbModel = qobject_cast<FirebirdTableModel*>(model)) {
-        return fbModel->rawValue(srcIdx.row(), srcIdx.column());
-    }
-#endif
     return {};
 }
 
@@ -566,11 +553,6 @@ bool DbViewWidget::setCellRawValue(const QModelIndex &idx, const QByteArray &byt
     if (auto *sqliteModel = qobject_cast<SqliteTableModel*>(model)) {
         return sqliteModel->setData(srcIdx, bytes, Qt::EditRole);
     }
-#ifdef ENABLE_FIREBIRD
-    if (auto *fbModel = qobject_cast<FirebirdTableModel*>(model)) {
-        return fbModel->setData(srcIdx, bytes, Qt::EditRole);
-    }
-#endif
     return false;
 }
 
