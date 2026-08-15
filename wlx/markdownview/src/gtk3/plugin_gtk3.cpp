@@ -13,7 +13,11 @@ HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
 {
     GtkWidget *parent = GTK_WIDGET(ParentWin);
     GtkWidget *scrolledWin = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(parent), scrolledWin);
+    // GTK_CONTAINER(parent)->add() doesn't register the child the way
+    // GtkLayout expects: DC's own ResizeWindow (uwlxmodule.pas) later calls
+    // gtk_layout_move() on this widget, which asserts the widget's parent
+    // is exactly this GtkLayout -- only gtk_layout_put() sets that up.
+    gtk_layout_put(GTK_LAYOUT(parent), scrolledWin, 0, 0);
 
     GtkWidget *webView = webkit_web_view_new();
     gtk_widget_set_name(webView, "markdown_webview");
