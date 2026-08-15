@@ -6,7 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(ENABLE_QT6 "Build Qt6 plugin variant" ON)
-option(ENABLE_GTK3 "Build GTK3 plugin variant" ON)
+# OFF by default: libmdk.so is a dlopen()-at-runtime soft dependency (see
+# MdkEngine.cpp), not something this project vendors or links against, and
+# it isn't packaged by apt on the target GTK3 test environment (Ubuntu
+# 24.04) -- there's nothing to test the GTK3 variant against there. Still
+# buildable by anyone who has the vendor lib installed by passing
+# -DENABLE_GTK3=ON explicitly.
+option(ENABLE_GTK3 "Build GTK3 plugin variant" OFF)
 
 set(MDK_SDK_INCLUDE "$ENV{HOME}/mdk-sdk/include" CACHE PATH "Path to the MDK SDK include directory")
 
