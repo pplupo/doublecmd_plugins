@@ -201,7 +201,11 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     p->engine = std::make_unique<MpvEngine>();
 
     p->root = gtk_event_box_new();
-    gtk_container_add(GTK_CONTAINER(parent), p->root);
+    // gtk_container_add() doesn't register the child the way GtkLayout
+    // expects: DC's ResizeWindow later calls gtk_layout_move() on this
+    // widget, which asserts the parent is exactly this GtkLayout -- only
+    // gtk_layout_put() sets that up.
+    gtk_layout_put(GTK_LAYOUT(parent), p->root, 0, 0);
 
     p->glArea = gtk_gl_area_new();
     gtk_container_add(GTK_CONTAINER(p->root), p->glArea);
