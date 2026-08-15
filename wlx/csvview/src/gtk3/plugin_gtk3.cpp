@@ -1,12 +1,20 @@
 /*
  * CSV/TSV WLX plugin for Double Commander — GTK3 UI layer.
  *
- * Full-featured build on wlxbase_gtk: GtkFocusManager (shortcuts),
- * GtkEditableGridWidget (undo/redo, copy/paste, insert/delete rows), and
+ * Full-featured build on wlxbase_gtk: GtkFocusManager (shortcuts, undo/redo
+ * stack), GtkEditableGridWidget (copy/paste, insert/delete rows), and
  * GtkScopedFindReplacePanel (find/replace with a column-scope selector) —
- * bringing this to parity with the Qt6 build's use of the equivalent
- * wlxbase_wlqt components. CsvCore (src/core/) provides the actual CSV
- * tokenizing/serialization, same as before.
+ * brought to toolbar/feature parity with the Qt6 build's PluginToolBar
+ * (Save, Save As, Undo, Redo, Print, Reload, Header Row, Find/Replace, Show
+ * Text, Line Wrap, Open Externally) plus a row-number gutter column, which
+ * this GTK3 build was previously missing entirely. CsvCore (src/core/)
+ * provides the actual CSV tokenizing/serialization, same as before.
+ *
+ * Separator is now auto-detected from the file content (matching the Qt6
+ * build: try ',' ';' '\t' in order on the first line, keep the first that
+ * yields more than one column, else fall back on the file extension) --
+ * previously this GTK build had a manual delimiter dropdown that doesn't
+ * exist in the Qt6 toolbar at all.
  */
 
 #include <gtk/gtk.h>
@@ -17,6 +25,7 @@
 #include <regex>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 
 #include "wlxplugin.h"
 #include "CsvCore.h"
@@ -31,10 +40,25 @@ namespace {
 
 struct CsvGtkState {
     GtkWidget *root = nullptr;
+    GtkWidget *gridSlot = nullptr; // holds st->grid->widget(), swapped on reload
     std::unique_ptr<GtkFocusManager> fm;
     std::unique_ptr<GtkPluginToolBar> toolbar;
     std::unique_ptr<GtkEditableGridWidget> grid;
     std::unique_ptr<GtkScopedFindReplacePanel> findPanel;
+
+    GtkWidget *dirtyLabel = nullptr;
+    GtkWidget *undoBtn = nullptr;
+    GtkWidget *redoBtn = nullptr;
+    GtkWidget *headerToggle = nullptr;
+    GtkWidget *findToggle = nullptr;
+    GtkWidget *textToggle = nullptr;
+    GtkWidget *wrapToggle = nullptr;
+
+    // "Show Text" mode: a plain GtkTextView shown in place of the grid.
+    GtkWidget *textScroll = nullptr;
+    GtkWidget *textView = nullptr;
+    bool showingText = false;
+    bool wordWrap = false;
 
     std::string currentFile;
     char separator = ',';
@@ -70,11 +94,101 @@ std::vector<std::string> splitLines(const std::string &data)
     return lines;
 }
 
+bool endsWithNoCase(const std::string &s, const std::string &suffix)
+{
+    if (s.size() < suffix.size()) return false;
+    return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin(), [](char a, char b) {
+        return std::tolower((unsigned char)a) == std::tolower((unsigned char)b);
+    });
+}
+
+// Mirrors the Qt6 build's detection: try ',' ';' '\t' in turn on the first
+// line, keep the first that yields more than one field; fall back to the
+// file extension (.tsv -> tab, else comma) if none of them do.
+char detectSeparator(const std::string &firstLine, const std::string &path)
+{
+    static const char candidates[] = {',', ';', '\t'};
+    for (char c : candidates) {
+        auto fields = CsvCore::parseLine(firstLine, c);
+        if (fields.size() > 1) return c;
+    }
+    return endsWithNoCase(path, ".tsv") ? '\t' : ',';
+}
+
+// Renders the 1-based row index into the leading gutter column -- purely
+// cosmetic, not backed by any model column, so it doesn't touch
+// GtkEditableGridWidget at all.
+void rowNumberCellDataFunc(GtkTreeViewColumn *, GtkCellRenderer *cell,
+                            GtkTreeModel *model, GtkTreeIter *iter, gpointer)
+{
+    GtkTreePath *path = gtk_tree_model_get_path(model, iter);
+    gint *indices = gtk_tree_path_get_indices(path);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", indices[0] + 1);
+    g_object_set(cell, "text", buf, nullptr);
+    gtk_tree_path_free(path);
+}
+
+void addRowNumberColumn(GtkWidget *treeView)
+{
+    GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+    g_object_set(renderer, "xalign", 1.0, "foreground", "#888888", nullptr);
+    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes("#", renderer, nullptr);
+    gtk_tree_view_column_set_cell_data_func(col, renderer, rowNumberCellDataFunc, nullptr, nullptr);
+    gtk_tree_view_column_set_resizable(col, FALSE);
+    gtk_tree_view_column_set_min_width(col, 32);
+    gtk_tree_view_insert_column(GTK_TREE_VIEW(treeView), col, 0);
+}
+
+void refreshUndoRedoSensitivity(CsvGtkState *st)
+{
+    if (st->undoBtn) gtk_widget_set_sensitive(st->undoBtn, st->fm->canUndo());
+    if (st->redoBtn) gtk_widget_set_sensitive(st->redoBtn, st->fm->canRedo());
+}
+
+void updateDirtyLabel(CsvGtkState *st, bool dirty)
+{
+    if (st->dirtyLabel) gtk_label_set_text(GTK_LABEL(st->dirtyLabel), dirty ? "●" : "✓");
+    refreshUndoRedoSensitivity(st);
+}
+
+std::string joinRowPlain(const std::vector<std::string> &row, char sep)
+{
+    std::string out;
+    for (size_t c = 0; c < row.size(); ++c) {
+        if (c) out += sep;
+        out += row[c];
+    }
+    return out;
+}
+
+void updateTextView(CsvGtkState *st)
+{
+    if (!st->textView || !st->grid) return;
+    std::string plain;
+    if (st->firstLineAsHeader) {
+        std::vector<std::string> titles;
+        for (int c = 0; c < st->grid->columnCount(); ++c) {
+            GtkTreeViewColumn *col = gtk_tree_view_get_column(GTK_TREE_VIEW(st->grid->treeView()), c + 1); // +1: row-number gutter
+            const char *title = col ? gtk_tree_view_column_get_title(col) : "";
+            titles.push_back(title ? title : "");
+        }
+        plain += joinRowPlain(titles, st->separator) + "\n";
+    }
+    for (const auto &row : st->grid->rowData())
+        plain += joinRowPlain(row, st->separator) + "\n";
+
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(st->textView));
+    gtk_text_buffer_set_text(buf, plain.c_str(), -1);
+}
+
 void loadFile(CsvGtkState *st, const std::string &path)
 {
     st->currentFile = path;
     std::string data = readFile(path);
     std::vector<std::string> lines = splitLines(data);
+
+    st->separator = detectSeparator(lines.empty() ? std::string() : lines[0], path);
 
     std::vector<std::vector<CsvCore::Field>> rows;
     int colCount = 1;
@@ -87,7 +201,8 @@ void loadFile(CsvGtkState *st, const std::string &path)
     // Rebuild the grid widget with the right column count.
     GtkWidget *oldGridWidget = st->grid ? st->grid->widget() : nullptr;
     st->grid = std::make_unique<GtkEditableGridWidget>(colCount, st->fm.get());
-    st->grid->setDirtyChangedCallback([](bool) {});
+    st->grid->setDirtyChangedCallback([st](bool dirty) { updateDirtyLabel(st, dirty); });
+    addRowNumberColumn(st->grid->treeView());
 
     std::vector<std::vector<std::string>> tableRows;
     size_t startRow = st->firstLineAsHeader ? 1 : 0;
@@ -113,15 +228,19 @@ void loadFile(CsvGtkState *st, const std::string &path)
         gtk_container_remove(GTK_CONTAINER(parent), oldGridWidget);
         gtk_box_pack_start(GTK_BOX(parent), st->grid->widget(), TRUE, TRUE, 0);
         gtk_widget_show_all(st->grid->widget());
-        gtk_box_reorder_child(GTK_BOX(parent), st->grid->widget(), 1); // after toolbar
+        if (st->showingText) gtk_widget_hide(st->grid->widget());
     }
+
+    st->fm->clearUndoStack();
+    updateDirtyLabel(st, false);
+    if (st->showingText) updateTextView(st);
 }
 
-void saveFile(CsvGtkState *st)
+void saveFile(CsvGtkState *st, const std::string &path, char separator)
 {
-    if (st->currentFile.empty() || !st->grid) return;
+    if (path.empty() || !st->grid) return;
 
-    std::ofstream out(st->currentFile, std::ios::binary | std::ios::trunc);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) return;
 
     int colCount = st->grid->columnCount();
@@ -129,22 +248,208 @@ void saveFile(CsvGtkState *st)
     if (st->firstLineAsHeader) {
         std::vector<std::string> escaped;
         for (int c = 0; c < colCount; ++c) {
-            GtkTreeViewColumn *col = gtk_tree_view_get_column(GTK_TREE_VIEW(st->grid->treeView()), c);
+            GtkTreeViewColumn *col = gtk_tree_view_get_column(GTK_TREE_VIEW(st->grid->treeView()), c + 1);
             const char *title = col ? gtk_tree_view_column_get_title(col) : "";
-            escaped.push_back(CsvCore::escapeField(title ? title : "", st->separator,
+            escaped.push_back(CsvCore::escapeField(title ? title : "", separator,
                                                     c < (int)st->columnWasQuoted.size() && st->columnWasQuoted[c]));
         }
-        out << CsvCore::joinRow(escaped, st->separator) << "\n";
+        out << CsvCore::joinRow(escaped, separator) << "\n";
     }
 
     for (const auto &row : st->grid->rowData()) {
         std::vector<std::string> escaped;
         for (int c = 0; c < colCount; ++c) {
-            escaped.push_back(CsvCore::escapeField(c < (int)row.size() ? row[c] : "", st->separator,
+            escaped.push_back(CsvCore::escapeField(c < (int)row.size() ? row[c] : "", separator,
                                                     c < (int)st->columnWasQuoted.size() && st->columnWasQuoted[c]));
         }
-        out << CsvCore::joinRow(escaped, st->separator) << "\n";
+        out << CsvCore::joinRow(escaped, separator) << "\n";
     }
+}
+
+void onSaveClicked(CsvGtkState *st)
+{
+    saveFile(st, st->currentFile, st->separator);
+    updateDirtyLabel(st, false);
+}
+
+void onSaveAsClicked(CsvGtkState *st)
+{
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    GtkWidget *dlg = gtk_file_chooser_dialog_new("Save As",
+        GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+        GTK_FILE_CHOOSER_ACTION_SAVE,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, nullptr);
+    gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
+    if (!st->currentFile.empty())
+        gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(dlg), st->currentFile.c_str());
+
+    GtkFileFilter *csvFilter = gtk_file_filter_new();
+    gtk_file_filter_set_name(csvFilter, "CSV - Comma Separated (*.csv)");
+    gtk_file_filter_add_pattern(csvFilter, "*.csv");
+    GtkFileFilter *tsvFilter = gtk_file_filter_new();
+    gtk_file_filter_set_name(tsvFilter, "TSV - Tab Separated (*.tsv)");
+    gtk_file_filter_add_pattern(tsvFilter, "*.tsv");
+    if (st->separator == '\t') {
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), tsvFilter);
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), csvFilter);
+    } else {
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), csvFilter);
+        gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), tsvFilter);
+    }
+
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        GtkFileFilter *chosen = gtk_file_chooser_get_filter(GTK_FILE_CHOOSER(dlg));
+        char sep = (chosen == tsvFilter) ? '\t' : ',';
+        saveFile(st, filename, sep);
+        st->currentFile = filename;
+        st->separator = sep;
+        updateDirtyLabel(st, false);
+        if (st->showingText) updateTextView(st);
+        g_free(filename);
+    }
+    gtk_widget_destroy(dlg);
+}
+
+void showSeparatorMismatchDialog(CsvGtkState *st)
+{
+    bool isCsvExt = endsWithNoCase(st->currentFile, ".csv");
+    bool isTsvExt = endsWithNoCase(st->currentFile, ".tsv");
+    if (!((isCsvExt && st->separator == '\t') || (isTsvExt && st->separator == ','))) return;
+
+    const char *msg = isCsvExt
+        ? "This .csv file appears to use tab separators instead of commas."
+        : "This .tsv file appears to use comma separators instead of tabs.";
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    GtkWidget *dlg = gtk_message_dialog_new(GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+        GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE, "%s", msg);
+    gtk_window_set_title(GTK_WINDOW(dlg), "Separator Mismatch");
+    gtk_dialog_add_button(GTK_DIALOG(dlg), "Ignore", GTK_RESPONSE_CANCEL);
+    gtk_dialog_add_button(GTK_DIALOG(dlg), "Fix Separator", 1);
+    gtk_dialog_add_button(GTK_DIALOG(dlg), "Rename Extension", 2);
+    int response = gtk_dialog_run(GTK_DIALOG(dlg));
+    gtk_widget_destroy(dlg);
+
+    if (response == 1) {
+        // Rewrite the raw bytes on disk, swapping the separator outside quotes.
+        char oldSep = st->separator;
+        char newSep = isCsvExt ? ',' : '\t';
+        std::string raw = readFile(st->currentFile);
+        bool inQuote = false;
+        for (char &ch : raw) {
+            if (ch == '"') inQuote = !inQuote;
+            else if (!inQuote && ch == oldSep) ch = newSep;
+        }
+        std::ofstream out(st->currentFile, std::ios::binary | std::ios::trunc);
+        out << raw;
+        out.close();
+        loadFile(st, st->currentFile);
+    } else if (response == 2) {
+        std::string newPath = st->currentFile.substr(0, st->currentFile.find_last_of('.')) +
+                               (isCsvExt ? ".tsv" : ".csv");
+        if (std::rename(st->currentFile.c_str(), newPath.c_str()) == 0)
+            loadFile(st, newPath);
+    }
+}
+
+// --- Print (monospace, tab-joined rows paginated by line count) ---
+
+struct PrintCtx {
+    std::vector<std::string> lines;
+    int linesPerPage = 1;
+};
+
+void onPrintBeginPrint(GtkPrintOperation *op, GtkPrintContext *ctx, gpointer data)
+{
+    auto *pc = static_cast<PrintCtx *>(data);
+    double pageHeight = gtk_print_context_get_height(ctx);
+    PangoLayout *layout = gtk_print_context_create_pango_layout(ctx);
+    pango_layout_set_font_description(layout, pango_font_description_from_string("Monospace 9"));
+    pango_layout_set_text(layout, "Ag", -1);
+    int lineHeightPx;
+    pango_layout_get_pixel_size(layout, nullptr, &lineHeightPx);
+    g_object_unref(layout);
+    pc->linesPerPage = std::max(1, (int)(pageHeight / std::max(1, lineHeightPx)));
+    int pages = ((int)pc->lines.size() + pc->linesPerPage - 1) / pc->linesPerPage;
+    gtk_print_operation_set_n_pages(op, std::max(1, pages));
+}
+
+void onPrintDrawPage(GtkPrintOperation *, GtkPrintContext *ctx, gint pageNr, gpointer data)
+{
+    auto *pc = static_cast<PrintCtx *>(data);
+    cairo_t *cr = gtk_print_context_get_cairo_context(ctx);
+    PangoLayout *layout = gtk_print_context_create_pango_layout(ctx);
+    pango_layout_set_font_description(layout, pango_font_description_from_string("Monospace 9"));
+
+    int start = pageNr * pc->linesPerPage;
+    int end = std::min((int)pc->lines.size(), start + pc->linesPerPage);
+    double y = 0;
+    for (int i = start; i < end; ++i) {
+        pango_layout_set_text(layout, pc->lines[i].c_str(), -1);
+        cairo_move_to(cr, 0, y);
+        pango_cairo_show_layout(cr, layout);
+        int h;
+        pango_layout_get_pixel_size(layout, nullptr, &h);
+        y += h;
+    }
+    g_object_unref(layout);
+}
+
+void onPrintClicked(CsvGtkState *st)
+{
+    if (!st->grid) return;
+    auto pc = std::make_unique<PrintCtx>();
+    if (st->firstLineAsHeader) {
+        std::vector<std::string> titles;
+        for (int c = 0; c < st->grid->columnCount(); ++c) {
+            GtkTreeViewColumn *col = gtk_tree_view_get_column(GTK_TREE_VIEW(st->grid->treeView()), c + 1);
+            const char *title = col ? gtk_tree_view_column_get_title(col) : "";
+            titles.push_back(title ? title : "");
+        }
+        pc->lines.push_back(joinRowPlain(titles, '\t'));
+    }
+    for (const auto &row : st->grid->rowData())
+        pc->lines.push_back(joinRowPlain(row, '\t'));
+
+    GtkPrintOperation *op = gtk_print_operation_new();
+    g_signal_connect(op, "begin-print", G_CALLBACK(onPrintBeginPrint), pc.get());
+    g_signal_connect(op, "draw-page", G_CALLBACK(onPrintDrawPage), pc.get());
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    gtk_print_operation_run(op, GTK_PRINT_OPERATION_ACTION_PRINT_DIALOG,
+        GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr, nullptr);
+    g_object_unref(op);
+}
+
+void onOpenExternallyClicked(CsvGtkState *st)
+{
+    if (st->currentFile.empty()) return;
+    GError *error = nullptr;
+    std::string uri = "file://" + st->currentFile;
+    if (!g_app_info_launch_default_for_uri(uri.c_str(), nullptr, &error)) {
+        if (error) g_error_free(error);
+    }
+}
+
+void onToggleShowText(CsvGtkState *st, bool active)
+{
+    st->showingText = active;
+    if (!st->grid) return;
+    if (active) {
+        updateTextView(st);
+        gtk_widget_hide(st->grid->widget());
+        gtk_widget_show(st->textScroll);
+        if (st->findPanel->isPanelVisible()) st->findPanel->showPanel(false);
+    } else {
+        gtk_widget_hide(st->textScroll);
+        gtk_widget_show(st->grid->widget());
+    }
+}
+
+void onToggleWordWrap(CsvGtkState *st, bool active)
+{
+    st->wordWrap = active;
+    if (st->textView)
+        gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(st->textView), active ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
 }
 
 // --- Find/Replace matching, honoring the scope combo (All Cells / Current Column) ---
@@ -266,40 +571,61 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     st->fm = std::make_unique<GtkFocusManager>(st->root, placeholder);
 
     st->toolbar = std::make_unique<GtkPluginToolBar>(st->fm.get());
-    GtkWidget *sepCombo = gtk_combo_box_text_new();
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(sepCombo), ",", "Comma (,)");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(sepCombo), "t", "Tab");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(sepCombo), ";", "Semicolon (;)");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(sepCombo), "|", "Pipe (|)");
-    gtk_combo_box_set_active_id(GTK_COMBO_BOX(sepCombo), ",");
-    gtk_widget_set_can_focus(sepCombo, FALSE);
-    g_signal_connect(sepCombo, "changed", G_CALLBACK(+[](GtkComboBox *combo, gpointer data) {
-        auto *st = static_cast<CsvGtkState *>(data);
-        const char *active = gtk_combo_box_get_active_id(combo);
-        if (!active) return;
-        st->separator = active[0] == 't' ? '\t' : active[0] == ';' ? ';' : active[0] == '|' ? '|' : ',';
-        if (!st->currentFile.empty()) loadFile(st, st->currentFile);
-    }), st);
-    gtk_box_pack_start(GTK_BOX(st->toolbar->widget()), sepCombo, FALSE, FALSE, 0);
-    gtk_widget_show(sepCombo);
 
-    st->toolbar->addToggleAction("First line is header", "", true, [st](bool active) {
+    st->dirtyLabel = gtk_label_new("✓");
+    gtk_widget_set_margin_start(st->dirtyLabel, 4);
+    gtk_widget_set_margin_end(st->dirtyLabel, 4);
+    gtk_box_pack_start(GTK_BOX(st->toolbar->widget()), st->dirtyLabel, FALSE, FALSE, 0);
+
+    st->toolbar->addToolAction("Save", "document-save-symbolic", [st]() { onSaveClicked(st); });
+    st->toolbar->addToolAction("Save As...", "document-save-as-symbolic", [st]() { onSaveAsClicked(st); });
+    st->undoBtn = st->toolbar->addToolAction("Undo", "edit-undo-symbolic", [st]() {
+        st->fm->undo();
+        refreshUndoRedoSensitivity(st);
+    });
+    st->redoBtn = st->toolbar->addToolAction("Redo", "edit-redo-symbolic", [st]() {
+        st->fm->redo();
+        refreshUndoRedoSensitivity(st);
+    });
+    st->toolbar->addToolAction("Print", "document-print-symbolic", [st]() { onPrintClicked(st); });
+    st->toolbar->addToolAction("Reload", "view-refresh-symbolic", [st]() {
+        if (!st->currentFile.empty()) loadFile(st, st->currentFile);
+    });
+    st->headerToggle = st->toolbar->addToggleAction("Header Row", "view-list-symbolic", true, [st](bool active) {
         st->firstLineAsHeader = active;
         if (!st->currentFile.empty()) loadFile(st, st->currentFile);
     });
-    st->toolbar->addToolAction("Save (Ctrl+S)", "document-save-symbolic", [st]() { saveFile(st); });
-    st->toolbar->addToolAction("Find/Replace (Ctrl+F)", "edit-find-symbolic", [st]() {
-        st->findPanel->showPanel(!st->findPanel->isPanelVisible());
+    st->findToggle = st->toolbar->addToggleAction("Find/Replace", "edit-find-replace-symbolic", false, [st](bool active) {
+        st->findPanel->showPanel(active);
     });
+    st->textToggle = st->toolbar->addToggleAction("Show Text", "view-reveal-symbolic", false, [st](bool active) {
+        onToggleShowText(st, active);
+    });
+    st->wrapToggle = st->toolbar->addToggleAction("Line Wrap", "format-text-wrap-symbolic", false, [st](bool active) {
+        onToggleWordWrap(st, active);
+    });
+    st->toolbar->addToolAction("Open Externally", "document-open-symbolic", [st]() { onOpenExternallyClicked(st); });
     gtk_box_pack_start(GTK_BOX(st->root), st->toolbar->widget(), FALSE, FALSE, 0);
 
     // Real grid gets built by loadFile() below (needs the file's actual
-    // column count); pack a temporary empty box as its future slot.
-    GtkWidget *gridSlot = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_vexpand(gridSlot, TRUE);
-    gtk_box_pack_start(GTK_BOX(st->root), gridSlot, TRUE, TRUE, 0);
+    // column count); pack a temporary empty box as its future slot, plus
+    // the (initially hidden) plain-text view used by "Show Text".
+    st->gridSlot = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_vexpand(st->gridSlot, TRUE);
+    gtk_box_pack_start(GTK_BOX(st->root), st->gridSlot, TRUE, TRUE, 0);
     st->grid = std::make_unique<GtkEditableGridWidget>(1, st->fm.get());
-    gtk_box_pack_start(GTK_BOX(gridSlot), st->grid->widget(), TRUE, TRUE, 0);
+    addRowNumberColumn(st->grid->treeView());
+    gtk_box_pack_start(GTK_BOX(st->gridSlot), st->grid->widget(), TRUE, TRUE, 0);
+
+    st->textView = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(st->textView), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(st->textView), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(st->textView), GTK_WRAP_NONE);
+    st->textScroll = gtk_scrolled_window_new(nullptr, nullptr);
+    gtk_container_add(GTK_CONTAINER(st->textScroll), st->textView);
+    gtk_widget_set_vexpand(st->textScroll, TRUE);
+    gtk_box_pack_start(GTK_BOX(st->gridSlot), st->textScroll, TRUE, TRUE, 0);
+    gtk_widget_set_no_show_all(st->textScroll, TRUE); // stays hidden until "Show Text" is toggled
 
     st->findPanel = std::make_unique<GtkScopedFindReplacePanel>(st->fm.get());
     st->findPanel->setScopes({"All Cells", "Current Column"});
@@ -310,19 +636,27 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
 
     st->fm->enableUndoShortcuts();
     st->fm->registerShortcut(GDK_KEY_f, GDK_CONTROL_MASK, GtkFocusManager::Always, [st]() {
-        st->findPanel->showPanel(!st->findPanel->isPanelVisible());
+        bool nowVisible = !st->findPanel->isPanelVisible();
+        // Toggling the button (rather than calling showPanel() directly)
+        // keeps its pressed-state in sync with the panel's actual
+        // visibility, since addToggleAction's callback is what calls
+        // showPanel().
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->findToggle), nowVisible);
         return true;
     });
     st->fm->registerShortcut(GDK_KEY_s, GDK_CONTROL_MASK, GtkFocusManager::Always, [st]() {
-        saveFile(st);
+        onSaveClicked(st);
         return true;
     });
 
     g_object_set_data_full(G_OBJECT(st->root), "csv-state", st, destroyState);
 
     gtk_widget_show_all(st->root);
+    gtk_widget_hide(st->textScroll);
     st->findPanel->showPanel(false); // hidden until Ctrl+F / toolbar toggle
     loadFile(st, std::string(FileToLoad));
+    refreshUndoRedoSensitivity(st);
+    showSeparatorMismatchDialog(st);
 
     return reinterpret_cast<HWND>(st->root);
 }
