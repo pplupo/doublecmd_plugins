@@ -505,7 +505,11 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     g_signal_connect(st->drawingArea, "motion-notify-event", G_CALLBACK(onMotion), st);
     g_signal_connect(st->drawingArea, "button-press-event", G_CALLBACK(onButtonPressForMenu), st);
 
-    gtk_container_add(GTK_CONTAINER(parent), st->root);
+    // gtk_container_add() doesn't register the child the way GtkLayout
+    // expects: DC's ResizeWindow later calls gtk_layout_move() on this
+    // widget, which asserts the parent is exactly this GtkLayout -- only
+    // gtk_layout_put() sets that up.
+    gtk_layout_put(GTK_LAYOUT(parent), st->root, 0, 0);
     g_object_set_data_full(G_OBJECT(st->root), "diagram-state", st, destroyState);
 
     gtk_widget_show_all(st->root);
