@@ -2,7 +2,11 @@
 // (KTextEditor-based rich code viewer), here built on GtkSourceView 4.
 
 #include <gtk/gtk.h>
+#include <gtksourceview/gtksource.h>
 #include <memory>
+#include <set>
+#include <string>
+#include <cstring>
 
 #include "wlxplugin.h"
 #include "EditorWidget.h"
@@ -12,6 +16,44 @@ namespace {
 void destroyState(gpointer data)
 {
     delete static_cast<EditorWidget *>(data);
+}
+
+// Mirrors kate_qt6's ListGetDetectString(), which enumerates
+// KTextEditor's actual registered MIME types/globs rather than hardcode
+// a list -- same idea here via GtkSourceLanguageManager's registered
+// languages, each with a set of glob patterns like "*.py". Extracts the
+// extension the same way kate_qt6 does: strip the "*." prefix, and if
+// the remainder still has a further "." (e.g. "*.tar.gz"), keep only
+// the part after the last one.
+std::set<std::string> collectRegisteredExtensions()
+{
+    static bool inited = false;
+    if (!inited) { gtk_source_init(); inited = true; }
+
+    std::set<std::string> exts;
+    GtkSourceLanguageManager *mgr = gtk_source_language_manager_get_default();
+    const gchar * const *ids = gtk_source_language_manager_get_language_ids(mgr);
+    if (!ids) return exts;
+
+    for (int i = 0; ids[i]; ++i) {
+        GtkSourceLanguage *lang = gtk_source_language_manager_get_language(mgr, ids[i]);
+        if (!lang) continue;
+        gchar **globs = gtk_source_language_get_globs(lang);
+        if (!globs) continue;
+        for (int j = 0; globs[j]; ++j) {
+            const char *glob = globs[j];
+            if (strncmp(glob, "*.", 2) != 0) continue;
+            std::string ext = glob + 2;
+            size_t lastDot = ext.find_last_of('.');
+            if (lastDot != std::string::npos) ext = ext.substr(lastDot + 1);
+            if (ext.empty() || ext.find('*') != std::string::npos || ext.find('[') != std::string::npos)
+                continue; // skip remaining wildcard patterns (e.g. "*.[ch]")
+            for (auto &c : ext) c = (char)toupper((unsigned char)c);
+            exts.insert(ext);
+        }
+        g_strfreev(globs);
+    }
+    return exts;
 }
 
 } // namespace
@@ -69,17 +111,26 @@ int DCPCALL ListSearchText(HWND, char *, int)
 
 void DCPCALL ListGetDetectString(char *DetectString, int maxlen)
 {
-    // Broad static fallback covering the same "common code/text file"
-    // territory as kate_qt6's own fallback list. A follow-up could
-    // enumerate GtkSourceLanguageManager's actual registered globs
-    // instead, matching how kate_qt6 enumerates KTextEditor's MIME
-    // types -- not done in this first pass.
-    snprintf(DetectString, maxlen - 1,
-        "EXT=\"TXT\" | EXT=\"PAS\" | EXT=\"C\" | EXT=\"CPP\" | EXT=\"H\" | EXT=\"HPP\" | "
-        "EXT=\"PY\" | EXT=\"JS\" | EXT=\"TS\" | EXT=\"HTML\" | EXT=\"CSS\" | EXT=\"JSON\" | "
-        "EXT=\"XML\" | EXT=\"YAML\" | EXT=\"YML\" | EXT=\"TOML\" | EXT=\"INI\" | EXT=\"MD\" | "
-        "EXT=\"SH\" | EXT=\"RS\" | EXT=\"GO\" | EXT=\"JAVA\" | EXT=\"RB\" | EXT=\"PHP\" | "
-        "EXT=\"SQL\" | EXT=\"LOG\" | EXT=\"CONF\" | EXT=\"CFG\"");
+    std::set<std::string> exts = collectRegisteredExtensions();
+    if (exts.empty()) {
+        // GtkSourceLanguageManager returned nothing registered (should
+        // not happen given the vendored/statically-linked language
+        // specs, but fail safe rather than produce an empty detect
+        // string that matches no files at all).
+        snprintf(DetectString, maxlen - 1,
+            "EXT=\"TXT\" | EXT=\"C\" | EXT=\"CPP\" | EXT=\"H\" | EXT=\"PY\" | EXT=\"JS\" | "
+            "EXT=\"HTML\" | EXT=\"CSS\" | EXT=\"JSON\" | EXT=\"XML\" | EXT=\"MD\" | EXT=\"SH\"");
+        return;
+    }
+
+    std::string result;
+    for (const auto &ext : exts) {
+        std::string addition = "EXT=\"" + ext + "\"";
+        if (!result.empty()) addition = " | " + addition;
+        if ((int)(result.size() + addition.size()) >= maxlen - 1) break;
+        result += addition;
+    }
+    snprintf(DetectString, maxlen - 1, "%s", result.c_str());
 }
 
 void DCPCALL ListSetDefaultParams(ListDefaultParamStruct *)
