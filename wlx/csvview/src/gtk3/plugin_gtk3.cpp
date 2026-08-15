@@ -253,7 +253,11 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     auto *st = new CsvGtkState();
 
     st->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_container_add(GTK_CONTAINER(parent), st->root);
+    // gtk_container_add() doesn't register the child the way GtkLayout
+    // expects: DC's ResizeWindow later calls gtk_layout_move() on this
+    // widget, which asserts the parent is exactly this GtkLayout -- only
+    // gtk_layout_put() sets that up.
+    gtk_layout_put(GTK_LAYOUT(parent), st->root, 0, 0);
 
     // Placeholder tree view just so FocusManager has a primaryView to
     // construct with — replaced immediately once loadFile() builds the
