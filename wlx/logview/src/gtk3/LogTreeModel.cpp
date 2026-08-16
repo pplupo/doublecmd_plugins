@@ -15,6 +15,7 @@ static void log_tree_model_init(LogTreeModel *self)
     self->engine = nullptr;
     self->filter = nullptr;
     self->stamp = g_random_int();
+    self->lastNotifiedCount = 0;
 }
 
 static void log_tree_model_class_init(LogTreeModelClass *)
@@ -45,26 +46,41 @@ static int modelRowCount(LogTreeModel *model)
     return model->engine ? model->engine->lineCount() : 0;
 }
 
+// Full structural reset (row count and/or row identities may have
+// changed arbitrarily -- a filter swap or a reload), signaled the way
+// GtkTreeView actually requires: a real "row-deleted" notification (with
+// a real indexed path, not the empty gtk_tree_path_new() this used to
+// pass -- that's not a valid "this row was deleted" path and corrupts
+// the view's own internal row-count bookkeeping, which is what was
+// actually crashing deep inside libgtk-3/libgobject on the *next*
+// structural change, once that bookkeeping was already wrong) for every
+// row the view currently believes exists, followed by "row-inserted" for
+// every row that exists now. Deleting from the end backwards means each
+// row-deleted path is still valid at the moment it's emitted (deleting
+// row N-1 first doesn't invalidate the index of row N-2, etc.).
+static void resetModel(LogTreeModel *model)
+{
+    model->stamp++;
+    for (int r = model->lastNotifiedCount - 1; r >= 0; --r) {
+        GtkTreePath *path = gtk_tree_path_new_from_indices(r, -1);
+        gtk_tree_model_row_deleted(GTK_TREE_MODEL(model), path);
+        gtk_tree_path_free(path);
+    }
+    int newCount = modelRowCount(model);
+    if (newCount > 0)
+        log_tree_model_rows_inserted(model, 0, newCount - 1);
+    model->lastNotifiedCount = newCount;
+}
+
 void log_tree_model_set_filter(LogTreeModel *model, std::vector<int> *filter)
 {
     model->filter = filter;
-    model->stamp++;
-    GtkTreePath *path = gtk_tree_path_new();
-    gtk_tree_model_row_deleted(GTK_TREE_MODEL(model), path); // not fully correct per-row, but forces a full redraw
-    gtk_tree_path_free(path);
-    log_tree_model_rows_changed(model);
+    resetModel(model);
 }
 
 void log_tree_model_rows_changed(LogTreeModel *model)
 {
-    // Simplest correct approach for a full reset: emit nothing here and
-    // let the caller use gtk_tree_view_set_model() again, OR emit
-    // row-inserted for the whole new range. We take the latter: signal a
-    // full-range "rows-inserted" so views pick up the new size. Callers
-    // that truly reset from scratch should prefer rebuilding the model.
-    int count = modelRowCount(model);
-    if (count > 0)
-        log_tree_model_rows_inserted(model, 0, count - 1);
+    resetModel(model);
 }
 
 void log_tree_model_rows_inserted(LogTreeModel *model, int firstRow, int lastRow)
@@ -77,6 +93,13 @@ void log_tree_model_rows_inserted(LogTreeModel *model, int firstRow, int lastRow
         gtk_tree_model_row_inserted(GTK_TREE_MODEL(model), path, &iter);
         gtk_tree_path_free(path);
     }
+    // Centralized here (rather than in each caller) so resetModel()'s
+    // row-deleted count -- how many rows the view currently believes
+    // exist -- never drifts out of sync, regardless of whether a caller
+    // reaches this via resetModel() or the direct tail-follow append in
+    // LogViewerWidget_gtk3.cpp.
+    if (lastRow + 1 > model->lastNotifiedCount)
+        model->lastNotifiedCount = lastRow + 1;
 }
 
 // ── GtkTreeModel vtable ─────────────────────────────────────────────
