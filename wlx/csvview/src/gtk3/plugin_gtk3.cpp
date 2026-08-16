@@ -26,6 +26,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <functional>
+#include <utility>
 
 #include "wlxplugin.h"
 #include "CsvCore.h"
@@ -182,6 +184,8 @@ void updateTextView(CsvGtkState *st)
     gtk_text_buffer_set_text(buf, plain.c_str(), -1);
 }
 
+void attachContextMenus(CsvGtkState *st); // defined below loadFile(); wires row/column right-click menus
+
 void loadFile(CsvGtkState *st, const std::string &path)
 {
     st->currentFile = path;
@@ -234,6 +238,207 @@ void loadFile(CsvGtkState *st, const std::string &path)
     st->fm->clearUndoStack();
     updateDirtyLabel(st, false);
     if (st->showingText) updateTextView(st);
+    attachContextMenus(st);
+}
+
+// --- Row/column context menus ---------------------------------------
+//
+// GtkEditableGridWidget (shared with dbview/structview) exposes row
+// insert/delete but has a fixed column count set at construction --
+// there's no "insert/delete column" API on it, unlike its Qt6 sibling
+// EditableGridWidget. Rather than extend the shared widget (a
+// cross-cutting change affecting every consumer, out of scope for a
+// csvview-only feature-parity pass), column operations here just rebuild
+// the grid in place from the current in-memory row data with the column
+// list mutated -- the same rebuild shape loadFile() already does when
+// the column count changes on reload, just driven from the live grid's
+// own data instead of re-parsing the file.
+
+std::vector<std::string> currentColumnTitles(CsvGtkState *st)
+{
+    std::vector<std::string> titles;
+    for (int c = 0; c < st->grid->columnCount(); ++c) {
+        GtkTreeViewColumn *col = gtk_tree_view_get_column(GTK_TREE_VIEW(st->grid->treeView()), c + 1);
+        const char *title = col ? gtk_tree_view_column_get_title(col) : "";
+        titles.push_back(title ? title : "");
+    }
+    return titles;
+}
+
+// Rebuilds st->grid with `newTitles.size()` columns, mapping each new
+// row via `transformRow` (which receives the *old* row and must return
+// a row sized to newTitles.size()).
+void rebuildGridColumns(CsvGtkState *st, const std::vector<std::string> &newTitles,
+                         const std::function<std::vector<std::string>(const std::vector<std::string> &)> &transformRow)
+{
+    auto oldRows = st->grid->rowData();
+    std::vector<std::vector<std::string>> newRows;
+    newRows.reserve(oldRows.size());
+    for (auto &row : oldRows)
+        newRows.push_back(transformRow(row));
+
+    int newColCount = (int)newTitles.size();
+    GtkWidget *oldGridWidget = st->grid->widget();
+    st->grid = std::make_unique<GtkEditableGridWidget>(newColCount, st->fm.get());
+    st->grid->setDirtyChangedCallback([st](bool dirty) { updateDirtyLabel(st, dirty); });
+    addRowNumberColumn(st->grid->treeView());
+    for (int c = 0; c < newColCount; ++c)
+        st->grid->setColumnTitle(c, newTitles[c]);
+    st->grid->setRowData(newRows);
+    st->grid->setDirty(true);
+
+    GtkWidget *parent = gtk_widget_get_parent(oldGridWidget);
+    gtk_container_remove(GTK_CONTAINER(parent), oldGridWidget);
+    gtk_box_pack_start(GTK_BOX(parent), st->grid->widget(), TRUE, TRUE, 0);
+    gtk_widget_show_all(st->grid->widget());
+    if (st->showingText) { gtk_widget_hide(st->grid->widget()); updateTextView(st); }
+
+    updateDirtyLabel(st, true);
+    attachContextMenus(st);
+}
+
+void deleteColumn(CsvGtkState *st, int col)
+{
+    auto titles = currentColumnTitles(st);
+    if (col < 0 || col >= (int)titles.size() || titles.size() <= 1) return;
+    titles.erase(titles.begin() + col);
+    rebuildGridColumns(st, titles, [col](const std::vector<std::string> &row) {
+        std::vector<std::string> out = row;
+        if (col < (int)out.size()) out.erase(out.begin() + col);
+        return out;
+    });
+}
+
+void insertColumn(CsvGtkState *st, int atCol)
+{
+    auto titles = currentColumnTitles(st);
+    atCol = std::max(0, std::min(atCol, (int)titles.size()));
+    titles.insert(titles.begin() + atCol, "Column " + std::to_string(atCol + 1));
+    rebuildGridColumns(st, titles, [atCol](const std::vector<std::string> &row) {
+        std::vector<std::string> out = row;
+        out.insert(out.begin() + std::min(atCol, (int)out.size()), "");
+        return out;
+    });
+}
+
+void copyToClipboard(const std::string &text)
+{
+    GtkClipboard *cb = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+    gtk_clipboard_set_text(cb, text.c_str(), (gint)text.size());
+}
+
+void showRowContextMenu(CsvGtkState *st, GdkEventButton *event)
+{
+    GtkTreePath *path = nullptr;
+    gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(st->grid->treeView()),
+        (gint)event->x, (gint)event->y, &path, nullptr, nullptr, nullptr);
+    int clickedRow = path ? gtk_tree_path_get_indices(path)[0] : -1;
+    if (path) gtk_tree_path_free(path);
+
+    auto data = st->grid->rowData();
+    int minRow = clickedRow, maxRow = clickedRow, numRows = clickedRow >= 0 ? 1 : 0;
+    // GtkEditableGridWidget doesn't expose the current selection range
+    // directly; fall back to "the clicked row" as the operating range,
+    // matching a right-click-without-multi-select interaction (the Qt6
+    // build's richer "N rows" wording when multiple rows are selected
+    // isn't reproduced here -- disclosed, not a functional gap for the
+    // single-row case, which is the common one).
+
+    GtkWidget *menu = gtk_menu_new();
+    auto addItem = [&](const std::string &label, std::function<void()> action) -> GtkWidget * {
+        GtkWidget *item = gtk_menu_item_new_with_label(label.c_str());
+        auto *cb = new std::function<void()>(std::move(action));
+        g_signal_connect_data(item, "activate", G_CALLBACK(+[](GtkMenuItem *, gpointer d) {
+            (*static_cast<std::function<void()> *>(d))();
+        }), cb, +[](gpointer d, GClosure *) { delete static_cast<std::function<void()> *>(d); }, (GConnectFlags)0);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+        return item;
+    };
+    auto addSeparator = [&]() { gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new()); };
+
+    if (clickedRow >= 0 && clickedRow < (int)data.size()) {
+        addItem("Copy Row", [st, clickedRow]() {
+            copyToClipboard(joinRowPlain(st->grid->rowData()[clickedRow], '\t'));
+        });
+        addSeparator();
+    }
+    addItem("Copy Selection as TSV", [st]() { st->grid->copySelection('\t'); });
+    addItem("Copy Selection as CSV", [st]() { st->grid->copySelection(','); });
+    addSeparator();
+    if (numRows > 0) {
+        addItem(numRows == 1 ? "Delete Row" : "Delete Rows", [st]() { st->grid->deleteSelectedRows(); });
+        addSeparator();
+        addItem("Insert Row Above", [st, minRow]() { st->grid->insertRows(1, minRow); });
+        addItem("Insert Row Below", [st, maxRow]() { st->grid->insertRows(1, maxRow + 1); });
+    }
+
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+}
+
+void showColumnContextMenu(CsvGtkState *st, int col, GdkEventButton *event)
+{
+    GtkWidget *menu = gtk_menu_new();
+    auto addItem = [&](const std::string &label, std::function<void()> action) -> GtkWidget * {
+        GtkWidget *item = gtk_menu_item_new_with_label(label.c_str());
+        auto *cb = new std::function<void()>(std::move(action));
+        g_signal_connect_data(item, "activate", G_CALLBACK(+[](GtkMenuItem *, gpointer d) {
+            (*static_cast<std::function<void()> *>(d))();
+        }), cb, +[](gpointer d, GClosure *) { delete static_cast<std::function<void()> *>(d); }, (GConnectFlags)0);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+        return item;
+    };
+
+    addItem("Insert Column Left", [st, col]() { insertColumn(st, col); });
+    addItem("Insert Column Right", [st, col]() { insertColumn(st, col + 1); });
+    if (st->grid->columnCount() > 1) {
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+        addItem("Delete Column", [st, col]() { deleteColumn(st, col); });
+    }
+
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+}
+
+gboolean onGridButtonPress(GtkWidget *, GdkEventButton *event, gpointer userData)
+{
+    if (event->button != GDK_BUTTON_SECONDARY) return FALSE;
+    auto *st = static_cast<CsvGtkState *>(userData);
+    showRowContextMenu(st, event);
+    return TRUE;
+}
+
+// Attaches right-click handlers to the tree view body (row menu) and to
+// every column header's own button widget (column menu) -- must be
+// re-called every time st->grid is replaced with a new
+// GtkEditableGridWidget instance (reload, column insert/delete), since
+// each new grid has fresh GtkTreeViewColumn/button objects.
+void attachContextMenus(CsvGtkState *st)
+{
+    // Preprocessor macro-expansion of G_CALLBACK()/g_signal_connect_data()
+    // doesn't understand C++ template angle brackets -- a raw,
+    // un-parenthesized comma inside a std::pair<A, B> template argument
+    // list used directly as a macro argument gets misparsed as an extra
+    // macro argument. Using an alias sidesteps that entirely (same fix
+    // as the one in wlx/cuda/src/EditorWidget.cpp's case-conversion menu).
+    using ColCtx = std::pair<CsvGtkState *, int>;
+
+    g_signal_connect(st->grid->treeView(), "button-press-event", G_CALLBACK(onGridButtonPress), st);
+
+    // Column 0 is the row-number gutter -- not a real data column, no
+    // column-operations menu on it.
+    for (int c = 0; c < st->grid->columnCount(); ++c) {
+        GtkTreeViewColumn *tvc = gtk_tree_view_get_column(GTK_TREE_VIEW(st->grid->treeView()), c + 1);
+        GtkWidget *button = tvc ? gtk_tree_view_column_get_button(tvc) : nullptr;
+        if (!button) continue;
+        auto *colCtx = new ColCtx(st, c);
+        g_signal_connect_data(button, "button-press-event", G_CALLBACK(+[](GtkWidget *, GdkEventButton *event, gpointer data) -> gboolean {
+            if (event->button != GDK_BUTTON_SECONDARY) return FALSE;
+            auto *ctx = static_cast<ColCtx *>(data);
+            showColumnContextMenu(ctx->first, ctx->second, event);
+            return TRUE;
+        }), colCtx, +[](gpointer d, GClosure *) { delete static_cast<ColCtx *>(d); }, (GConnectFlags)0);
+    }
 }
 
 void saveFile(CsvGtkState *st, const std::string &path, char separator)
