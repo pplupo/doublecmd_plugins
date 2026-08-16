@@ -10,6 +10,7 @@
 #include <gtk/gtk.h>
 #include <librsvg/rsvg.h>
 #include <gio/gio.h>
+#include <pango/pangocairo.h>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -48,6 +49,8 @@ struct DiagramState {
 
     GFileMonitor *monitor = nullptr;
     guint debounceTimerId = 0;
+
+    std::string errorMessage; // shown inline in onDraw instead of a modal dialog -- see showError()
 };
 
 void executeRender(DiagramState *st);
@@ -72,7 +75,32 @@ void setHandle(DiagramState *st, const std::string &svgData)
     gtk_widget_queue_draw(st->drawingArea);
 }
 
-void showError(GtkWidget *parent, const char *title, const char *msg)
+// Renders the error inline in the drawing area instead of a modal
+// GtkMessageDialog. gtk_dialog_run() starts a *nested* main loop, and
+// this function is reachable synchronously from ListLoad() (via
+// loadFile() -> executeRender()) -- at that point DC's own LCL code is
+// still on the call stack constructing the very panel this widget lives
+// in (confirmed via GDB: crashes surfaced deep inside DC's own
+// control.inc/customform.inc/wincontrol.inc paint/layout code, called
+// from *underneath* this plugin's own frames). Re-entering GTK's event
+// loop mid-construction like that pumps DC's own pending
+// paint/layout/realize callbacks out of order and corrupts whatever
+// LCL's construction code was in the middle of -- a real, reproduced
+// crash, not a hypothetical one. A modal dialog triggered by an
+// explicit user action after the widget already exists and is fully
+// realized (e.g. the Save As dialogs elsewhere in this file) doesn't
+// have this problem and is left as-is.
+void showError(DiagramState *st, const char *title, const char *msg)
+{
+    st->errorMessage = std::string(title) + ": " + msg;
+    if (st->handle) { g_object_unref(st->handle); st->handle = nullptr; }
+    if (st->drawingArea) gtk_widget_queue_draw(st->drawingArea);
+}
+
+// For errors from explicit user actions (Save As SVG/PNG) where a modal
+// dialog is safe -- the widget already exists, is realized, and DC isn't
+// mid-construction of it, unlike the ListLoad-triggered path above.
+void showModalError(GtkWidget *parent, const char *title, const char *msg)
 {
     GtkWidget *dlg = gtk_message_dialog_new(GTK_WINDOW(gtk_widget_get_toplevel(parent)),
         GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s", msg);
@@ -118,7 +146,7 @@ void executeRender(DiagramState *st)
     if (ext == "mmd" || ext == "mermaid") {
         svg = DiagramRenderer::renderMermaid(g_settings, st->currentFilePath, activeDarkMode);
         if (svg.empty()) {
-            showError(st->root, "Diagram Viewer Error",
+            showError(st, "Diagram Viewer Error",
                 "Failed to render Mermaid diagram.\n"
                 "Please ensure '@mermaid-js/mermaid-cli' is installed, 'npx' is available, or internet connection is active.");
             return;
@@ -127,16 +155,17 @@ void executeRender(DiagramState *st)
     } else if (ext == "puml" || ext == "plantuml") {
         svg = DiagramRenderer::renderPlantUml(g_settings, st->currentFilePath, activeDarkMode);
         if (svg.empty()) {
-            showError(st->root, "Diagram Viewer Error",
+            showError(st, "Diagram Viewer Error",
                 "Failed to render PlantUML diagram.\n"
                 "Please ensure Java/PlantUML is installed locally, or internet connection is active.");
             return;
         }
     } else {
-        showError(st->root, "Diagram Viewer Error", ("Unsupported file extension: " + ext).c_str());
+        showError(st, "Diagram Viewer Error", ("Unsupported file extension: " + ext).c_str());
         return;
     }
 
+    st->errorMessage.clear();
     setHandle(st, svg);
 }
 
@@ -217,6 +246,18 @@ gboolean onDraw(GtkWidget *widget, cairo_t *cr, gpointer userData)
         cairo_move_to(cr, 0, y); cairo_line_to(cr, allocW, y);
     }
     cairo_stroke(cr);
+
+    if (!st->errorMessage.empty()) {
+        cairo_set_source_rgb(cr, activeDarkMode ? 1.0 : 0.6, 0.2, 0.2);
+        PangoLayout *layout = pango_cairo_create_layout(cr);
+        pango_layout_set_width(layout, (allocW - 40) * PANGO_SCALE);
+        pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+        pango_layout_set_text(layout, st->errorMessage.c_str(), -1);
+        cairo_move_to(cr, 20, 20);
+        pango_cairo_show_layout(cr, layout);
+        g_object_unref(layout);
+        return FALSE;
+    }
 
     if (!st->handle) return FALSE;
 
@@ -303,7 +344,7 @@ void onSaveSvg(GtkMenuItem *, gpointer userData)
         char *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
         GError *error = nullptr;
         if (!g_file_set_contents(path, st->lastSvgData.data(), st->lastSvgData.size(), &error)) {
-            showError(st->root, "Error", error ? error->message : "Could not open file for writing.");
+            showModalError(st->root, "Error", error ? error->message : "Could not open file for writing.");
             if (error) g_error_free(error);
         }
         g_free(path);
@@ -342,7 +383,7 @@ void onSavePng(GtkMenuItem *, gpointer userData)
         cairo_surface_t *surface = renderToImageSurface(st);
         if (surface) {
             if (cairo_surface_write_to_png(surface, path) != CAIRO_STATUS_SUCCESS)
-                showError(st->root, "Error", "Could not save PNG file.");
+                showModalError(st->root, "Error", "Could not save PNG file.");
             cairo_surface_destroy(surface);
         }
         g_free(path);
