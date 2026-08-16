@@ -11,6 +11,7 @@
 #include <gtk/gtk.h>
 #include <epoxy/gl.h>
 #include <epoxy/egl.h>
+#include <epoxy/glx.h>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -28,10 +29,29 @@ struct MpvGtkPlayer {
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
 };
 
-void *eglGetProcAddressWrapper(void *ctx, const char *name)
+// epoxy_eglGetProcAddress() only resolves symbols for an EGL-backed GL
+// context -- GtkGLArea's actual backend depends on the platform/GDK
+// backend it negotiated (GLX is the default on a plain X11 session,
+// EGL is typical on Wayland), which this plugin has no control over and
+// previously didn't check -- it hardcoded the EGL resolver
+// unconditionally. There is no single backend-agnostic libepoxy
+// function for this (epoxy's whole design is that *generated GL/EGL/GLX
+// call sites* self-dispatch per-context; there's no public
+// "epoxy_get_proc_address" despite the name suggesting one exists), so
+// this tries EGL first and falls back to GLX -- covering both backends
+// GtkGLArea can actually produce on Linux. Using the EGL-only variant
+// unconditionally meant every real GL function look-up mpv's renderer
+// does could silently fail on a GLX-backed context (no error returned by
+// mpv_render_context_create() itself, since proc resolution happens
+// lazily per-call inside mpv's renderer) -- consistent with the reported
+// symptom: the GtkGLArea itself works (renders its clear-color
+// background), but no actual video frame ever appears.
+void *glGetProcAddressWrapper(void *ctx, const char *name)
 {
     (void)ctx;
-    return reinterpret_cast<void *>(epoxy_eglGetProcAddress(name));
+    if (void *p = reinterpret_cast<void *>(epoxy_eglGetProcAddress(name)))
+        return p;
+    return reinterpret_cast<void *>(epoxy_glXGetProcAddress(reinterpret_cast<const GLubyte *>(name)));
 }
 
 gboolean onGlRealize(GtkGLArea *area, gpointer userData)
@@ -44,7 +64,7 @@ gboolean onGlRealize(GtkGLArea *area, gpointer userData)
     if (!p->engine->isValid())
         return FALSE;
 
-    if (!p->engine->initRenderContext(eglGetProcAddressWrapper, nullptr)) {
+    if (!p->engine->initRenderContext(glGetProcAddressWrapper, nullptr)) {
         std::fprintf(stderr, "[mpv_wayland_gtk3] initRenderContext failed\n");
         return FALSE;
     }
