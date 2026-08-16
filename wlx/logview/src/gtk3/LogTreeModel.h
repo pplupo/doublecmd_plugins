@@ -37,6 +37,7 @@ struct LogTreeModel {
     LogEngine *engine = nullptr; // not owned
     std::vector<int> *filter = nullptr; // not owned; nullptr = unfiltered
     int stamp = 0; // bumped on every structural change to invalidate old iterators
+    int lastNotifiedCount = 0; // row count observers (GtkTreeView) currently believe -- see the .cpp for why this matters
 };
 
 struct LogTreeModelClass {
