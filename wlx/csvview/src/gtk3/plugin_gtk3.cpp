@@ -642,7 +642,8 @@ void onToggleShowText(CsvGtkState *st, bool active)
     if (active) {
         updateTextView(st);
         gtk_widget_hide(st->grid->widget());
-        gtk_widget_show(st->textScroll);
+        gtk_widget_show_all(st->textScroll); // textScroll has no_show_all set, so show() alone
+                                              // wouldn't reveal the GtkTextView inside it
         if (st->findPanel->isPanelVisible()) st->findPanel->showPanel(false);
     } else {
         gtk_widget_hide(st->textScroll);
