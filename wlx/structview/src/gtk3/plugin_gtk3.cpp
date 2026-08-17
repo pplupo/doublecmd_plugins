@@ -1,12 +1,16 @@
 // GTK3 UI for structview: a GtkTreeStore document tree on the left, and a
 // Grid/Text GtkNotebook on the right, built on wlxbase_gtk's
-// GtkFocusManager/GtkEditableGridWidget, mirroring StructViewWidget's Qt
-// layout (tree | grid+text tabs) over the same Qt-free structview_core
+// GtkFocusManager/GtkEditableGridWidget/GtkPluginToolBar/
+// GtkFindReplacePanel, mirroring StructViewWidget's Qt6 toolbar (Save,
+// Save As, Undo, Redo, Print, Reload, Show Text, Word Wrap, Open
+// Externally, Find) over the same Qt-free structview_core
 // (DocumentNode/TextFormatEngine + the 6 format engines).
 
 #include "core/DocumentModel.h"
 #include "wlxbase_gtk/GtkFocusManager.h"
 #include "wlxbase_gtk/GtkEditableGridWidget.h"
+#include "wlxbase_gtk/GtkPluginToolBar.h"
+#include "wlxbase_gtk/GtkFindReplacePanel.h"
 
 #include <gtk/gtk.h>
 #include <cstring>
@@ -16,10 +20,14 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cctype>
 
 #include "wlxplugin.h"
 
 #define EXPORT __attribute__((visibility("default")))
+
+using namespace GtkWlPlugin;
 
 namespace {
 
@@ -31,26 +39,42 @@ struct StructViewState {
     GtkWidget *notebook = nullptr;
     GtkWidget *gridContainer = nullptr; // holds the current GtkEditableGridWidget's widget()
     GtkWidget *textView = nullptr;
-    GtkWidget *statusLabel = nullptr;
 
     std::unique_ptr<TextFormatEngine> engine;
-    std::unique_ptr<GtkWlPlugin::GtkFocusManager> focusManager;
-    std::unique_ptr<GtkWlPlugin::GtkEditableGridWidget> grid;
+    std::unique_ptr<GtkFocusManager> focusManager;
+    std::unique_ptr<GtkEditableGridWidget> grid;
+    std::unique_ptr<GtkPluginToolBar> toolbar;
+    std::unique_ptr<GtkFindReplacePanel> findPanel;
+
+    GtkWidget *dirtyLabel = nullptr;
+    GtkWidget *undoBtn = nullptr;
+    GtkWidget *redoBtn = nullptr;
+    GtkWidget *findToggle = nullptr;
 
     std::string filepath;
     DocumentNode *currentNode = nullptr;
     bool dirty = false;
+    bool wordWrap = false;
 
     // GtkTreeStore column 0 = display name, column 1 = DocumentNode* (as gpointer)
 };
 
 enum { COL_NAME = 0, COL_NODE = 1, N_COLS };
 
-void updateStatus(StructViewState *st) {
-    if (!st->statusLabel) return;
-    std::string text = st->engine ? st->engine->formatName() : "";
-    if (st->dirty) text += " *modified*";
-    gtk_label_set_text(GTK_LABEL(st->statusLabel), text.c_str());
+void updateDirtyIndicator(StructViewState *st) {
+    if (st->dirtyLabel) gtk_label_set_text(GTK_LABEL(st->dirtyLabel), st->dirty ? "●" : "✓");
+    if (st->undoBtn) gtk_widget_set_sensitive(st->undoBtn, st->focusManager->canUndo());
+    if (st->redoBtn) gtk_widget_set_sensitive(st->redoBtn, st->focusManager->canRedo());
+}
+
+void updateTextTab(StructViewState *st) {
+    if (!st->engine || !st->textView) return;
+    // Sync current grid edits back into the tree before regenerating the
+    // Text tab, matching the Qt side's syncGridToNode()+updateTextTab().
+    if (st->grid && st->currentNode) st->currentNode->rows = st->grid->rowData();
+    std::string text = st->engine->serialize();
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(st->textView));
+    gtk_text_buffer_set_text(buf, text.c_str(), -1);
 }
 
 void showNode(StructViewState *st, DocumentNode *node);
@@ -67,13 +91,13 @@ void rebuildGrid(StructViewState *st, DocumentNode *node) {
     }
 
     int cols = std::max(1, (int)node->columnNames.size());
-    st->grid = std::make_unique<GtkWlPlugin::GtkEditableGridWidget>(cols, st->focusManager.get());
+    st->grid = std::make_unique<GtkEditableGridWidget>(cols, st->focusManager.get());
     for (size_t c = 0; c < node->columnNames.size(); c++)
         st->grid->setColumnTitle((int)c, node->columnNames[c]);
     st->grid->setRowData(node->rows);
     st->grid->setDirtyChangedCallback([st](bool d) {
         if (d) st->dirty = true;
-        updateStatus(st);
+        updateDirtyIndicator(st);
     });
 
     gtk_box_pack_start(GTK_BOX(st->gridContainer), st->grid->widget(), TRUE, TRUE, 0);
@@ -120,24 +144,190 @@ void onTreeSelectionChanged(GtkTreeSelection *sel, gpointer data) {
     if (nodePtr) showNode(st, (DocumentNode *)nodePtr);
 }
 
-bool doSave(StructViewState *st) {
-    if (!st->engine || st->filepath.empty()) return false;
+bool doSave(StructViewState *st, const std::string &path) {
+    if (!st->engine || path.empty()) return false;
     // Flush the currently-visible grid's edits back into the tree before
     // serializing (matches the Qt side's syncGridToNode()).
-    if (st->grid && st->currentNode) {
-        st->currentNode->rows = st->grid->rowData();
-    }
+    if (st->grid && st->currentNode) st->currentNode->rows = st->grid->rowData();
     std::string data = st->engine->serialize();
     if (data.empty()) return false;
-    std::ofstream out(st->filepath, std::ios::binary | std::ios::trunc);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) return false;
     out << data;
     st->dirty = false;
-    updateStatus(st);
+    updateDirtyIndicator(st);
     return true;
 }
 
-void onSaveClicked(GtkButton *, gpointer data) { doSave((StructViewState *)data); }
+void reloadFile(StructViewState *st) {
+    std::ifstream f(st->filepath, std::ios::binary);
+    if (!f) return;
+    std::ostringstream ss; ss << f.rdbuf();
+    if (!st->engine->parse(ss.str())) return;
+    st->dirty = false;
+    populateTree(st);
+    updateDirtyIndicator(st);
+    st->focusManager->clearUndoStack();
+}
+
+void onOpenExternally(StructViewState *st) {
+    if (st->filepath.empty()) return;
+    GError *error = nullptr;
+    std::string uri = "file://" + st->filepath;
+    if (!g_app_info_launch_default_for_uri(uri.c_str(), nullptr, &error)) {
+        if (error) g_error_free(error);
+    }
+}
+
+void showSaveAsDialog(StructViewState *st) {
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    GtkWidget *dlg = gtk_file_chooser_dialog_new("Save As",
+        GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+        GTK_FILE_CHOOSER_ACTION_SAVE,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, nullptr);
+    gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
+    if (!st->filepath.empty())
+        gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(dlg), st->filepath.c_str());
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        if (doSave(st, filename)) st->filepath = filename;
+        g_free(filename);
+    }
+    gtk_widget_destroy(dlg);
+}
+
+// --- Print: same monospace-paginated-text approach as csvview's Print ---
+
+struct PrintCtx { std::vector<std::string> lines; int linesPerPage = 1; };
+
+void onPrintBeginPrint(GtkPrintOperation *op, GtkPrintContext *ctx, gpointer userData) {
+    auto *pc = static_cast<PrintCtx *>(userData);
+    double pageHeight = gtk_print_context_get_height(ctx);
+    PangoLayout *layout = gtk_print_context_create_pango_layout(ctx);
+    pango_layout_set_font_description(layout, pango_font_description_from_string("Monospace 9"));
+    pango_layout_set_text(layout, "Ag", -1);
+    int lineHeightPx;
+    pango_layout_get_pixel_size(layout, nullptr, &lineHeightPx);
+    g_object_unref(layout);
+    pc->linesPerPage = std::max(1, (int)(pageHeight / std::max(1, lineHeightPx)));
+    int pages = ((int)pc->lines.size() + pc->linesPerPage - 1) / pc->linesPerPage;
+    gtk_print_operation_set_n_pages(op, std::max(1, pages));
+}
+
+void onPrintDrawPage(GtkPrintOperation *, GtkPrintContext *ctx, gint pageNr, gpointer userData) {
+    auto *pc = static_cast<PrintCtx *>(userData);
+    cairo_t *cr = gtk_print_context_get_cairo_context(ctx);
+    PangoLayout *layout = gtk_print_context_create_pango_layout(ctx);
+    pango_layout_set_font_description(layout, pango_font_description_from_string("Monospace 9"));
+
+    int start = pageNr * pc->linesPerPage;
+    int end = std::min((int)pc->lines.size(), start + pc->linesPerPage);
+    double y = 0;
+    for (int i = start; i < end; ++i) {
+        pango_layout_set_text(layout, pc->lines[i].c_str(), -1);
+        cairo_move_to(cr, 0, y);
+        pango_cairo_show_layout(cr, layout);
+        int h;
+        pango_layout_get_pixel_size(layout, nullptr, &h);
+        y += h;
+    }
+    g_object_unref(layout);
+}
+
+std::vector<std::string> splitLines(const std::string &s) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= s.size()) {
+        size_t pos = s.find('\n', start);
+        if (pos == std::string::npos) { if (start < s.size()) out.push_back(s.substr(start)); break; }
+        out.push_back(s.substr(start, pos - start));
+        start = pos + 1;
+    }
+    return out;
+}
+
+void onPrint(StructViewState *st) {
+    if (st->grid && st->currentNode) st->currentNode->rows = st->grid->rowData();
+    if (!st->engine) return;
+    auto pc = std::make_unique<PrintCtx>();
+    pc->lines = splitLines(st->engine->serialize());
+
+    GtkPrintOperation *op = gtk_print_operation_new();
+    g_signal_connect(op, "begin-print", G_CALLBACK(onPrintBeginPrint), pc.get());
+    g_signal_connect(op, "draw-page", G_CALLBACK(onPrintDrawPage), pc.get());
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    gtk_print_operation_run(op, GTK_PRINT_OPERATION_ACTION_PRINT_DIALOG,
+        GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr, nullptr);
+    g_object_unref(op);
+}
+
+// --- Find (single-direction, grid cells) ---
+
+bool cellMatches(const std::string &text, const std::string &query, bool matchCase) {
+    if (query.empty()) return false;
+    if (matchCase) return text.find(query) != std::string::npos;
+    std::string t = text, q = query;
+    std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::transform(q.begin(), q.end(), q.begin(), [](unsigned char c) { return std::tolower(c); });
+    return t.find(q) != std::string::npos;
+}
+
+void doFind(StructViewState *st, bool forward) {
+    if (!st->grid) return;
+    std::string query = st->findPanel->findText();
+    if (query.empty()) return;
+    bool matchCase = st->findPanel->matchCase();
+
+    auto rows = st->grid->rowData();
+    int nrows = (int)rows.size(), ncols = st->grid->columnCount();
+    if (nrows == 0 || ncols == 0) return;
+    int total = nrows * ncols;
+    for (int step = 1; step <= total; ++step) {
+        int idx = forward ? step - 1 : total - step;
+        int r = idx / ncols, c = idx % ncols;
+        if (r >= (int)rows.size() || c >= (int)rows[r].size()) continue;
+        if (cellMatches(rows[r][c], query, matchCase)) {
+            st->grid->selectCell(r, c);
+            st->findPanel->setStatusText("Match found");
+            return;
+        }
+    }
+    st->findPanel->setStatusText("No matches");
+}
+
+void setupToolbar(StructViewState *st) {
+    st->toolbar = std::make_unique<GtkPluginToolBar>(st->focusManager.get());
+
+    st->dirtyLabel = gtk_label_new("");
+    gtk_widget_set_margin_start(st->dirtyLabel, 4);
+    gtk_widget_set_margin_end(st->dirtyLabel, 4);
+    gtk_box_pack_start(GTK_BOX(st->toolbar->widget()), st->dirtyLabel, FALSE, FALSE, 0);
+
+    st->toolbar->addToolAction("Save", "document-save-symbolic", [st]() { doSave(st, st->filepath); });
+    st->toolbar->addToolAction("Save As...", "document-save-as-symbolic", [st]() { showSaveAsDialog(st); });
+    st->undoBtn = st->toolbar->addToolAction("Undo", "edit-undo-symbolic", [st]() {
+        st->focusManager->undo();
+        updateDirtyIndicator(st);
+    });
+    st->redoBtn = st->toolbar->addToolAction("Redo", "edit-redo-symbolic", [st]() {
+        st->focusManager->redo();
+        updateDirtyIndicator(st);
+    });
+    st->toolbar->addToolAction("Print", "document-print-symbolic", [st]() { onPrint(st); });
+    st->toolbar->addToolAction("Reload", "view-refresh-symbolic", [st]() { reloadFile(st); });
+    st->toolbar->addToggleAction("Show Text", "view-reveal-symbolic", false, [st](bool active) {
+        if (active) updateTextTab(st);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(st->notebook), active ? 1 : 0);
+    });
+    st->toolbar->addToggleAction("Word Wrap", "format-text-wrap-symbolic", false, [st](bool active) {
+        st->wordWrap = active;
+        if (st->textView) gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(st->textView), active ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
+    });
+    st->toolbar->addToolAction("Open Externally", "document-open-symbolic", [st]() { onOpenExternally(st); });
+    st->findToggle = st->toolbar->addToggleAction("Find", "edit-find-symbolic", false, [st](bool active) {
+        st->findPanel->showPanel(active);
+    });
+}
 
 std::string copySelectionAsText(StructViewState *st) {
     if (!st->grid) return {};
@@ -179,17 +369,18 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
     // asserts the widget's parent is exactly this GtkLayout.
     gtk_layout_put(GTK_LAYOUT(ParentWin), st->root, 0, 0);
 
-    // Toolbar
-    GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    GtkWidget *saveBtn = gtk_button_new_with_label("Save");
-    g_signal_connect(saveBtn, "clicked", G_CALLBACK(onSaveClicked), st);
-    gtk_box_pack_start(GTK_BOX(toolbar), saveBtn, FALSE, FALSE, 2);
-    st->statusLabel = gtk_label_new("");
-    gtk_box_pack_end(GTK_BOX(toolbar), st->statusLabel, FALSE, FALSE, 4);
-    gtk_box_pack_start(GTK_BOX(st->root), toolbar, FALSE, FALSE, 2);
+    // Placeholder tree view just so FocusManager has a primaryView to
+    // construct with -- the real one is created and assigned below (same
+    // "placeholder then swap" shape csvview/dbview use for their grids).
+    GtkWidget *placeholder = gtk_tree_view_new();
+    st->focusManager = std::make_unique<GtkFocusManager>(st->root, placeholder);
+
+    setupToolbar(st);
+    gtk_box_pack_start(GTK_BOX(st->root), st->toolbar->widget(), FALSE, FALSE, 0);
 
     // Tree | Grid+Text
     st->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_vexpand(st->paned, TRUE);
     gtk_box_pack_start(GTK_BOX(st->root), st->paned, TRUE, TRUE, 0);
 
     st->treeStore = gtk_tree_store_new(N_COLS, G_TYPE_STRING, G_TYPE_POINTER);
@@ -206,6 +397,7 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
                       G_CALLBACK(onTreeSelectionChanged), st);
 
     st->notebook = gtk_notebook_new();
+    gtk_notebook_set_show_tabs(GTK_NOTEBOOK(st->notebook), FALSE); // driven by the "Show Text" toggle instead
     gtk_paned_pack2(GTK_PANED(st->paned), st->notebook, TRUE, TRUE);
 
     st->gridContainer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -214,23 +406,31 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
     st->textView = gtk_text_view_new();
     gtk_text_view_set_editable(GTK_TEXT_VIEW(st->textView), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(st->textView), TRUE);
-    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(st->textView));
-    gtk_text_buffer_set_text(buf, st->engine->rawText().c_str(), -1);
     GtkWidget *textScroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_container_add(GTK_CONTAINER(textScroll), st->textView);
     gtk_notebook_append_page(GTK_NOTEBOOK(st->notebook), textScroll, gtk_label_new("Text"));
 
-    st->focusManager = std::make_unique<GtkWlPlugin::GtkFocusManager>(st->root, st->treeView);
-    st->focusManager->registerShortcut(GDK_KEY_s, GDK_CONTROL_MASK, GtkWlPlugin::GtkFocusManager::Always,
-        [st]() { doSave(st); return true; });
+    st->findPanel = std::make_unique<GtkFindReplacePanel>(st->focusManager.get());
+    st->findPanel->setReplaceEnabled(false); // read-only find here, matches structview's Qt-side onFind (no replace wired)
+    st->findPanel->onFindRequested = [st](bool forward) { doFind(st, forward); };
+    gtk_box_pack_start(GTK_BOX(st->root), st->findPanel->widget(), FALSE, FALSE, 0);
+
+    st->focusManager->enableUndoShortcuts();
+    st->focusManager->registerShortcut(GDK_KEY_s, GDK_CONTROL_MASK, GtkFocusManager::Always,
+        [st]() { doSave(st, st->filepath); return true; });
+    st->focusManager->registerShortcut(GDK_KEY_f, GDK_CONTROL_MASK, GtkFocusManager::Always, [st]() {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->findToggle), !st->findPanel->isPanelVisible());
+        return true;
+    });
 
     g_signal_connect(st->root, "destroy", G_CALLBACK(destroyState), st);
     g_object_set_data(G_OBJECT(st->root), "__structview_state_ptr", st);
 
     populateTree(st);
-    updateStatus(st);
+    updateDirtyIndicator(st);
 
     gtk_widget_show_all(st->root);
+    st->findPanel->showPanel(false);
     return (HWND)st->root;
 }
 
