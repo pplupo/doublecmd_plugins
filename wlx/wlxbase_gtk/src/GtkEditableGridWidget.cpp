@@ -3,6 +3,7 @@
 
 #include <sstream>
 #include <algorithm>
+#include <memory>
 
 namespace GtkWlPlugin {
 
@@ -73,6 +74,16 @@ void GtkEditableGridWidget::setRowData(const std::vector<std::vector<std::string
     }
 }
 
+void GtkEditableGridWidget::appendRows(const std::vector<std::vector<std::string>> &rows)
+{
+    for (const auto &row : rows) {
+        GtkTreeIter iter;
+        gtk_list_store_append(m_store, &iter);
+        for (int c = 0; c < m_columnCount; ++c)
+            gtk_list_store_set(m_store, &iter, c, c < (int)row.size() ? row[c].c_str() : "", -1);
+    }
+}
+
 std::vector<std::vector<std::string>> GtkEditableGridWidget::rowData() const
 {
     std::vector<std::vector<std::string>> result;
@@ -128,12 +139,15 @@ void GtkEditableGridWidget::onCellEdited(int col, const std::string &pathStr, co
 
     if (oldText == newText) return;
 
-    GtkTreeRowReference *rowRef = gtk_tree_row_reference_new(
-        GTK_TREE_MODEL(m_store), gtk_tree_model_get_path(GTK_TREE_MODEL(m_store), &iter));
+    GtkTreePath *rowPath = gtk_tree_model_get_path(GTK_TREE_MODEL(m_store), &iter);
+    std::shared_ptr<GtkTreeRowReference> rowRef(
+        gtk_tree_row_reference_new(GTK_TREE_MODEL(m_store), rowPath),
+        [](GtkTreeRowReference *r) { if (r) gtk_tree_row_reference_free(r); });
+    gtk_tree_path_free(rowPath);
 
     GtkListStore *store = m_store;
     auto applyText = [store, rowRef, col](const std::string &text) {
-        GtkTreePath *p = gtk_tree_row_reference_get_path(rowRef);
+        GtkTreePath *p = gtk_tree_row_reference_get_path(rowRef.get());
         if (!p) return;
         GtkTreeIter it;
         if (gtk_tree_model_get_iter(GTK_TREE_MODEL(store), &it, p))
@@ -155,7 +169,6 @@ void GtkEditableGridWidget::onCellEdited(int col, const std::string &pathStr, co
         m_fm->pushUndo(std::move(cmd));
     }
     setDirty(true);
-    gtk_tree_row_reference_free(rowRef);
 }
 
 void GtkEditableGridWidget::setCellValue(int row, int col, const std::string &text)
