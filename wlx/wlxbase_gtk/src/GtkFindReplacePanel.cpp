@@ -110,10 +110,23 @@ void GtkFindReplacePanel::setStatusText(const std::string &text)
 
 void GtkFindReplacePanel::showPanel(bool show)
 {
-    gtk_widget_set_visible(m_root, show);
     if (show) {
+        // m_root has no_show_all set (so an ancestor's show_all() at
+        // ListLoad time doesn't prematurely reveal the panel) -- but that
+        // flag makes gtk_widget_show_all() skip m_root's ENTIRE subtree
+        // when called directly on m_root too, not just when recursing
+        // into it as someone else's descendant. The previous
+        // gtk_widget_set_visible(m_root, show) + gtk_widget_show_all(m_root)
+        // pair left m_root itself visible but every child (find/replace
+        // rows, options row) still hidden. Clear the flag on first reveal
+        // -- hiding afterwards always goes through plain gtk_widget_hide()
+        // below, never relies on no_show_all again, so it's safe to drop
+        // permanently here.
+        gtk_widget_set_no_show_all(m_root, FALSE);
         gtk_widget_show_all(m_root);
         gtk_widget_grab_focus(m_txtFind);
+    } else {
+        gtk_widget_hide(m_root);
     }
 }
 
