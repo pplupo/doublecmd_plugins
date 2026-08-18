@@ -55,14 +55,15 @@ gboolean spinOutputZeroPad(GtkSpinButton *spin, gpointer data)
 
 GtkWidget *buildDateTimeSpinner(GtkWidget *spin[kDtSpinCount])
 {
-    // Grouped in a GtkFrame so the six fields read as one control (closer
-    // to how Qt's QDateTimeEdit presents as a single bordered field with
-    // per-segment spinning) rather than a bare run of number boxes.
-    GtkWidget *frame = gtk_frame_new(nullptr);
-    gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_IN);
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 1);
-    gtk_container_set_border_width(GTK_CONTAINER(box), 2);
-    gtk_container_add(GTK_CONTAINER(frame), box);
+    // Each spinner keeps its own default entry frame -- GTK3 themes render
+    // a GtkSpinButton's up/down arrows as part of that frame's own styling,
+    // so stripping it via gtk_entry_set_has_frame(FALSE) (an earlier
+    // attempt to visually group these into one bordered control, like Qt's
+    // QDateTimeEdit) broke the arrows' rendering in practice: reported as
+    // "can't reduce the value" and "big buttons side by side". A plain
+    // horizontal box with small spacing, no enclosing GtkFrame, keeps every
+    // spinner's normal, known-good rendering.
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
 
     struct Field { int lo, hi, width, digits; const char *sep; const char *tooltip; };
     static const Field fields[kDtSpinCount] = {
@@ -75,13 +76,12 @@ GtkWidget *buildDateTimeSpinner(GtkWidget *spin[kDtSpinCount])
         gtk_entry_set_width_chars(GTK_ENTRY(spin[i]), fields[i].width);
         gtk_entry_set_alignment(GTK_ENTRY(spin[i]), 0.5f);
         gtk_widget_set_tooltip_text(spin[i], fields[i].tooltip);
-        gtk_entry_set_has_frame(GTK_ENTRY(spin[i]), FALSE); // border comes from the enclosing GtkFrame instead
         g_signal_connect(spin[i], "output", G_CALLBACK(spinOutputZeroPad), GINT_TO_POINTER(fields[i].digits));
         gtk_box_pack_start(GTK_BOX(box), spin[i], FALSE, FALSE, 0);
         if (*fields[i].sep)
             gtk_box_pack_start(GTK_BOX(box), gtk_label_new(fields[i].sep), FALSE, FALSE, 0);
     }
-    return frame;
+    return box;
 }
 
 LogTimestamp readTimestampFromSpinner(GtkWidget *const spin[kDtSpinCount])
@@ -392,6 +392,19 @@ void rebuildEngineHighlightRules(LogViewerState *st)
     gtk_widget_queue_draw(st->treeView);
 }
 
+// Selects the given row in the settings dialog's rule list -- used after
+// Move Up/Down, whose refresh() (gtk_list_store_clear + repopulate)
+// otherwise drops the selection entirely.
+void selectRow(GtkWidget *listWidget, int row)
+{
+    if (row < 0) return;
+    GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(listWidget));
+    GtkTreePath *path = gtk_tree_path_new_from_indices(row, -1);
+    gtk_tree_selection_select_path(sel, path);
+    gtk_tree_view_set_cursor(GTK_TREE_VIEW(listWidget), path, nullptr, FALSE);
+    gtk_tree_path_free(path);
+}
+
 void openSettingsDialog(LogViewerState *st)
 {
     GtkWidget *dlg = gtk_dialog_new_with_buttons("Highlight Rules", GTK_WINDOW(gtk_widget_get_toplevel(st->root)),
@@ -564,6 +577,11 @@ void openSettingsDialog(LogViewerState *st)
         if (idx <= 0 || idx >= (int)ctx->st->rules.size()) return;
         std::swap(ctx->st->rules[idx], ctx->st->rules[idx - 1]);
         ctx->refresh();
+        // refresh() clears and repopulates the store, which drops the
+        // GtkTreeSelection entirely -- reselect the moved row at its new
+        // position so repeated Move Up/Down clicks don't require
+        // reselecting the row by hand each time.
+        selectRow(ctx->listWidget, idx - 1);
     }), ctx, nullptr, (GConnectFlags)0);
 
     g_signal_connect_data(btnDown, "clicked", G_CALLBACK(+[](GtkButton *, gpointer data) {
@@ -572,6 +590,7 @@ void openSettingsDialog(LogViewerState *st)
         if (idx < 0 || idx >= (int)ctx->st->rules.size() - 1) return;
         std::swap(ctx->st->rules[idx], ctx->st->rules[idx + 1]);
         ctx->refresh();
+        selectRow(ctx->listWidget, idx + 1);
     }), ctx, nullptr, (GConnectFlags)0);
 
     gtk_widget_show_all(dlg);
