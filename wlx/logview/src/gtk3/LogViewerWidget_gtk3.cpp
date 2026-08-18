@@ -27,22 +27,48 @@
 
 namespace {
 
-std::string formatTimestamp(const LogTimestamp &ts)
+// ── Time-range spinners ─────────────────────────────────────────────
+//
+// Qt's time slicer uses QDateTimeEdit (a single field with per-segment spin
+// controls, live-updating on every keystroke/spin click via
+// dateTimeChanged). GTK has no equivalent widget, so build the closest
+// match: six GtkSpinButtons (Y/M/D/H/Min/Sec), each wired to
+// "value-changed" so the filter updates live like Qt's does, instead of
+// GTK's previous plain GtkEntry fields that only re-filtered on Enter.
+
+constexpr int kDtSpinCount = 6; // year, month, day, hour, minute, second
+
+GtkWidget *buildDateTimeSpinner(GtkWidget *spin[kDtSpinCount])
 {
-    if (!ts.valid) return "";
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                  ts.year, ts.month, ts.day, ts.hour, ts.minute, ts.second);
-    return buf;
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    struct Field { int lo, hi, width; const char *sep; };
+    static const Field fields[kDtSpinCount] = {
+        {1970, 9999, 5, "-"}, {1, 12, 3, "-"}, {1, 31, 3, " "},
+        {0, 23, 3, ":"}, {0, 59, 3, ":"}, {0, 59, 3, ""},
+    };
+    for (int i = 0; i < kDtSpinCount; ++i) {
+        spin[i] = gtk_spin_button_new_with_range(fields[i].lo, fields[i].hi, 1);
+        gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(spin[i]), TRUE);
+        gtk_entry_set_width_chars(GTK_ENTRY(spin[i]), fields[i].width);
+        gtk_box_pack_start(GTK_BOX(box), spin[i], FALSE, FALSE, 0);
+        if (*fields[i].sep)
+            gtk_box_pack_start(GTK_BOX(box), gtk_label_new(fields[i].sep), FALSE, FALSE, 0);
+    }
+    return box;
 }
 
-bool parseTimestampField(const std::string &text, LogTimestamp &out)
+LogTimestamp readTimestampFromSpinner(GtkWidget *const spin[kDtSpinCount])
 {
-    int y, mo, d, h, mi, s;
-    if (std::sscanf(text.c_str(), "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6)
-        return false;
-    out = LogTimestamp{y, mo, d, h, mi, s, true};
-    return true;
+    auto v = [&](int i) { return gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(spin[i])); };
+    return LogTimestamp{v(0), v(1), v(2), v(3), v(4), v(5), true};
+}
+
+void writeTimestampToSpinner(GtkWidget *const spin[kDtSpinCount], const LogTimestamp &ts)
+{
+    if (!ts.valid) return;
+    int values[kDtSpinCount] = {ts.year, ts.month, ts.day, ts.hour, ts.minute, ts.second};
+    for (int i = 0; i < kDtSpinCount; ++i)
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin[i]), values[i]);
 }
 
 bool tsLess(const LogTimestamp &a, const LogTimestamp &b)
@@ -60,8 +86,8 @@ struct LogViewerState {
     GtkWidget *treeView = nullptr;
     GtkWidget *searchEntry = nullptr;
     GtkWidget *btnSearchStop = nullptr;
-    GtkWidget *timeStartEntry = nullptr;
-    GtkWidget *timeEndEntry = nullptr;
+    GtkWidget *timeStartSpin[kDtSpinCount] = {};
+    GtkWidget *timeEndSpin[kDtSpinCount] = {};
     GtkWidget *chkFollow = nullptr;
     GtkWidget *chkFilterMode = nullptr;
     GtkWidget *statusLabel = nullptr;
@@ -147,10 +173,9 @@ void refreshFilter(LogViewerState *st)
         return;
     }
 
-    LogTimestamp startTs{}, endTs{};
-    bool haveRange = st->timeFilterActive
-        && parseTimestampField(gtk_entry_get_text(GTK_ENTRY(st->timeStartEntry)), startTs)
-        && parseTimestampField(gtk_entry_get_text(GTK_ENTRY(st->timeEndEntry)), endTs);
+    LogTimestamp startTs = readTimestampFromSpinner(st->timeStartSpin);
+    LogTimestamp endTs = readTimestampFromSpinner(st->timeEndSpin);
+    bool haveRange = st->timeFilterActive;
 
     st->activeFilter.clear();
     int total = st->engine->lineCount();
@@ -649,13 +674,9 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
         gtk_box_pack_start(GTK_BOX(header), b, FALSE, FALSE, 0);
 
     gtk_box_pack_start(GTK_BOX(header), gtk_label_new("From:"), FALSE, FALSE, 0);
-    st->timeStartEntry = gtk_entry_new();
-    gtk_entry_set_width_chars(GTK_ENTRY(st->timeStartEntry), 19);
-    gtk_box_pack_start(GTK_BOX(header), st->timeStartEntry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(header), buildDateTimeSpinner(st->timeStartSpin), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(header), gtk_label_new("To:"), FALSE, FALSE, 0);
-    st->timeEndEntry = gtk_entry_new();
-    gtk_entry_set_width_chars(GTK_ENTRY(st->timeEndEntry), 19);
-    gtk_box_pack_start(GTK_BOX(header), st->timeEndEntry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(header), buildDateTimeSpinner(st->timeEndSpin), FALSE, FALSE, 0);
 
     st->chkFilterMode = gtk_check_button_new_with_label("Filter");
     GtkWidget *btnResetFilter = gtk_button_new_with_label("✖ Reset");
@@ -738,25 +759,32 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
         st->filteringActive = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(st->chkFilterMode));
         refreshFilter(st);
     }), st);
-    g_signal_connect_swapped(st->timeStartEntry, "activate", G_CALLBACK(+[](gpointer d) {
-        auto *st = static_cast<LogViewerState *>(d);
-        st->timeFilterActive = true;
-        refreshFilter(st);
-    }), st);
-    g_signal_connect_swapped(st->timeEndEntry, "activate", G_CALLBACK(+[](gpointer d) {
-        auto *st = static_cast<LogViewerState *>(d);
-        st->timeFilterActive = true;
-        refreshFilter(st);
-    }), st);
+    // Live-updating, like Qt's QDateTimeEdit::dateTimeChanged -- fires on
+    // every spin click or typed digit, not just on Enter.
+    for (GtkWidget *spin : st->timeStartSpin)
+        g_signal_connect_swapped(spin, "value-changed", G_CALLBACK(+[](gpointer d) {
+            auto *st = static_cast<LogViewerState *>(d);
+            st->timeFilterActive = true;
+            refreshFilter(st);
+        }), st);
+    for (GtkWidget *spin : st->timeEndSpin)
+        g_signal_connect_swapped(spin, "value-changed", G_CALLBACK(+[](gpointer d) {
+            auto *st = static_cast<LogViewerState *>(d);
+            st->timeFilterActive = true;
+            refreshFilter(st);
+        }), st);
     g_signal_connect_swapped(btnResetFilter, "clicked", G_CALLBACK(+[](gpointer d) {
         auto *st = static_cast<LogViewerState *>(d);
         gtk_entry_set_text(GTK_ENTRY(st->searchEntry), "");
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->chkFilterMode), FALSE);
-        st->timeFilterActive = false;
         LogTimestamp first = st->engine->firstTimestamp();
         LogTimestamp last = st->engine->lastTimestamp();
-        gtk_entry_set_text(GTK_ENTRY(st->timeStartEntry), formatTimestamp(first).c_str());
-        gtk_entry_set_text(GTK_ENTRY(st->timeEndEntry), formatTimestamp(last).c_str());
+        // Writing spin values fires "value-changed" (unlike the old
+        // gtk_entry_set_text(), which didn't fire "activate"), so those
+        // handlers will flip timeFilterActive back on -- reset it after.
+        writeTimestampToSpinner(st->timeStartSpin, first);
+        writeTimestampToSpinner(st->timeEndSpin, last);
+        st->timeFilterActive = false;
         st->filteringActive = false;
         refreshFilter(st);
         executeSearch(st, false);
@@ -780,8 +808,12 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     if (st->engine->loadFile(st->currentFile)) {
         log_tree_model_rows_changed(st->model);
         LogTimestamp first = st->engine->firstTimestamp(), last = st->engine->lastTimestamp();
-        if (first.valid) gtk_entry_set_text(GTK_ENTRY(st->timeStartEntry), formatTimestamp(first).c_str());
-        if (last.valid) gtk_entry_set_text(GTK_ENTRY(st->timeEndEntry), formatTimestamp(last).c_str());
+        // Same "value-changed" fires-on-set concern as the Reset handler --
+        // populate the spinners, then make sure the filter stays off until
+        // the user actually edits a value or clicks Reset.
+        writeTimestampToSpinner(st->timeStartSpin, first);
+        writeTimestampToSpinner(st->timeEndSpin, last);
+        st->timeFilterActive = false;
         setStatus(st, "Lines: " + std::to_string(st->engine->lineCount()));
     }
 
