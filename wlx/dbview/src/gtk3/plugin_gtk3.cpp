@@ -207,9 +207,7 @@ void onToggleWordWrap(DbViewState *st, bool active) {
 
 void onToggleGridLines(DbViewState *st, bool active) {
     st->gridLines = active;
-    if (st->grid)
-        gtk_tree_view_set_grid_lines(GTK_TREE_VIEW(st->grid->treeView()),
-            active ? GTK_TREE_VIEW_GRID_LINES_BOTH : GTK_TREE_VIEW_GRID_LINES_NONE);
+    if (st->grid) st->grid->setShowGrid(active);
 }
 
 void onExportTableData(DbViewState *st) {
