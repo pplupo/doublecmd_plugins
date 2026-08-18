@@ -50,6 +50,8 @@ struct StructViewState {
     GtkWidget *undoBtn = nullptr;
     GtkWidget *redoBtn = nullptr;
     GtkWidget *findToggle = nullptr;
+    GtkWidget *formatLabel = nullptr;
+    GtkWidget *rowCountLabel = nullptr;
 
     std::string filepath;
     DocumentNode *currentNode = nullptr;
@@ -65,6 +67,20 @@ void updateDirtyIndicator(StructViewState *st) {
     if (st->dirtyLabel) gtk_label_set_text(GTK_LABEL(st->dirtyLabel), st->dirty ? "●" : "✓");
     if (st->undoBtn) gtk_widget_set_sensitive(st->undoBtn, st->focusManager->canUndo());
     if (st->redoBtn) gtk_widget_set_sensitive(st->redoBtn, st->focusManager->canRedo());
+}
+
+// Mirrors PluginStatusBar's format-name + row-count fields (Qt6). There's
+// no GTK equivalent of PluginStatusBar in wlxbase_gtk yet, so this is a
+// simple two-label bar local to structview rather than a new shared widget.
+void updateStatusBar(StructViewState *st) {
+    if (st->formatLabel && st->engine)
+        gtk_label_set_text(GTK_LABEL(st->formatLabel), st->engine->formatName().c_str());
+    if (st->rowCountLabel) {
+        int rows = st->grid ? st->grid->rowCount() : 0;
+        int cols = st->grid ? st->grid->columnCount() : 0;
+        gtk_label_set_text(GTK_LABEL(st->rowCountLabel),
+            (std::to_string(rows) + " rows, " + std::to_string(cols) + " cols").c_str());
+    }
 }
 
 void updateTextTab(StructViewState *st) {
@@ -98,10 +114,12 @@ void rebuildGrid(StructViewState *st, DocumentNode *node) {
     st->grid->setDirtyChangedCallback([st](bool d) {
         if (d) st->dirty = true;
         updateDirtyIndicator(st);
+        updateStatusBar(st); // row count may have changed (row insert/delete)
     });
 
     gtk_box_pack_start(GTK_BOX(st->gridContainer), st->grid->widget(), TRUE, TRUE, 0);
     gtk_widget_show_all(st->grid->widget());
+    updateStatusBar(st);
 }
 
 void showNode(StructViewState *st, DocumentNode *node) {
@@ -414,6 +432,16 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
     st->findPanel->setReplaceEnabled(false); // read-only find here, matches structview's Qt-side onFind (no replace wired)
     st->findPanel->onFindRequested = [st](bool forward) { doFind(st, forward); };
     gtk_box_pack_start(GTK_BOX(st->root), st->findPanel->widget(), FALSE, FALSE, 0);
+
+    // Status bar: format name + row/column count, mirroring PluginStatusBar (Qt6).
+    GtkWidget *statusBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(statusBar), 2);
+    st->formatLabel = gtk_label_new("");
+    gtk_box_pack_start(GTK_BOX(statusBar), st->formatLabel, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(statusBar), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 0);
+    st->rowCountLabel = gtk_label_new("");
+    gtk_box_pack_start(GTK_BOX(statusBar), st->rowCountLabel, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(st->root), statusBar, FALSE, FALSE, 0);
 
     st->focusManager->enableUndoShortcuts();
     st->focusManager->registerShortcut(GDK_KEY_s, GDK_CONTROL_MASK, GtkFocusManager::Always,
