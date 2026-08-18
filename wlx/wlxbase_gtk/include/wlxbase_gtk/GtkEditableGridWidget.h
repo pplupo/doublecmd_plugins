@@ -16,6 +16,17 @@ class GtkFocusManager;
 /// filter-row, or theme-toggle context-menu integration — those are
 /// secondary UI chrome, not the undo/redo + editing functionality this
 /// was built to bring to parity.
+///
+/// Also intentionally NOT ported: insertColumns/deleteSelectedColumns/
+/// copyColumnSelection/pasteColumnSelectionAt. Qt's versions are driven by
+/// QHeaderView's column-selection UI; GtkTreeViewColumn headers have no
+/// equivalent selection API, and no plugin here has ever built
+/// click-to-select-column UI, so those methods would have no way to be
+/// invoked -- dead API surface, not a real gap. setFilterRow and
+/// setThemeToggleEnabled/setExtraContextMenuCallback are similarly out of
+/// scope: they hook into Qt's FilterRowWidget and right-click context menu
+/// (showRowContextMenu/showColumnContextMenu), neither of which exists on
+/// the GTK side at all.
 class GtkEditableGridWidget {
 public:
     /// Takes ownership of building a GtkTreeView with `columnCount`
@@ -51,8 +62,15 @@ public:
     // --- Data operations (undo-tracked) ---
     void copySelection(char separator = '\t');
     void pasteSelection(char separator = '\t');
+    /// Same as pasteSelection(), but pastes starting at a given row instead
+    /// of the current selection (e.g. from a programmatic Replace-driven
+    /// paste rather than an interactive one).
+    void pasteSelectionAt(int atRow, char separator = '\t');
     void insertRows(int count, int atRow);
     void deleteSelectedRows();
+
+    // --- Appearance ---
+    void setShowGrid(bool show);
 
     /// Programmatic single-cell edit (e.g. from Replace/Replace All),
     /// pushed through the same undo stack as interactive edits.
