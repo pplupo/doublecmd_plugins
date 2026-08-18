@@ -233,6 +233,20 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     gtk_widget_add_events(p->glArea,
         GDK_POINTER_MOTION_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
         GDK_SCROLL_MASK | GDK_KEY_PRESS_MASK | GDK_LEAVE_NOTIFY_MASK);
+    // DC's ResizeWindow (the call that gives this widget its real width/
+    // height via gtk_layout_move + set_size_request) runs AFTER ListLoad
+    // returns -- so at show_all() time below, the widget is still 0x0.
+    // GtkGLArea only realizes (creates its GdkWindow and fires "realize",
+    // which is what creates mpv's actual GL render context in
+    // onGlRealize()) once it has real, non-zero allocated geometry. In
+    // DC's quick-view panel, if the panel gets torn down before
+    // ResizeWindow ever arrives, "realize" never fires and mpv's render
+    // context never gets created -- the panel stays black. A standalone
+    // F3 window doesn't have this problem since its GtkWindow is sized
+    // immediately. Giving the widget a real placeholder size up front (DC's
+    // own ResizeWindow will resize it correctly moments later regardless)
+    // lets GTK realize it right away, independent of DC's timing.
+    gtk_widget_set_size_request(p->glArea, 320, 240);
 
     g_signal_connect(p->glArea, "realize", G_CALLBACK(onGlRealize), p);
     g_signal_connect(p->glArea, "render", G_CALLBACK(onGlRender), p);
@@ -246,6 +260,11 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     g_object_set_data_full(G_OBJECT(p->root), "mpv-player", p, destroyPlayer);
 
     gtk_widget_show_all(p->root);
+    // Force realization synchronously rather than waiting for GTK's normal
+    // map/size-allocate cycle to get around to it -- same reasoning as the
+    // size_request above: don't leave mpv's render context creation
+    // dependent on timing DC doesn't guarantee for the quick-view panel.
+    gtk_widget_realize(p->glArea);
 
     if (p->engine->isValid())
         p->engine->loadFile(std::string(FileToLoad));
