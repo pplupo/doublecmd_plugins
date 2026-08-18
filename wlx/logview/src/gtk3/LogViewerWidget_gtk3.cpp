@@ -310,6 +310,21 @@ RuleEditResult runRuleDialog(GtkWindow *parent, const std::string &initialPatter
 LogColor toLogColor(const GdkRGBA &c) { return LogColor{(int)(c.red*255), (int)(c.green*255), (int)(c.blue*255), true}; }
 GdkRGBA toRgba(const LogColor &c) { return GdkRGBA{c.r/255.0, c.g/255.0, c.b/255.0, 1.0}; }
 
+// Matches SettingsDialog::onAddDefaults' default rule set (Qt6). Declared at
+// file scope, not inline in the "Add Default Rules" handler below, because
+// its array-literal commas would otherwise be misparsed as extra arguments
+// to the enclosing G_CALLBACK(...) macro (G_CALLBACK only balances parens,
+// not braces, when splitting macro arguments).
+struct DefaultHighlightRule { const char *pat, *fg, *bg; };
+const DefaultHighlightRule kDefaultHighlightRules[] = {
+    { ".*TRACE.*", "#9CA3AF", "#000000" },
+    { ".*DEBUG.*", "#60A5FA", "#000000" },
+    { ".*INFO.*",  "#4ADE80", "#000000" },
+    { ".*WARN.*",  "#FBBF24", "#000000" },
+    { ".*ERROR.*", "#F87171", "#000000" },
+    { ".*FATAL.*", "#C084FC", "#000000" },
+};
+
 void rebuildEngineHighlightRules(LogViewerState *st)
 {
     std::vector<EngineHighlightRule> engineRules;
@@ -332,30 +347,39 @@ void openSettingsDialog(LogViewerState *st)
     gtk_window_set_default_size(GTK_WINDOW(dlg), 500, 400);
     GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
 
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    gtk_container_set_border_width(GTK_CONTAINER(vbox), 8);
+    // Qt's SettingsDialog lays this out as an HBox(table, VBox(buttons)) --
+    // mirror that here instead of GTK's previous single VBox with a
+    // horizontal button row underneath.
+    GtkWidget *mainRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(mainRow), 8);
 
-    GtkListStore *store = gtk_list_store_new(1, G_TYPE_STRING);
-    for (auto &r : st->rules) {
+    // Column 0 = priority (1-based row position, display-only), column 1 = pattern.
+    GtkListStore *store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_STRING);
+    for (size_t i = 0; i < st->rules.size(); ++i) {
         GtkTreeIter it;
         gtk_list_store_append(store, &it);
-        gtk_list_store_set(store, &it, 0, r.pattern.c_str(), -1);
+        gtk_list_store_set(store, &it, 0, std::to_string(i + 1).c_str(), 1, st->rules[i].pattern.c_str(), -1);
     }
     GtkWidget *listWidget = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
-    GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
-    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(listWidget), -1, "Pattern", renderer, "text", 0, nullptr);
+    GtkCellRenderer *priorityRenderer = gtk_cell_renderer_text_new();
+    gtk_tree_view_insert_column_with_attributes(GTK_TREE_VIEW(listWidget), -1, "Priority", priorityRenderer, "text", 0, nullptr);
+    GtkCellRenderer *patternRenderer = gtk_cell_renderer_text_new();
+    GtkTreeViewColumn *patternCol = gtk_tree_view_column_new_with_attributes("Regex Pattern", patternRenderer, "text", 1, nullptr);
+    gtk_tree_view_column_set_expand(patternCol, TRUE);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(listWidget), patternCol);
     GtkWidget *scroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_widget_set_size_request(scroll, -1, 250);
     gtk_container_add(GTK_CONTAINER(scroll), listWidget);
-    gtk_box_pack_start(GTK_BOX(vbox), scroll, TRUE, TRUE, 0);
+    gtk_widget_set_hexpand(scroll, TRUE);
+    gtk_box_pack_start(GTK_BOX(mainRow), scroll, TRUE, TRUE, 0);
 
     auto refreshList = [store, st]() {
         gtk_list_store_clear(store);
-        for (auto &r : st->rules) {
+        for (size_t i = 0; i < st->rules.size(); ++i) {
             GtkTreeIter it;
             gtk_list_store_append(store, &it);
-            gtk_list_store_set(store, &it, 0, r.pattern.c_str(), -1);
+            gtk_list_store_set(store, &it, 0, std::to_string(i + 1).c_str(), 1, st->rules[i].pattern.c_str(), -1);
         }
     };
 
@@ -369,16 +393,24 @@ void openSettingsDialog(LogViewerState *st)
         return idx;
     };
 
-    GtkWidget *btnRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    GtkWidget *btnCol = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     GtkWidget *btnAdd = gtk_button_new_with_label("Add");
     GtkWidget *btnEdit = gtk_button_new_with_label("Edit");
     GtkWidget *btnDelete = gtk_button_new_with_label("Delete");
+    GtkWidget *btnDefault = gtk_button_new_with_label("Add Default Rules");
     GtkWidget *btnUp = gtk_button_new_with_label("Move Up");
     GtkWidget *btnDown = gtk_button_new_with_label("Move Down");
-    for (GtkWidget *b : {btnAdd, btnEdit, btnDelete, btnUp, btnDown})
-        gtk_box_pack_start(GTK_BOX(btnRow), b, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(vbox), btnRow, FALSE, FALSE, 0);
-    gtk_container_add(GTK_CONTAINER(content), vbox);
+    for (GtkWidget *b : {btnAdd, btnEdit, btnDelete, btnDefault})
+        gtk_box_pack_start(GTK_BOX(btnCol), b, FALSE, FALSE, 0);
+    // A spacer matching Qt's addSpacing(20) between the rule-editing
+    // buttons and the reordering buttons.
+    GtkWidget *btnSpacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request(btnSpacer, -1, 20);
+    gtk_box_pack_start(GTK_BOX(btnCol), btnSpacer, FALSE, FALSE, 0);
+    for (GtkWidget *b : {btnUp, btnDown})
+        gtk_box_pack_start(GTK_BOX(btnCol), b, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(mainRow), btnCol, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(content), mainRow);
 
     struct Ctx { LogViewerState *st; GtkWidget *listWidget; std::function<void()> refresh; std::function<int()> selIndex; GtkWidget *dlg; };
     auto *ctx = new Ctx{st, listWidget, refreshList, selectedIndex, dlg};
@@ -417,6 +449,34 @@ void openSettingsDialog(LogViewerState *st)
         int idx = ctx->selIndex();
         if (idx < 0 || idx >= (int)ctx->st->rules.size()) return;
         ctx->st->rules.erase(ctx->st->rules.begin() + idx);
+        ctx->refresh();
+    }), ctx, nullptr, (GConnectFlags)0);
+
+    g_signal_connect_data(btnDefault, "clicked", G_CALLBACK(+[](GtkButton *, gpointer data) {
+        auto *ctx = static_cast<Ctx *>(data);
+        int insertIdx = ctx->selIndex();
+        if (insertIdx < 0) insertIdx = 0;
+
+        for (int i = 5; i >= 0; --i) {
+            const auto &d = kDefaultHighlightRules[i];
+            bool exists = false;
+            for (auto &r : ctx->st->rules) {
+                if (r.pattern == d.pat) { exists = true; break; }
+            }
+            if (exists) continue;
+
+            GdkRGBA fg;
+            GdkRGBA bg;
+            gdk_rgba_parse(&fg, d.fg);
+            gdk_rgba_parse(&bg, d.bg);
+            EngineHighlightRule r;
+            r.pattern = d.pat;
+            r.foregroundColor = toLogColor(fg);
+            r.backgroundColor = toLogColor(bg);
+            r.compiledRegex = std::make_shared<re2::RE2>(r.pattern);
+            if (r.compiledRegex->ok())
+                ctx->st->rules.insert(ctx->st->rules.begin() + insertIdx, r);
+        }
         ctx->refresh();
     }), ctx, nullptr, (GConnectFlags)0);
 
