@@ -6,9 +6,14 @@
 #include "core/DbEngineCore.h"
 #include "wlxbase_gtk/GtkFocusManager.h"
 #include "wlxbase_gtk/GtkEditableGridWidget.h"
+#include "wlxbase_gtk/GtkPluginToolBar.h"
+#include "wlxbase_gtk/GtkFindReplacePanel.h"
 
 #include <gtk/gtk.h>
+#include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,6 +21,8 @@
 #include "wlxplugin.h"
 
 #define EXPORT __attribute__((visibility("default")))
+
+using namespace GtkWlPlugin;
 
 namespace {
 
@@ -30,13 +37,24 @@ struct DbViewState {
     GtkWidget *sqlEntry = nullptr;
 
     std::unique_ptr<DbEngineCore> engine;
-    std::unique_ptr<GtkWlPlugin::GtkFocusManager> focusManager;
-    std::unique_ptr<GtkWlPlugin::GtkEditableGridWidget> grid;
+    std::unique_ptr<GtkFocusManager> focusManager;
+    std::unique_ptr<GtkEditableGridWidget> grid;
+    std::unique_ptr<GtkPluginToolBar> toolbar;
+    std::unique_ptr<GtkFindReplacePanel> findPanel;
+
+    GtkWidget *submitBtn = nullptr;
+    GtkWidget *revertBtn = nullptr;
+    GtkWidget *findToggle = nullptr;
+    bool wordWrap = false;
+    bool gridLines = true;
 
     std::string filepath;
 };
 
 enum { COL_NAME = 0, N_COLS };
+
+void onToggleWordWrap(DbViewState *st, bool active);
+void onToggleGridLines(DbViewState *st, bool active);
 
 void updateStatus(DbViewState *st) {
     if (!st->statusLabel || !st->engine) return;
@@ -85,6 +103,12 @@ void loadGridFromEngine(DbViewState *st) {
     }
 
     appendEngineRowsToGrid(st, 0);
+
+    // Word Wrap / Grid Lines are per-GtkTreeView toggle state on the toolbar,
+    // but each table switch tears down and rebuilds the grid's own
+    // GtkTreeView -- reapply the persisted toggle state to the new one.
+    onToggleWordWrap(st, st->wordWrap);
+    onToggleGridLines(st, st->gridLines);
 
     gtk_box_pack_start(GTK_BOX(st->gridContainer), st->grid->widget(), TRUE, TRUE, 0);
     gtk_widget_show_all(st->grid->widget());
@@ -153,16 +177,108 @@ void onTreeSelectionChanged(GtkTreeSelection *sel, gpointer data) {
     if (name) { selectTable(st, name); g_free(name); }
 }
 
-void onSubmitClicked(GtkButton *, gpointer data) {
-    auto *st = (DbViewState *)data;
+void onSubmitClicked(DbViewState *st) {
     // submitAll() may reopen the cursor internally (Firebird: statements
     // must be freed before COMMIT), which resets the engine's own fetched-
     // rows cache -- reload the grid from scratch to match, same as revert.
     if (st->engine->submitAll()) { loadGridFromEngine(st); updateStatus(st); }
 }
-void onRevertClicked(GtkButton *, gpointer data) {
-    auto *st = (DbViewState *)data;
+void onRevertClicked(DbViewState *st) {
     if (st->engine->revertAll()) { loadGridFromEngine(st); updateStatus(st); }
+}
+
+void onToggleWordWrap(DbViewState *st, bool active) {
+    st->wordWrap = active;
+    if (!st->grid) return;
+    GList *columns = gtk_tree_view_get_columns(GTK_TREE_VIEW(st->grid->treeView()));
+    for (GList *l = columns; l; l = l->next) {
+        GList *renderers = gtk_cell_layout_get_cells(GTK_CELL_LAYOUT(l->data));
+        for (GList *r = renderers; r; r = r->next) {
+            g_object_set(r->data,
+                "wrap-width", active ? 300 : -1,
+                "wrap-mode", active ? PANGO_WRAP_WORD_CHAR : PANGO_WRAP_WORD,
+                nullptr);
+        }
+        g_list_free(renderers);
+    }
+    g_list_free(columns);
+    gtk_widget_queue_resize(st->grid->treeView());
+}
+
+void onToggleGridLines(DbViewState *st, bool active) {
+    st->gridLines = active;
+    if (st->grid)
+        gtk_tree_view_set_grid_lines(GTK_TREE_VIEW(st->grid->treeView()),
+            active ? GTK_TREE_VIEW_GRID_LINES_BOTH : GTK_TREE_VIEW_GRID_LINES_NONE);
+}
+
+void onExportTableData(DbViewState *st) {
+    if (!st->grid) return;
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Export Table Data",
+        GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+        GTK_FILE_CHOOSER_ACTION_SAVE,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Export", GTK_RESPONSE_ACCEPT, nullptr);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog),
+        (st->engine->currentTableName() + ".csv").c_str());
+    gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        std::ofstream out(path);
+        if (out) {
+            int ncols = st->grid->columnCount();
+            for (int c = 0; c < ncols; c++) {
+                if (c) out << ',';
+                out << '"' << st->engine->columnName(c) << '"';
+            }
+            out << '\n';
+            for (auto &row : st->grid->rowData()) {
+                for (int c = 0; c < (int)row.size(); c++) {
+                    if (c) out << ',';
+                    std::string cell = row[c];
+                    std::string escaped;
+                    for (char ch : cell) { if (ch == '"') escaped += '"'; escaped += ch; }
+                    out << '"' << escaped << '"';
+                }
+                out << '\n';
+            }
+        }
+        g_free(path);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+bool dbCellMatches(const std::string &text, const std::string &query, bool matchCase) {
+    if (query.empty()) return false;
+    if (matchCase) return text.find(query) != std::string::npos;
+    std::string t = text, q = query;
+    std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::transform(q.begin(), q.end(), q.begin(), [](unsigned char c) { return std::tolower(c); });
+    return t.find(q) != std::string::npos;
+}
+
+void doFind(DbViewState *st, bool forward) {
+    if (!st->grid) return;
+    std::string query = st->findPanel->findText();
+    if (query.empty()) return;
+    bool matchCase = st->findPanel->matchCase();
+
+    auto rows = st->grid->rowData();
+    int nrows = (int)rows.size(), ncols = st->grid->columnCount();
+    if (nrows == 0 || ncols == 0) return;
+    int total = nrows * ncols;
+    for (int step = 1; step <= total; ++step) {
+        int idx = forward ? step - 1 : total - step;
+        int r = idx / ncols, c = idx % ncols;
+        if (r >= (int)rows.size() || c >= (int)rows[r].size()) continue;
+        if (dbCellMatches(rows[r][c], query, matchCase)) {
+            st->grid->selectCell(r, c);
+            st->findPanel->setStatusText("Match found");
+            return;
+        }
+    }
+    st->findPanel->setStatusText("No matches");
 }
 void onRunSqlClicked(GtkButton *, gpointer data) {
     auto *st = (DbViewState *)data;
@@ -212,18 +328,10 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
     // asserts the widget's parent is exactly this GtkLayout.
     gtk_layout_put(GTK_LAYOUT(ParentWin), st->root, 0, 0);
 
-    GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    if (st->engine->supportsSubmitRevert()) {
-        GtkWidget *submitBtn = gtk_button_new_with_label("Submit");
-        g_signal_connect(submitBtn, "clicked", G_CALLBACK(onSubmitClicked), st);
-        gtk_box_pack_start(GTK_BOX(toolbar), submitBtn, FALSE, FALSE, 2);
-        GtkWidget *revertBtn = gtk_button_new_with_label("Revert");
-        g_signal_connect(revertBtn, "clicked", G_CALLBACK(onRevertClicked), st);
-        gtk_box_pack_start(GTK_BOX(toolbar), revertBtn, FALSE, FALSE, 2);
-    }
+    GtkWidget *toolbarRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     st->statusLabel = gtk_label_new("");
-    gtk_box_pack_end(GTK_BOX(toolbar), st->statusLabel, FALSE, FALSE, 4);
-    gtk_box_pack_start(GTK_BOX(st->root), toolbar, FALSE, FALSE, 2);
+    gtk_box_pack_end(GTK_BOX(toolbarRow), st->statusLabel, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(st->root), toolbarRow, FALSE, FALSE, 2);
 
     st->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(st->root), st->paned, TRUE, TRUE, 0);
@@ -257,7 +365,37 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
     st->gridContainer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_pack_start(GTK_BOX(st->rightBox), st->gridContainer, TRUE, TRUE, 0);
 
-    st->focusManager = std::make_unique<GtkWlPlugin::GtkFocusManager>(st->root, st->treeView);
+    st->focusManager = std::make_unique<GtkFocusManager>(st->root, st->treeView);
+
+    st->toolbar = std::make_unique<GtkPluginToolBar>(st->focusManager.get());
+    if (st->engine->supportsSubmitRevert()) {
+        st->submitBtn = st->toolbar->addToolAction("Commit", "document-save-symbolic",
+            [st]() { onSubmitClicked(st); });
+        st->revertBtn = st->toolbar->addToolAction("Revert", "edit-undo-symbolic",
+            [st]() { onRevertClicked(st); });
+        if (st->engine->isReadOnly()) {
+            gtk_widget_set_sensitive(st->submitBtn, FALSE);
+            gtk_widget_set_sensitive(st->revertBtn, FALSE);
+        }
+        st->toolbar->addSeparator();
+    }
+    st->toolbar->addToggleAction("Word Wrap", "format-text-wrap-symbolic", false,
+        [st](bool active) { onToggleWordWrap(st, active); });
+    st->toolbar->addToggleAction("Grid Lines", "view-grid-symbolic", true,
+        [st](bool active) { onToggleGridLines(st, active); });
+    st->findToggle = st->toolbar->addToggleAction("Find", "edit-find-symbolic", false,
+        [st](bool active) { st->findPanel->showPanel(active); });
+    st->toolbar->addToolAction("Export", "document-send-symbolic",
+        [st]() { onExportTableData(st); });
+    gtk_box_pack_start(GTK_BOX(toolbarRow), st->toolbar->widget(), TRUE, TRUE, 0);
+    gtk_box_reorder_child(GTK_BOX(toolbarRow), st->toolbar->widget(), 0);
+
+    st->findPanel = std::make_unique<GtkFindReplacePanel>(st->focusManager.get());
+    st->findPanel->setReplaceEnabled(false);
+    st->findPanel->onFindRequested = [st](bool forward) { doFind(st, forward); };
+    gtk_box_pack_start(GTK_BOX(st->root), st->findPanel->widget(), FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(st->root), st->findPanel->widget(), 1);
+
     loadGridFromEngine(st);
 
     g_signal_connect(st->root, "destroy", G_CALLBACK(destroyState), st);
