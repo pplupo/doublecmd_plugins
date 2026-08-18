@@ -38,23 +38,50 @@ namespace {
 
 constexpr int kDtSpinCount = 6; // year, month, day, hour, minute, second
 
+// Zero-pads the displayed value ("3" -> "03") -- without this, a date read
+// back as "2026-8-5 9:3:0", which barely parses as a date/time at a glance
+// and was reported as "hard to understand". GtkSpinButton's "output" signal
+// is the documented hook for overriding the default (unpadded) text.
+gboolean spinOutputZeroPad(GtkSpinButton *spin, gpointer data)
+{
+    int digits = GPOINTER_TO_INT(data);
+    int value = gtk_spin_button_get_value_as_int(spin);
+    gchar *text = g_strdup_printf("%0*d", digits, value);
+    if (g_strcmp0(gtk_entry_get_text(GTK_ENTRY(spin)), text) != 0)
+        gtk_entry_set_text(GTK_ENTRY(spin), text);
+    g_free(text);
+    return TRUE;
+}
+
 GtkWidget *buildDateTimeSpinner(GtkWidget *spin[kDtSpinCount])
 {
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    struct Field { int lo, hi, width; const char *sep; };
+    // Grouped in a GtkFrame so the six fields read as one control (closer
+    // to how Qt's QDateTimeEdit presents as a single bordered field with
+    // per-segment spinning) rather than a bare run of number boxes.
+    GtkWidget *frame = gtk_frame_new(nullptr);
+    gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_IN);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 1);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 2);
+    gtk_container_add(GTK_CONTAINER(frame), box);
+
+    struct Field { int lo, hi, width, digits; const char *sep; const char *tooltip; };
     static const Field fields[kDtSpinCount] = {
-        {1970, 9999, 5, "-"}, {1, 12, 3, "-"}, {1, 31, 3, " "},
-        {0, 23, 3, ":"}, {0, 59, 3, ":"}, {0, 59, 3, ""},
+        {1970, 9999, 5, 4, "-", "Year"},   {1, 12, 3, 2, "-", "Month"}, {1, 31, 3, 2, " ", "Day"},
+        {0, 23, 3, 2, ":", "Hour"}, {0, 59, 3, 2, ":", "Minute"}, {0, 59, 3, 2, "", "Second"},
     };
     for (int i = 0; i < kDtSpinCount; ++i) {
         spin[i] = gtk_spin_button_new_with_range(fields[i].lo, fields[i].hi, 1);
         gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(spin[i]), TRUE);
         gtk_entry_set_width_chars(GTK_ENTRY(spin[i]), fields[i].width);
+        gtk_entry_set_alignment(GTK_ENTRY(spin[i]), 0.5f);
+        gtk_widget_set_tooltip_text(spin[i], fields[i].tooltip);
+        gtk_entry_set_has_frame(GTK_ENTRY(spin[i]), FALSE); // border comes from the enclosing GtkFrame instead
+        g_signal_connect(spin[i], "output", G_CALLBACK(spinOutputZeroPad), GINT_TO_POINTER(fields[i].digits));
         gtk_box_pack_start(GTK_BOX(box), spin[i], FALSE, FALSE, 0);
         if (*fields[i].sep)
             gtk_box_pack_start(GTK_BOX(box), gtk_label_new(fields[i].sep), FALSE, FALSE, 0);
     }
-    return box;
+    return frame;
 }
 
 LogTimestamp readTimestampFromSpinner(GtkWidget *const spin[kDtSpinCount])
@@ -392,6 +419,32 @@ void openSettingsDialog(LogViewerState *st)
     GtkCellRenderer *patternRenderer = gtk_cell_renderer_text_new();
     GtkTreeViewColumn *patternCol = gtk_tree_view_column_new_with_attributes("Regex Pattern", patternRenderer, "text", 1, nullptr);
     gtk_tree_view_column_set_expand(patternCol, TRUE);
+    // Show each rule's own colors on its row, matching Qt's
+    // itemPattern->setBackground()/setForeground() -- previously this list
+    // showed every rule (including "Add Default Rules"-loaded ones) as
+    // plain uncolored text, which is what read to the user as "the
+    // defaults didn't come with their colors".
+    gtk_tree_view_column_set_cell_data_func(patternCol, patternRenderer,
+        +[](GtkTreeViewColumn *, GtkCellRenderer *cell, GtkTreeModel *model, GtkTreeIter *iter, gpointer data) {
+            auto *st = static_cast<LogViewerState *>(data);
+            GtkTreePath *p = gtk_tree_model_get_path(model, iter);
+            int row = gtk_tree_path_get_indices(p)[0];
+            gtk_tree_path_free(p);
+            if (row < 0 || row >= (int)st->rules.size()) return;
+            const auto &r = st->rules[row];
+            if (r.foregroundColor.valid) {
+                GdkRGBA rgba = toRgba(r.foregroundColor);
+                g_object_set(cell, "foreground-rgba", &rgba, nullptr);
+            } else {
+                g_object_set(cell, "foreground-set", FALSE, nullptr);
+            }
+            if (r.backgroundColor.valid) {
+                GdkRGBA rgba = toRgba(r.backgroundColor);
+                g_object_set(cell, "background-rgba", &rgba, nullptr);
+            } else {
+                g_object_set(cell, "background-set", FALSE, nullptr);
+            }
+        }, st, nullptr);
     gtk_tree_view_append_column(GTK_TREE_VIEW(listWidget), patternCol);
     GtkWidget *scroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_widget_set_size_request(scroll, -1, 250);
@@ -696,6 +749,17 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     GtkWidget *scroll = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_widget_set_vexpand(scroll, TRUE);
     st->treeView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(st->model));
+    // gtk_tree_view_new_with_model() takes its own ref on the model; drop
+    // ours (log_tree_model_new()'s g_object_new() ref) so the treeview owns
+    // it solely, matching the pattern already used for GtkListStore in
+    // GtkEditableGridWidget.cpp. Without this the model's refcount never
+    // reaches 0 when the treeview is torn down -- it leaks, outliving
+    // LogViewerState's destruction, with model->engine and model->filter
+    // left dangling into freed memory (this was reproducibly crashing
+    // doublecmd on close, deep inside libgobject/libgtk-3's own signal
+    // machinery, since st->model stays "alive" per GObject bookkeeping
+    // with pointers into memory that's already been freed).
+    g_object_unref(st->model);
     gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(st->treeView), FALSE);
     gtk_tree_selection_set_mode(gtk_tree_view_get_selection(GTK_TREE_VIEW(st->treeView)), GTK_SELECTION_MULTIPLE);
 
