@@ -307,6 +307,51 @@ void GtkEditableGridWidget::pasteSelection(char separator)
     setDirty(true);
 }
 
+void GtkEditableGridWidget::pasteSelectionAt(int atRow, char separator)
+{
+    GtkClipboard *clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+    gchar *text = gtk_clipboard_wait_for_text(clipboard);
+    if (!text) return;
+    std::string clip(text);
+    g_free(text);
+
+    auto before = rowData();
+    auto after = before;
+
+    std::istringstream lineStream(clip);
+    std::string line;
+    int r = std::max(0, atRow);
+    while (std::getline(lineStream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        while ((int)after.size() <= r) after.emplace_back(m_columnCount, "");
+
+        std::vector<std::string> cells;
+        std::istringstream cellStream(line);
+        std::string cell;
+        while (std::getline(cellStream, cell, separator)) cells.push_back(cell);
+        if (line.empty()) cells.push_back("");
+
+        for (int c = 0; c < (int)cells.size() && c < m_columnCount; ++c)
+            after[r][c] = cells[c];
+        ++r;
+    }
+
+    GtkEditableGridWidget *self = this;
+    GtkFocusManager::UndoCommand cmd;
+    cmd.text = "Paste";
+    cmd.undo = [self, before]() { self->setRowData(before); };
+    cmd.redo = [self, after]() { self->setRowData(after); };
+    if (m_fm) m_fm->pushUndo(std::move(cmd));
+    else setRowData(after);
+    setDirty(true);
+}
+
+void GtkEditableGridWidget::setShowGrid(bool show)
+{
+    gtk_tree_view_set_grid_lines(GTK_TREE_VIEW(m_treeView),
+        show ? GTK_TREE_VIEW_GRID_LINES_BOTH : GTK_TREE_VIEW_GRID_LINES_NONE);
+}
+
 void GtkEditableGridWidget::insertRows(int count, int atRow)
 {
     auto before = rowData();
