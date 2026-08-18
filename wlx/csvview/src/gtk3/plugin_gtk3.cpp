@@ -642,8 +642,17 @@ void onToggleShowText(CsvGtkState *st, bool active)
     if (active) {
         updateTextView(st);
         gtk_widget_hide(st->grid->widget());
-        gtk_widget_show_all(st->textScroll); // textScroll has no_show_all set, so show() alone
-                                              // wouldn't reveal the GtkTextView inside it
+        // gtk_widget_show_all() is NOT the fix here despite the name: when
+        // no_show_all is set on a widget, show_all() skips that widget
+        // ENTIRELY -- including when called directly on it, not just when
+        // recursing into it as a descendant -- so the previous
+        // gtk_widget_show_all(st->textScroll) was a complete no-op and
+        // textScroll (and the GtkTextView inside it, which as a result had
+        // never once been individually shown since creation) stayed
+        // invisible. gtk_widget_show() ignores no_show_all entirely, so
+        // show both the container and its child explicitly instead.
+        gtk_widget_show(st->textScroll);
+        gtk_widget_show(st->textView);
         if (st->findPanel->isPanelVisible()) st->findPanel->showPanel(false);
     } else {
         gtk_widget_hide(st->textScroll);
