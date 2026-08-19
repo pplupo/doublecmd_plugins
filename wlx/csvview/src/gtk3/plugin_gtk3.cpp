@@ -69,6 +69,11 @@ struct CsvGtkState {
 
     // Find state
     int findRow = 0, findCol = 0;
+
+    // Column selection (click a column header to select it -- highlighted
+    // visually since GtkTreeSelection has no native column-selection
+    // concept, only row selection). -1 = no column selected.
+    int selectedColumn = -1;
 };
 
 std::string readFile(const std::string &path)
@@ -142,6 +147,60 @@ void addRowNumberColumn(GtkWidget *treeView)
     gtk_tree_view_insert_column(GTK_TREE_VIEW(treeView), col, 0);
 }
 
+// A naked std::pair<CsvGtkState*, int> trips up the preprocessor when used
+// directly inside a G_CALLBACK(...) macro invocation -- G_CALLBACK only
+// balances parens when splitting its argument list, so the comma inside
+// the template argument list gets misparsed as an extra macro argument
+// (same class of bug fixed earlier for the column-edit renderer context
+// below). Route through a type alias instead.
+using ColSelCtx = std::pair<CsvGtkState *, int>;
+
+// Tints every cell in the currently-selected column (CsvGtkState's own
+// selectedColumn, set by clicking a column header below) so the selection
+// is visible -- GtkTreeSelection only tracks row selection natively, there
+// is no built-in concept of a selected column to render for us.
+void columnHighlightCellDataFunc(GtkTreeViewColumn *, GtkCellRenderer *cell,
+                                  GtkTreeModel *, GtkTreeIter *, gpointer userData)
+{
+    auto *ctx = static_cast<ColSelCtx *>(userData);
+    if (ctx->first->selectedColumn == ctx->second)
+        g_object_set(cell, "cell-background", "#3465A4", "cell-background-set", TRUE, nullptr);
+    else
+        g_object_set(cell, "cell-background-set", FALSE, nullptr);
+}
+
+// Makes every data column header clickable to select (and visually
+// highlight) that whole column -- addresses "can't select columns" for the
+// column-operations context menu. Must run after addRowNumberColumn() so
+// the "+1" gutter offset below is correct (matches the ordering
+// requirement documented at loadFile()/rebuildGridColumns()'s own
+// addRowNumberColumn() call sites).
+void setupColumnSelection(CsvGtkState *st)
+{
+    GtkWidget *treeView = st->grid->treeView();
+    int dataColCount = st->grid->columnCount();
+    for (int c = 0; c < dataColCount; ++c) {
+        GtkTreeViewColumn *col = gtk_tree_view_get_column(GTK_TREE_VIEW(treeView), c + 1); // +1: skip the "#" gutter
+        if (!col) continue;
+        gtk_tree_view_column_set_clickable(col, TRUE);
+
+        auto *ctx = new ColSelCtx(st, c);
+        GList *renderers = gtk_cell_layout_get_cells(GTK_CELL_LAYOUT(col));
+        for (GList *l = renderers; l; l = l->next)
+            gtk_tree_view_column_set_cell_data_func(col, GTK_CELL_RENDERER(l->data),
+                columnHighlightCellDataFunc, ctx, +[](gpointer data) { delete static_cast<ColSelCtx *>(data); });
+        g_list_free(renderers);
+
+        g_signal_connect_data(col, "clicked", G_CALLBACK(+[](GtkTreeViewColumn *, gpointer data) {
+            auto *ctx = static_cast<ColSelCtx *>(data);
+            CsvGtkState *st = ctx->first;
+            st->selectedColumn = (st->selectedColumn == ctx->second) ? -1 : ctx->second;
+            gtk_widget_queue_draw(st->grid->treeView());
+        }), new ColSelCtx(st, c),
+            +[](gpointer data, GClosure *) { delete static_cast<ColSelCtx *>(data); }, (GConnectFlags)0);
+    }
+}
+
 void refreshUndoRedoSensitivity(CsvGtkState *st)
 {
     if (st->undoBtn) gtk_widget_set_sensitive(st->undoBtn, st->fm->canUndo());
@@ -206,7 +265,6 @@ void loadFile(CsvGtkState *st, const std::string &path)
     GtkWidget *oldGridWidget = st->grid ? st->grid->widget() : nullptr;
     st->grid = std::make_unique<GtkEditableGridWidget>(colCount, st->fm.get());
     st->grid->setDirtyChangedCallback([st](bool dirty) { updateDirtyLabel(st, dirty); });
-    addRowNumberColumn(st->grid->treeView());
 
     std::vector<std::vector<std::string>> tableRows;
     size_t startRow = st->firstLineAsHeader ? 1 : 0;
@@ -217,6 +275,17 @@ void loadFile(CsvGtkState *st, const std::string &path)
                                  : ("Column " + std::to_string(c + 1));
         st->grid->setColumnTitle(c, title);
     }
+    // Must come after the title-setting loop above: addRowNumberColumn()
+    // inserts a column at treeview position 0, which shifts every data
+    // column's position by one. setColumnTitle(c, ...) addresses columns
+    // by raw treeview position (via gtk_tree_view_get_column), so calling
+    // this first (as it used to be) made every title-setting call one
+    // column off -- overwriting the "#" gutter's own title with the first
+    // data column's title, and cascading every title one column to the
+    // right of where its data actually lives.
+    addRowNumberColumn(st->grid->treeView());
+    st->selectedColumn = -1; // column identities changed, drop any stale selection
+    setupColumnSelection(st);
     for (size_t r = startRow; r < rows.size(); ++r) {
         std::vector<std::string> row(colCount, "");
         for (int c = 0; c < colCount && c < (int)rows[r].size(); ++c) {
@@ -281,9 +350,12 @@ void rebuildGridColumns(CsvGtkState *st, const std::vector<std::string> &newTitl
     GtkWidget *oldGridWidget = st->grid->widget();
     st->grid = std::make_unique<GtkEditableGridWidget>(newColCount, st->fm.get());
     st->grid->setDirtyChangedCallback([st](bool dirty) { updateDirtyLabel(st, dirty); });
-    addRowNumberColumn(st->grid->treeView());
     for (int c = 0; c < newColCount; ++c)
         st->grid->setColumnTitle(c, newTitles[c]);
+    // Same ordering requirement as loadFile() -- see the comment there.
+    addRowNumberColumn(st->grid->treeView());
+    st->selectedColumn = -1;
+    setupColumnSelection(st);
     st->grid->setRowData(newRows);
     st->grid->setDirty(true);
 
