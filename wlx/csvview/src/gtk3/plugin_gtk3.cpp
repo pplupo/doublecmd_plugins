@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <functional>
 #include <utility>
+#include <set>
 
 #include "wlxplugin.h"
 #include "CsvCore.h"
@@ -72,8 +73,14 @@ struct CsvGtkState {
 
     // Column selection (click a column header to select it -- highlighted
     // visually since GtkTreeSelection has no native column-selection
-    // concept, only row selection). -1 = no column selected.
-    int selectedColumn = -1;
+    // concept, only row selection). Supports Ctrl-click (toggle) and
+    // Shift-click (range from columnSelectAnchor) like row selection does.
+    // Mutually exclusive with row selection: selecting a column clears row
+    // selection and vice versa (suppressRowSelectionSync guards against the
+    // "clear rows" step re-triggering the "clear columns" handler).
+    std::set<int> selectedColumns;
+    int columnSelectAnchor = -1;
+    bool suppressRowSelectionSync = false;
 };
 
 std::string readFile(const std::string &path)
@@ -155,15 +162,15 @@ void addRowNumberColumn(GtkWidget *treeView)
 // below). Route through a type alias instead.
 using ColSelCtx = std::pair<CsvGtkState *, int>;
 
-// Tints every cell in the currently-selected column (CsvGtkState's own
-// selectedColumn, set by clicking a column header below) so the selection
+// Tints every cell in a selected column (CsvGtkState's own
+// selectedColumns, set by clicking column headers below) so the selection
 // is visible -- GtkTreeSelection only tracks row selection natively, there
 // is no built-in concept of a selected column to render for us.
 void columnHighlightCellDataFunc(GtkTreeViewColumn *, GtkCellRenderer *cell,
                                   GtkTreeModel *, GtkTreeIter *, gpointer userData)
 {
     auto *ctx = static_cast<ColSelCtx *>(userData);
-    if (ctx->first->selectedColumn == ctx->second)
+    if (ctx->first->selectedColumns.count(ctx->second))
         g_object_set(cell, "cell-background", "#3465A4", "cell-background-set", TRUE, nullptr);
     else
         g_object_set(cell, "cell-background-set", FALSE, nullptr);
@@ -171,10 +178,19 @@ void columnHighlightCellDataFunc(GtkTreeViewColumn *, GtkCellRenderer *cell,
 
 // Makes every data column header clickable to select (and visually
 // highlight) that whole column -- addresses "can't select columns" for the
-// column-operations context menu. Must run after addRowNumberColumn() so
-// the "+1" gutter offset below is correct (matches the ordering
+// column-operations context menu. Supports Ctrl-click (toggle a column
+// in/out of the selection) and Shift-click (range from the last-clicked
+// column), matching how row multi-selection already works. Selecting a
+// column always clears row selection (and vice versa, via the
+// GtkTreeSelection "changed" handler below) -- the two selection modes are
+// mutually exclusive, not independent. Must run after addRowNumberColumn()
+// so the "+1" gutter offset below is correct (matches the ordering
 // requirement documented at loadFile()/rebuildGridColumns()'s own
-// addRowNumberColumn() call sites).
+// addRowNumberColumn() call sites), and before attachContextMenus() so its
+// right-click handler on the same header buttons gets a chance to run
+// after this one -- this handler only consumes (returns TRUE) primary-
+// button clicks, leaving secondary-button (right-click) events to fall
+// through to attachContextMenus()'s handler connected afterward.
 void setupColumnSelection(CsvGtkState *st)
 {
     GtkWidget *treeView = st->grid->treeView();
@@ -184,21 +200,62 @@ void setupColumnSelection(CsvGtkState *st)
         if (!col) continue;
         gtk_tree_view_column_set_clickable(col, TRUE);
 
-        auto *ctx = new ColSelCtx(st, c);
+        // Two SEPARATE allocations, one per destroy-notify site below --
+        // GTK invokes both independently during teardown (the column's own
+        // cell-data-func destroy-notify, and the button's signal-closure
+        // destroy-notify), so sharing one ctx between them double-frees it
+        // (reproducibly crashed with "double free detected in tcache 2" on
+        // ListCloseWindow, no interaction needed to trigger it).
         GList *renderers = gtk_cell_layout_get_cells(GTK_CELL_LAYOUT(col));
         for (GList *l = renderers; l; l = l->next)
             gtk_tree_view_column_set_cell_data_func(col, GTK_CELL_RENDERER(l->data),
-                columnHighlightCellDataFunc, ctx, +[](gpointer data) { delete static_cast<ColSelCtx *>(data); });
+                columnHighlightCellDataFunc, new ColSelCtx(st, c), +[](gpointer data) { delete static_cast<ColSelCtx *>(data); });
         g_list_free(renderers);
 
-        g_signal_connect_data(col, "clicked", G_CALLBACK(+[](GtkTreeViewColumn *, gpointer data) {
+        GtkWidget *button = gtk_tree_view_column_get_button(col);
+        if (!button) continue;
+        auto *ctx = new ColSelCtx(st, c);
+        g_signal_connect_data(button, "button-press-event", G_CALLBACK(+[](GtkWidget *, GdkEventButton *event, gpointer data) -> gboolean {
+            if (event->button != GDK_BUTTON_PRIMARY) return FALSE; // let the right-click menu handler run instead
             auto *ctx = static_cast<ColSelCtx *>(data);
             CsvGtkState *st = ctx->first;
-            st->selectedColumn = (st->selectedColumn == ctx->second) ? -1 : ctx->second;
+            int col = ctx->second;
+            bool ctrl = (event->state & GDK_CONTROL_MASK) != 0;
+            bool shift = (event->state & GDK_SHIFT_MASK) != 0;
+
+            if (shift && st->columnSelectAnchor >= 0) {
+                int lo = std::min(st->columnSelectAnchor, col);
+                int hi = std::max(st->columnSelectAnchor, col);
+                if (!ctrl) st->selectedColumns.clear();
+                for (int i = lo; i <= hi; ++i) st->selectedColumns.insert(i);
+            } else if (ctrl) {
+                if (st->selectedColumns.count(col)) st->selectedColumns.erase(col);
+                else st->selectedColumns.insert(col);
+                st->columnSelectAnchor = col;
+            } else {
+                st->selectedColumns = {col};
+                st->columnSelectAnchor = col;
+            }
+
+            st->suppressRowSelectionSync = true;
+            gtk_tree_selection_unselect_all(gtk_tree_view_get_selection(GTK_TREE_VIEW(st->grid->treeView())));
+            st->suppressRowSelectionSync = false;
+
             gtk_widget_queue_draw(st->grid->treeView());
-        }), new ColSelCtx(st, c),
-            +[](gpointer data, GClosure *) { delete static_cast<ColSelCtx *>(data); }, (GConnectFlags)0);
+            return TRUE;
+        }), ctx, +[](gpointer data, GClosure *) { delete static_cast<ColSelCtx *>(data); }, (GConnectFlags)0);
     }
+
+    g_signal_connect_data(gtk_tree_view_get_selection(GTK_TREE_VIEW(treeView)), "changed",
+        G_CALLBACK(+[](GtkTreeSelection *sel, gpointer data) {
+            auto *st = static_cast<CsvGtkState *>(data);
+            if (st->suppressRowSelectionSync || st->selectedColumns.empty()) return;
+            if (gtk_tree_selection_count_selected_rows(sel) > 0) {
+                st->selectedColumns.clear();
+                st->columnSelectAnchor = -1;
+                gtk_widget_queue_draw(st->grid->treeView());
+            }
+        }), st, nullptr, (GConnectFlags)0);
 }
 
 void refreshUndoRedoSensitivity(CsvGtkState *st)
@@ -284,7 +341,8 @@ void loadFile(CsvGtkState *st, const std::string &path)
     // data column's title, and cascading every title one column to the
     // right of where its data actually lives.
     addRowNumberColumn(st->grid->treeView());
-    st->selectedColumn = -1; // column identities changed, drop any stale selection
+    st->selectedColumns.clear(); // column identities changed, drop any stale selection
+    st->columnSelectAnchor = -1;
     setupColumnSelection(st);
     for (size_t r = startRow; r < rows.size(); ++r) {
         std::vector<std::string> row(colCount, "");
@@ -354,7 +412,8 @@ void rebuildGridColumns(CsvGtkState *st, const std::vector<std::string> &newTitl
         st->grid->setColumnTitle(c, newTitles[c]);
     // Same ordering requirement as loadFile() -- see the comment there.
     addRowNumberColumn(st->grid->treeView());
-    st->selectedColumn = -1;
+    st->selectedColumns.clear();
+    st->columnSelectAnchor = -1;
     setupColumnSelection(st);
     st->grid->setRowData(newRows);
     st->grid->setDirty(true);
@@ -369,26 +428,35 @@ void rebuildGridColumns(CsvGtkState *st, const std::vector<std::string> &newTitl
     attachContextMenus(st);
 }
 
-void deleteColumn(CsvGtkState *st, int col)
+// N-aware column insert/delete, driven by the current header selection
+// (st->selectedColumns) when the right-clicked column is part of it, or a
+// single-column {col} set otherwise -- see showColumnContextMenu().
+void insertColumnsAt(CsvGtkState *st, int atCol, int count)
 {
     auto titles = currentColumnTitles(st);
-    if (col < 0 || col >= (int)titles.size() || titles.size() <= 1) return;
-    titles.erase(titles.begin() + col);
-    rebuildGridColumns(st, titles, [col](const std::vector<std::string> &row) {
+    atCol = std::max(0, std::min(atCol, (int)titles.size()));
+    for (int i = 0; i < count; ++i)
+        titles.insert(titles.begin() + atCol, "Column " + std::to_string(atCol + i + 1));
+    rebuildGridColumns(st, titles, [atCol, count](const std::vector<std::string> &row) {
         std::vector<std::string> out = row;
-        if (col < (int)out.size()) out.erase(out.begin() + col);
+        for (int i = 0; i < count; ++i)
+            out.insert(out.begin() + std::min(atCol, (int)out.size()), "");
         return out;
     });
 }
 
-void insertColumn(CsvGtkState *st, int atCol)
+void deleteColumns(CsvGtkState *st, const std::set<int> &cols)
 {
     auto titles = currentColumnTitles(st);
-    atCol = std::max(0, std::min(atCol, (int)titles.size()));
-    titles.insert(titles.begin() + atCol, "Column " + std::to_string(atCol + 1));
-    rebuildGridColumns(st, titles, [atCol](const std::vector<std::string> &row) {
+    if (cols.empty() || (int)cols.size() >= (int)titles.size()) return; // must keep at least 1 column
+    std::vector<int> sorted(cols.begin(), cols.end());
+    std::sort(sorted.rbegin(), sorted.rend()); // descending so earlier indices stay valid while erasing
+    for (int c : sorted)
+        if (c >= 0 && c < (int)titles.size()) titles.erase(titles.begin() + c);
+    rebuildGridColumns(st, titles, [sorted](const std::vector<std::string> &row) {
         std::vector<std::string> out = row;
-        out.insert(out.begin() + std::min(atCol, (int)out.size()), "");
+        for (int c : sorted)
+            if (c >= 0 && c < (int)out.size()) out.erase(out.begin() + c);
         return out;
     });
 }
@@ -408,13 +476,24 @@ void showRowContextMenu(CsvGtkState *st, GdkEventButton *event)
     if (path) gtk_tree_path_free(path);
 
     auto data = st->grid->rowData();
-    int minRow = clickedRow, maxRow = clickedRow, numRows = clickedRow >= 0 ? 1 : 0;
-    // GtkEditableGridWidget doesn't expose the current selection range
-    // directly; fall back to "the clicked row" as the operating range,
-    // matching a right-click-without-multi-select interaction (the Qt6
-    // build's richer "N rows" wording when multiple rows are selected
-    // isn't reproduced here -- disclosed, not a functional gap for the
-    // single-row case, which is the common one).
+
+    // The real selection range (via GtkTreeSelection directly, not
+    // GtkEditableGridWidget's own API -- it doesn't expose this, but the
+    // underlying GtkTreeView is directly reachable), so "N rows" actions
+    // reflect an actual multi-row selection rather than just "the row
+    // that was right-clicked".
+    GList *selRows = gtk_tree_selection_get_selected_rows(
+        gtk_tree_view_get_selection(GTK_TREE_VIEW(st->grid->treeView())), nullptr);
+    int minRow = -1, maxRow = -1, numRows = 0;
+    for (GList *l = selRows; l; l = l->next) {
+        int idx = gtk_tree_path_get_indices(static_cast<GtkTreePath *>(l->data))[0];
+        if (minRow < 0 || idx < minRow) minRow = idx;
+        if (idx > maxRow) maxRow = idx;
+        ++numRows;
+    }
+    g_list_free_full(selRows, (GDestroyNotify)gtk_tree_path_free);
+    // No selection -- fall back to the clicked row, same as before.
+    if (numRows == 0 && clickedRow >= 0) { minRow = maxRow = clickedRow; numRows = 1; }
 
     GtkWidget *menu = gtk_menu_new();
     auto addItem = [&](const std::string &label, std::function<void()> action) -> GtkWidget * {
@@ -438,10 +517,14 @@ void showRowContextMenu(CsvGtkState *st, GdkEventButton *event)
     addItem("Copy Selection as CSV", [st]() { st->grid->copySelection(','); });
     addSeparator();
     if (numRows > 0) {
-        addItem(numRows == 1 ? "Delete Row" : "Delete Rows", [st]() { st->grid->deleteSelectedRows(); });
+        addItem(numRows == 1 ? "Delete Row" : "Delete " + std::to_string(numRows) + " Rows",
+            [st]() { st->grid->deleteSelectedRows(); }); // already N-aware: reads the current selection itself
         addSeparator();
-        addItem("Insert Row Above", [st, minRow]() { st->grid->insertRows(1, minRow); });
-        addItem("Insert Row Below", [st, maxRow]() { st->grid->insertRows(1, maxRow + 1); });
+        std::string suffix = numRows == 1 ? "" : (" (" + std::to_string(numRows) + ")");
+        addItem("Insert " + std::to_string(numRows) + " Row" + (numRows == 1 ? "" : "s") + " Above" + suffix,
+            [st, numRows, minRow]() { st->grid->insertRows(numRows, minRow); });
+        addItem("Insert " + std::to_string(numRows) + " Row" + (numRows == 1 ? "" : "s") + " Below" + suffix,
+            [st, numRows, maxRow]() { st->grid->insertRows(numRows, maxRow + 1); });
     }
 
     gtk_widget_show_all(menu);
@@ -450,6 +533,13 @@ void showRowContextMenu(CsvGtkState *st, GdkEventButton *event)
 
 void showColumnContextMenu(CsvGtkState *st, int col, GdkEventButton *event)
 {
+    // If the clicked column is part of a multi-column selection, operate
+    // on the whole selection; otherwise fall back to just the clicked
+    // column (right-click without a prior header click/selection).
+    std::set<int> cols = st->selectedColumns.count(col) ? st->selectedColumns : std::set<int>{col};
+    int numCols = (int)cols.size();
+    int lo = *cols.begin(), hi = *cols.rbegin();
+
     GtkWidget *menu = gtk_menu_new();
     auto addItem = [&](const std::string &label, std::function<void()> action) -> GtkWidget * {
         GtkWidget *item = gtk_menu_item_new_with_label(label.c_str());
@@ -461,11 +551,15 @@ void showColumnContextMenu(CsvGtkState *st, int col, GdkEventButton *event)
         return item;
     };
 
-    addItem("Insert Column Left", [st, col]() { insertColumn(st, col); });
-    addItem("Insert Column Right", [st, col]() { insertColumn(st, col + 1); });
-    if (st->grid->columnCount() > 1) {
+    std::string suffix = numCols == 1 ? "" : (" (" + std::to_string(numCols) + ")");
+    addItem("Insert " + std::to_string(numCols) + " Column" + (numCols == 1 ? "" : "s") + " Left" + suffix,
+        [st, numCols, lo]() { insertColumnsAt(st, lo, numCols); });
+    addItem("Insert " + std::to_string(numCols) + " Column" + (numCols == 1 ? "" : "s") + " Right" + suffix,
+        [st, numCols, hi]() { insertColumnsAt(st, hi + 1, numCols); });
+    if (st->grid->columnCount() > numCols) {
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
-        addItem("Delete Column", [st, col]() { deleteColumn(st, col); });
+        addItem(numCols == 1 ? "Delete Column" : "Delete " + std::to_string(numCols) + " Columns",
+            [st, cols]() { deleteColumns(st, cols); });
     }
 
     gtk_widget_show_all(menu);
