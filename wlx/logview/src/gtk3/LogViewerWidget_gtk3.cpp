@@ -65,6 +65,27 @@ GtkWidget *buildDateTimeSpinner(GtkWidget *spin[kDtSpinCount])
     // spinner's normal, known-good rendering.
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
 
+    // The theme's default vertical-spinbutton steppers render oversized, and
+    // the "down" one draws as an X rather than a minus. Pin both glyphs
+    // explicitly and shrink them, instead of inheriting whatever the ambient
+    // icon theme picks -- installed once, shared by every spinner below.
+    static GtkCssProvider *spinCss = nullptr;
+    if (!spinCss) {
+        spinCss = gtk_css_provider_new();
+        gtk_css_provider_load_from_data(spinCss,
+            "spinbutton.vertical button {"
+            "  min-height: 10px; min-width: 10px; padding: 0px;"
+            "}"
+            "spinbutton.vertical button.up {"
+            "  -gtk-icon-source: -gtk-icontheme(\"list-add-symbolic\");"
+            "  -gtk-icon-transform: scale(0.65);"
+            "}"
+            "spinbutton.vertical button.down {"
+            "  -gtk-icon-source: -gtk-icontheme(\"list-remove-symbolic\");"
+            "  -gtk-icon-transform: scale(0.65);"
+            "}", -1, nullptr);
+    }
+
     struct Field { int lo, hi, width, digits; const char *sep; const char *tooltip; };
     static const Field fields[kDtSpinCount] = {
         {1970, 9999, 5, 4, "-", "Year"},   {1, 12, 3, 2, "-", "Month"}, {1, 31, 3, 2, " ", "Day"},
@@ -72,6 +93,16 @@ GtkWidget *buildDateTimeSpinner(GtkWidget *spin[kDtSpinCount])
     };
     for (int i = 0; i < kDtSpinCount; ++i) {
         spin[i] = gtk_spin_button_new_with_range(fields[i].lo, fields[i].hi, 1);
+        // GtkSpinButton implements GtkOrientable, and defaults to HORIZONTAL --
+        // which Adwaita draws as [entry][-][+] with the two step buttons side
+        // by side. That reads as a plain text box flanked by unrelated buttons
+        // rather than a spinner at all (reported twice now: "big buttons side
+        // by side", and "2026 x +" / "this is not a spinner"). VERTICAL stacks
+        // them into the conventional up-over-down arrow pair, which is what
+        // Qt's QDateTimeEdit shows and what a spinner is expected to look like.
+        gtk_orientable_set_orientation(GTK_ORIENTABLE(spin[i]), GTK_ORIENTATION_VERTICAL);
+        gtk_style_context_add_provider(gtk_widget_get_style_context(spin[i]),
+            GTK_STYLE_PROVIDER(spinCss), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
         gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(spin[i]), TRUE);
         gtk_entry_set_width_chars(GTK_ENTRY(spin[i]), fields[i].width);
         gtk_entry_set_alignment(GTK_ENTRY(spin[i]), 0.5f);
@@ -290,8 +321,19 @@ void executeSearch(LogViewerState *st, bool jumpToNext)
 void cellDataFunc(GtkTreeViewColumn *, GtkCellRenderer *cell, GtkTreeModel *treeModel, GtkTreeIter *iter, gpointer userData)
 {
     auto *st = static_cast<LogViewerState *>(userData);
+    // Same NULL-return hazard as the settings dialog's cell data func: GTK
+    // hands us stale iters while rebuilding/tearing down the view, and both
+    // of these return NULL for one. This func runs on every redraw of the
+    // main log view -- including the one rebuildEngineHighlightRules()
+    // explicitly queues after the settings dialog closes.
     GtkTreePath *path = gtk_tree_model_get_path(treeModel, iter);
-    int modelRow = gtk_tree_path_get_indices(path)[0];
+    if (!path) return;
+    const int *indices = gtk_tree_path_get_indices(path);
+    if (!indices || gtk_tree_path_get_depth(path) < 1) {
+        gtk_tree_path_free(path);
+        return;
+    }
+    int modelRow = indices[0];
     gtk_tree_path_free(path);
     int engineRow = log_tree_model_to_engine_row(st->model, modelRow);
 
@@ -440,8 +482,20 @@ void openSettingsDialog(LogViewerState *st)
     gtk_tree_view_column_set_cell_data_func(patternCol, patternRenderer,
         +[](GtkTreeViewColumn *, GtkCellRenderer *cell, GtkTreeModel *model, GtkTreeIter *iter, gpointer data) {
             auto *st = static_cast<LogViewerState *>(data);
+            // Both of these return NULL against a stale iter -- which GTK hands
+            // us while tearing the tree view down inside gtk_widget_destroy(),
+            // after the store has started emptying. Dereferencing either one
+            // there is what crashed all of doublecmd on closing this dialog,
+            // but only when it had rules in it (an empty store never invokes
+            // the cell data func at all, which is why it looked unreproducible).
             GtkTreePath *p = gtk_tree_model_get_path(model, iter);
-            int row = gtk_tree_path_get_indices(p)[0];
+            if (!p) return;
+            const int *indices = gtk_tree_path_get_indices(p);
+            if (!indices || gtk_tree_path_get_depth(p) < 1) {
+                gtk_tree_path_free(p);
+                return;
+            }
+            int row = indices[0];
             gtk_tree_path_free(p);
             if (row < 0 || row >= (int)st->rules.size()) return;
             const auto &r = st->rules[row];
