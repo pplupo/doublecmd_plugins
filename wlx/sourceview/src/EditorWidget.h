@@ -44,6 +44,9 @@ public:
     GtkWlPlugin::GtkFocusManager *focusManager() const { return m_fm.get(); }
 
 private:
+    void setupMenuBar();
+    void setupCompletion();
+    void doPrint();
     void setupToolbar();
     void setupStatusBar();
     void setupFindReplace();
@@ -73,6 +76,7 @@ private:
     bool encodeFromUtf8(const std::string &utf8Text, const std::string &encoding, std::string &out);
 
     GtkWidget *m_root = nullptr;
+    GtkWidget *m_menuBar = nullptr;
     GtkWidget *m_scrolled = nullptr;
     GtkWidget *m_view = nullptr; // GtkSourceView*
     GtkSourceBuffer *m_buffer = nullptr;

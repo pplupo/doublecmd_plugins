@@ -1,4 +1,4 @@
-// GTK3 WLX entry points for cuda_gtk3 -- the GTK analog of kate_qt6
+// GTK3 WLX entry points for sourceview_gtk3 -- the GTK analog of kate_qt6
 // (KTextEditor-based rich code viewer), here built on GtkSourceView 4.
 
 #include <gtk/gtk.h>
@@ -72,7 +72,7 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     // every other GTK3 plugin's ListLoad() this session.)
     gtk_layout_put(GTK_LAYOUT(parent), editor->rootWidget(), 0, 0);
 
-    g_object_set_data_full(G_OBJECT(editor->rootWidget()), "cuda-editor", editor, destroyState);
+    g_object_set_data_full(G_OBJECT(editor->rootWidget()), "sourceview-editor", editor, destroyState);
 
     editor->loadFile(std::string(FileToLoad));
     gtk_widget_show_all(editor->rootWidget());
@@ -89,7 +89,7 @@ void DCPCALL ListCloseWindow(HWND ListWin)
 int DCPCALL ListSendCommand(HWND ListWin, int Command, int Parameter)
 {
     GtkWidget *root = GTK_WIDGET(ListWin);
-    auto *editor = static_cast<EditorWidget *>(g_object_get_data(G_OBJECT(root), "cuda-editor"));
+    auto *editor = static_cast<EditorWidget *>(g_object_get_data(G_OBJECT(root), "sourceview-editor"));
     if (!editor) return LISTPLUGIN_ERROR;
 
     if (Command == lc_newparams) {
