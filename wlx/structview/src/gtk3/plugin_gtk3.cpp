@@ -339,6 +339,10 @@ void setupToolbar(StructViewState *st) {
     });
     st->toolbar->addToggleAction("Word Wrap", "format-text-wrap-symbolic", false, [st](bool active) {
         st->wordWrap = active;
+        // The grid is the primary view -- wrapping only the optional Show Text
+        // panel (which is hidden by default) is why this button read as doing
+        // nothing at all.
+        if (st->grid) st->grid->setWordWrap(active);
         if (st->textView) gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(st->textView), active ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
     });
     st->toolbar->addToolAction("Open Externally", "document-open-symbolic", [st]() { onOpenExternally(st); });
