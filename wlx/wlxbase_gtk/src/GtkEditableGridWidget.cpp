@@ -4,6 +4,9 @@
 #include <sstream>
 #include <algorithm>
 #include <memory>
+#include <cstdio>
+#include <cstdarg>
+#include <cstring>
 
 namespace GtkWlPlugin {
 
@@ -35,6 +38,10 @@ GtkEditableGridWidget::GtkEditableGridWidget(int columnCount, GtkFocusManager *f
         GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes(
             ("Column " + std::to_string(c + 1)).c_str(), renderer, "text", c, nullptr);
         gtk_tree_view_column_set_resizable(col, TRUE);
+
+        // Keeps the wrap budget matched to the column's real width, so
+        // wrapping survives a manual resize.
+        g_signal_connect(col, "notify::width", G_CALLBACK(columnWidthChangedTrampoline), ctx);
         gtk_tree_view_append_column(GTK_TREE_VIEW(m_treeView), col);
     }
 
@@ -43,6 +50,8 @@ GtkEditableGridWidget::GtkEditableGridWidget(int columnCount, GtkFocusManager *f
 
 GtkEditableGridWidget::~GtkEditableGridWidget()
 {
+    // A pending idle would fire into a destroyed widget.
+    if (m_rowHeightRefreshId) g_source_remove(m_rowHeightRefreshId);
     if (m_fm) m_fm->removeInputWidget(m_treeView);
     for (auto *ctx : m_colContexts) delete ctx;
 }
@@ -350,6 +359,214 @@ void GtkEditableGridWidget::setShowGrid(bool show)
 {
     gtk_tree_view_set_grid_lines(GTK_TREE_VIEW(m_treeView),
         show ? GTK_TREE_VIEW_GRID_LINES_BOTH : GTK_TREE_VIEW_GRID_LINES_NONE);
+}
+
+void GtkEditableGridWidget::applyWrapToColumn(GtkTreeViewColumn *col, int budget)
+{
+    // A bogus budget means the column has no meaningful width right now --
+    // during a model swap every column momentarily reports 0. Leave the
+    // existing wrap settings alone rather than writing -1 into them: that
+    // turns wrapping OFF mid-measure, and any row measured in that window
+    // gets a single-line height it then keeps.
+    if (m_wordWrap && budget <= 16) {
+        return;
+    }
+
+    GList *cells = gtk_cell_layout_get_cells(GTK_CELL_LAYOUT(col));
+    for (GList *c = cells; c; c = c->next) {
+        if (!GTK_IS_CELL_RENDERER_TEXT(c->data)) continue;
+
+        // Pango 1.44+ inserts a hyphen when it breaks inside a word. For file
+        // data (CSV cells, DB values, JSON strings) that hyphen is a lie --
+        // it looks like part of the value. There is no GtkCellRendererText
+        // property for it; the attribute list is the only lever.
+        PangoAttrList *attrs = pango_attr_list_new();
+        pango_attr_list_insert(attrs, pango_attr_insert_hyphens_new(FALSE));
+        g_object_set(c->data,
+            "wrap-mode", m_wordWrap ? PANGO_WRAP_WORD_CHAR : PANGO_WRAP_WORD,
+            "wrap-width", m_wordWrap ? budget : -1,
+            "attributes", attrs,
+            nullptr);
+        pango_attr_list_unref(attrs);
+    }
+    g_list_free(cells);
+    // Deliberately NO layout call here. This function is reached from the
+    // notify::width handler, i.e. from inside GTK's own layout pass, and
+    // dirtying layout from there is what blanked the grid. Invalidation is
+    // the caller's job -- see setWordWrap() below.
+}
+
+void GtkEditableGridWidget::setWordWrap(bool wrap)
+{
+    m_wordWrap = wrap;
+
+    // This function has two hard requirements that previous attempts kept
+    // trading against each other, so both are spelled out:
+    //
+    //  (1) Row heights MUST be invalidated. GtkTreeView caches them, and
+    //      neither gtk_widget_queue_resize() nor
+    //      gtk_tree_view_columns_autosize() clears that cache. Skip this and
+    //      the text wraps correctly but rows keep their old single-line
+    //      height and clip it -- looks exactly like truncation, and only on
+    //      the first toggle, because any later resize invalidates the cache
+    //      as a side effect.
+    //
+    //  (2) It MUST NOT recalculate layout synchronously.
+    //      gtk_tree_view_columns_autosize() walks and recomputes every column
+    //      immediately, emitting notify::width mid-walk; re-entering and
+    //      dirtying layout from inside that walk left GTK with no valid
+    //      layout and rendered a blank grid.
+    //
+    // gtk_tree_view_column_queue_resize() satisfies both: it marks the
+    // column's cells dirty (clearing the row-height cache, so (1) holds) but
+    // only *queues* the recalculation for the next frame rather than running
+    // it inline (so (2) holds). columns_autosize() is intentionally absent --
+    // it is the synchronous variant and is what caused the blanking.
+    //
+    //  (3) Column widths MUST NOT change. Toggling wrap sets a text property;
+    //      it is not a layout command. Earlier revisions pinned columns to
+    //      FIXED sizing at a computed width to force wrapping to be visible,
+    //      which resized columns the user had not asked to resize (the
+    //      row-number gutter grew, data columns jumped). Deliberately not done
+    //      any more: no set_sizing(), no set_fixed_width() here.
+    //
+    // Consequence, by design: each column wraps at the width it already has.
+    // A column sized to its own content is already wide enough for one line,
+    // so wrap has no visible effect there until the column is narrowed --
+    // at which point notify::width re-applies the budget and the text wraps.
+    m_applyingWrap = true;
+    GList *cols = gtk_tree_view_get_columns(GTK_TREE_VIEW(m_treeView));
+
+    for (GList *l = cols; l; l = l->next) {
+        auto *col = GTK_TREE_VIEW_COLUMN(l->data);
+
+        // Decorative, fixed-size columns (csvview's row-number gutter is the
+        // one in play) are marked non-resizable and hold no wrappable data.
+        if (!gtk_tree_view_column_get_resizable(col)) continue;
+
+        // The column's own current width is the budget -- that is precisely
+        // what "wrap within the column, without changing it" means. A column
+        // not yet allocated gets -1 for now; notify::width supplies the real
+        // width as soon as one exists.
+        int width = gtk_tree_view_column_get_width(col);
+        applyWrapToColumn(col, (wrap && width > 16) ? width : -1);
+
+        gtk_tree_view_column_queue_resize(col);
+    }
+    g_list_free(cols);
+    m_applyingWrap = false;
+
+    // Force GtkTreeView to re-measure every row's HEIGHT.
+    //
+    // This is the part that was missing, and it is a separate problem from
+    // wrapping. Pango was already wrapping the text correctly -- the
+    // give-away was dbview showing a hyphen, which Pango only inserts when it
+    // actually breaks a word. But GtkTreeView caches row heights in its
+    // internal row tree, and neither gtk_widget_queue_resize() nor
+    // gtk_tree_view_column_queue_resize() rebuilds that cache: they mark cells
+    // dirty for redraw while every row keeps its old single-line height. The
+    // wrapped lines were being rendered into a row too short to show them, so
+    // only the first line was ever visible -- indistinguishable from "wrap
+    // does nothing".
+    //
+    // Detaching and re-attaching the model is the one operation that discards
+    // the height cache outright and forces a full re-measure. It is safe here
+    // precisely because this runs from the user's toggle, never from inside a
+    // layout callback, so it cannot re-enter the way columns_autosize() did.
+    refreshRowHeights();
+}
+
+// Forces GtkTreeView to re-measure every row's height. Detaching and
+// re-attaching the model is the only operation that discards its cached row
+// heights outright; queue_resize/columns_autosize just mark cells dirty for
+// redraw, leaving every row at its previous height.
+void GtkEditableGridWidget::refreshRowHeights()
+{
+    GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(m_treeView));
+    if (!model) return;
+
+    // gtk_tree_view_column_queue_resize() is the ONE call that makes
+    // GtkTreeView re-measure row heights after a renderer's wrap-width
+    // changes. Verified in an isolated GTK program rather than inferred:
+    //
+    //   wrap-width=170 + row-changed on every row   -> row height 29 (unchanged)
+    //   wrap-width=170 + column_queue_resize        -> row height 121
+    //   widen to 600   + column_queue_resize        -> row height 52
+    //   narrow to 120  + column_queue_resize        -> row height 167
+    //
+    // So row-changed does nothing for height, and a model detach/reattach is
+    // actively harmful (it zeroes column widths, so rows get re-measured at
+    // width 0 and cache a single-line height). Both were tried here first.
+    //
+    // Must be called from an idle, never from inside notify::width or
+    // size-allocate: queuing a resize during GTK's own layout pass is what
+    // blanked the grid in earlier attempts.
+    m_applyingWrap = true;
+    GList *cols = gtk_tree_view_get_columns(GTK_TREE_VIEW(m_treeView));
+    int n = 0;
+    for (GList *l = cols; l; l = l->next, ++n)
+        gtk_tree_view_column_queue_resize(GTK_TREE_VIEW_COLUMN(l->data));
+    g_list_free(cols);
+    m_applyingWrap = false;
+}
+
+gboolean GtkEditableGridWidget::rowHeightRefreshIdle(gpointer data)
+{
+    auto *self = static_cast<GtkEditableGridWidget *>(data);
+    self->m_rowHeightRefreshId = 0;
+    self->refreshRowHeights();
+    return G_SOURCE_REMOVE;
+}
+
+void GtkEditableGridWidget::columnWidthChangedTrampoline(GObject *col, GParamSpec *, gpointer data)
+{
+    auto *ctx = static_cast<ColCtx *>(data);
+    GtkEditableGridWidget *self = ctx->self;
+    if (!self->m_wordWrap || self->m_applyingWrap) return;
+
+    // Setting wrap-width changes the renderer's desired size, which can move
+    // the column width, which re-emits notify::width. Calling
+    // gtk_tree_view_columns_autosize() from in here made that a hard feedback
+    // loop -- it forces a full width recalculation across every column, so
+    // each pass re-entered this handler and GTK was left mid-recalculation
+    // with no valid layout, which rendered as a completely blank grid.
+    // Re-apply the wrap budget only, guarded, and let GTK size rows on its
+    // own next allocation.
+    // The user dragged this column: honor the width they chose as the new
+    // budget. Safe to read get_width() here (unlike when first enabling wrap)
+    // because the column is FIXED by then, so its width reflects the user's
+    // choice rather than the content's natural width.
+    auto *column = GTK_TREE_VIEW_COLUMN(col);
+    int rawWidth = gtk_tree_view_column_get_width(column);
+
+    // Ignore transient/degenerate widths outright rather than clamping them to
+    // a floor. Clamping (previously max(width,60)) turned a meaningless width
+    // into a plausible-looking budget, so the skip guard never fired.
+    if (rawWidth <= 16) return;
+
+    // Already handled at this exact width: doing the work again would re-emit
+    // row-changed, which can perturb layout and bring us straight back here.
+    if (rawWidth == ctx->lastBudget) return;
+    ctx->lastBudget = rawWidth;
+
+    int newWidth = rawWidth;
+    self->m_applyingWrap = true;
+    self->applyWrapToColumn(column, newWidth);
+    self->m_applyingWrap = false;
+
+    // Setting wrap-width alone is NOT enough: Pango starts wrapping, but the
+    // rows keep the height they were measured at, so the extra lines are
+    // clipped and it looks exactly like wrap doing nothing. This was the whole
+    // bug -- toggling wrap re-measured row heights, dragging a column never
+    // did, so wrap only ever appeared to work if the column was already narrow
+    // when the toggle happened.
+    //
+    // Deferred to an idle and collapsed to one pending refresh: a drag emits
+    // notify::width continuously, and re-attaching the model on every event
+    // would be both slow and re-entrant (we are inside GTK's layout pass right
+    // now, which is what blanked the grid in earlier attempts).
+    if (self->m_rowHeightRefreshId == 0)
+        self->m_rowHeightRefreshId = g_idle_add(rowHeightRefreshIdle, self);
 }
 
 void GtkEditableGridWidget::insertRows(int count, int atRow)
