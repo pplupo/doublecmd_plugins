@@ -380,7 +380,7 @@ void CsvViewerWidget::setupToolbar()
 
 	// Line Wrap
 	m_actWordWrap = m_toolbar->addToolAction(
-		"Line Wrap",
+		"Word Wrap",
 		QKeySequence(),
 		0,
 		"format-text-direction-ltr");

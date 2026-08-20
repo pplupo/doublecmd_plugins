@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cuda_wlx LANGUAGES CXX)
+project(sourceview_wlx LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -151,20 +151,20 @@ add_subdirectory(
     ${CMAKE_CURRENT_BINARY_DIR}/wlxbase_gtk
 )
 
-add_library(cuda_gtk3 SHARED
+add_library(sourceview_gtk3 SHARED
     src/plugin_gtk3.cpp
     src/EditorWidget.cpp
 )
 
-target_include_directories(cuda_gtk3 PRIVATE
+target_include_directories(sourceview_gtk3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
     ${CMAKE_CURRENT_SOURCE_DIR}/../wlxbase_gtk/include
     ${GTK3_INCLUDE_DIRS}
 )
-target_link_directories(cuda_gtk3 PRIVATE ${GTK3_LIBRARY_DIRS})
-target_compile_options(cuda_gtk3 PRIVATE ${GTK3_CFLAGS_OTHER})
+target_link_directories(sourceview_gtk3 PRIVATE ${GTK3_LIBRARY_DIRS})
+target_compile_options(sourceview_gtk3 PRIVATE ${GTK3_CFLAGS_OTHER})
 
-target_link_libraries(cuda_gtk3 PRIVATE
+target_link_libraries(sourceview_gtk3 PRIVATE
     wlxbase_gtk
     gtksourceview4
     ${GTK3_LIBRARIES}
@@ -176,10 +176,10 @@ target_link_libraries(cuda_gtk3 PRIVATE
 # (gtksourceview4, libxml2 here) gets exported from the .wlx by default
 # and can be interposed by whatever the host process already loaded of a
 # same-named symbol (e.g. DC or another plugin's own libxml2, if any).
-target_link_options(cuda_gtk3 PRIVATE -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc)
+target_link_options(sourceview_gtk3 PRIVATE -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc)
 
-set_target_properties(cuda_gtk3 PROPERTIES
+set_target_properties(sourceview_gtk3 PROPERTIES
     PREFIX ""
-    OUTPUT_NAME "cuda_gtk3"
+    OUTPUT_NAME "sourceview_gtk3"
     SUFFIX ".wlx"
 )

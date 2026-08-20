@@ -72,6 +72,25 @@ public:
     // --- Appearance ---
     void setShowGrid(bool show);
 
+    /// Wraps long cell text across multiple lines instead of clipping it.
+    /// Previously omitted from this widget as "not achievable in GTK", which
+    /// left csvview's and structview's Word Wrap buttons toggling only their
+    /// optional Show Text panel -- never the grid the user is actually
+    /// looking at, so the button appeared to do nothing at all. dbview had
+    /// already proven the cell-renderer approach works; this lifts it out of
+    /// dbview so every consumer gets it.
+    ///
+    /// Each column wraps at the width it CURRENTLY has. Toggling this never
+    /// resizes a column -- it is a text property, not a layout command. That
+    /// is a deliberate product decision, and it has a visible consequence: a
+    /// column auto-sized to its own content is by definition wide enough for
+    /// one line, so wrapping it changes nothing until the column is narrowed.
+    /// Narrow a column and its text wraps immediately (the width is tracked
+    /// live). Do not "fix" that by pinning columns to a computed width --
+    /// that was tried, and it resized columns the user never asked to resize.
+    void setWordWrap(bool wrap);
+    bool wordWrap() const { return m_wordWrap; }
+
     /// Programmatic single-cell edit (e.g. from Replace/Replace All),
     /// pushed through the same undo stack as interactive edits.
     void setCellValue(int row, int col, const std::string &text);
@@ -100,8 +119,23 @@ private:
     std::function<void(bool)> m_dirtyChangedCb;
 
     // Column-edit trampoline context (one per column, freed with the widget)
-    struct ColCtx { GtkEditableGridWidget *self; int col; };
+    void applyWrapToColumn(GtkTreeViewColumn *col, int budget);
+    static void columnWidthChangedTrampoline(GObject *col, GParamSpec *pspec, gpointer data);
+
+
+    /// Forces GtkTreeView to discard cached row heights and re-measure. Needed
+    /// after anything that changes how tall a row's text renders.
+    void refreshRowHeights();
+    static gboolean rowHeightRefreshIdle(gpointer data);
+
+    // lastBudget: width this column's wrap was last applied at. Used to ignore
+    // notify::width events that report a width we have already handled, which
+    // is what kept the refresh loop alive.
+    struct ColCtx { GtkEditableGridWidget *self; int col; int lastBudget = -1; };
     std::vector<ColCtx *> m_colContexts;
+    bool m_wordWrap = false;
+    bool m_applyingWrap = false; // re-entrancy guard for notify::width
+    guint m_rowHeightRefreshId = 0; // pending idle row-height re-measure
 };
 
 } // namespace GtkWlPlugin

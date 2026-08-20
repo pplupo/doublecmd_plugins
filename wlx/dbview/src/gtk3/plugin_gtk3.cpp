@@ -190,19 +190,13 @@ void onRevertClicked(DbViewState *st) {
 void onToggleWordWrap(DbViewState *st, bool active) {
     st->wordWrap = active;
     if (!st->grid) return;
-    GList *columns = gtk_tree_view_get_columns(GTK_TREE_VIEW(st->grid->treeView()));
-    for (GList *l = columns; l; l = l->next) {
-        GList *renderers = gtk_cell_layout_get_cells(GTK_CELL_LAYOUT(l->data));
-        for (GList *r = renderers; r; r = r->next) {
-            g_object_set(r->data,
-                "wrap-width", active ? 300 : -1,
-                "wrap-mode", active ? PANGO_WRAP_WORD_CHAR : PANGO_WRAP_WORD,
-                nullptr);
-        }
-        g_list_free(renderers);
-    }
-    g_list_free(columns);
-    gtk_widget_queue_resize(st->grid->treeView());
+    // Was an ad-hoc copy here with a hardcoded 300px wrap width and no
+    // row-height invalidation, so text wrapped but the rows stayed one line
+    // tall and hid everything past the first line. GtkEditableGridWidget now
+    // owns this (sized to the real column width, hyphen-free, and it
+    // re-autosizes rows), so defer to it rather than keeping a second,
+    // subtly-different implementation.
+    st->grid->setWordWrap(active);
 }
 
 void onToggleGridLines(DbViewState *st, bool active) {

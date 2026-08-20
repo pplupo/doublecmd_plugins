@@ -6,6 +6,8 @@
 
 #include <fstream>
 #include <sstream>
+#include <map>
+#include <functional>
 #include <algorithm>
 #include <cctype>
 #include <cwctype>
@@ -83,6 +85,11 @@ EditorWidget::EditorWidget()
 
     m_fm = std::make_unique<GtkFocusManager>(m_root, m_view);
 
+    setupMenuBar();
+    gtk_box_pack_start(GTK_BOX(m_root), m_menuBar, FALSE, FALSE, 0);
+
+    setupCompletion();
+
     setupToolbar();
     gtk_box_pack_start(GTK_BOX(m_root), m_toolbar->widget(), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(m_root), m_diskChangeBar, FALSE, FALSE, 0);
@@ -126,6 +133,228 @@ EditorWidget::~EditorWidget()
         if (m_monitorHandler) g_signal_handler_disconnect(m_monitor, m_monitorHandler);
         g_object_unref(m_monitor);
     }
+}
+
+namespace {
+
+// Appends a plain action item. `fn` is a plain function pointer taking the
+// EditorWidget*, which keeps every menu entry a single line below.
+GtkWidget *addMenuItem(GtkWidget *menu, const char *label, GCallback fn, EditorWidget *self)
+{
+    GtkWidget *item = gtk_menu_item_new_with_label(label);
+    g_signal_connect_swapped(item, "activate", fn, self);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    return item;
+}
+
+// Appends a check item wired straight to a GtkSourceView/GtkTextView boolean
+// setter. Only used for settings that have NO toolbar counterpart, so the
+// check state has a single owner and can never drift out of sync with a
+// toolbar button.
+template <typename SetterFn>
+GtkWidget *addCheckItem(GtkWidget *menu, const char *label, bool initial, SetterFn setter)
+{
+    GtkWidget *item = gtk_check_menu_item_new_with_label(label);
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), initial);
+    auto *fn = new std::function<void(bool)>(setter);
+    g_signal_connect_data(item, "toggled", G_CALLBACK(+[](GtkCheckMenuItem *it, gpointer d) {
+        (*static_cast<std::function<void(bool)> *>(d))(gtk_check_menu_item_get_active(it));
+    }), fn, +[](gpointer d, GClosure *) { delete static_cast<std::function<void(bool)> *>(d); },
+        (GConnectFlags)0);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    return item;
+}
+
+GtkWidget *addSubMenu(GtkWidget *parent, const char *label)
+{
+    GtkWidget *item = gtk_menu_item_new_with_label(label);
+    GtkWidget *sub = gtk_menu_new();
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item), sub);
+    gtk_menu_shell_append(GTK_MENU_SHELL(parent), item);
+    return sub;
+}
+
+} // namespace
+
+void EditorWidget::setupMenuBar()
+{
+    m_menuBar = gtk_menu_bar_new();
+    // The menu bar must never take focus away from the editor -- same rule the
+    // toolbar follows via GtkPluginToolBar (DC hosts us inside its own window,
+    // and stealing focus breaks its keyboard handling).
+    gtk_widget_set_can_focus(m_menuBar, FALSE);
+
+    // ── File ──
+    GtkWidget *fileMenu = addSubMenu(m_menuBar, "File");
+    addMenuItem(fileMenu, "Save", G_CALLBACK(+[](EditorWidget *s) { s->save(); }), this);
+    addMenuItem(fileMenu, "Save As...", G_CALLBACK(+[](EditorWidget *s) { s->showSaveAsDialog(false); }), this);
+    addMenuItem(fileMenu, "Save Copy As...", G_CALLBACK(+[](EditorWidget *s) { s->showSaveAsDialog(true); }), this);
+    addMenuItem(fileMenu, "Save With Encoding...", G_CALLBACK(+[](EditorWidget *s) { s->showEncodingPickerAndSave(); }), this);
+    gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), gtk_separator_menu_item_new());
+    addMenuItem(fileMenu, "Reload", G_CALLBACK(+[](EditorWidget *s) { s->reload(); }), this);
+    gtk_menu_shell_append(GTK_MENU_SHELL(fileMenu), gtk_separator_menu_item_new());
+    addMenuItem(fileMenu, "Print...", G_CALLBACK(+[](EditorWidget *s) { s->doPrint(); }), this);
+
+    // ── Edit ──
+    GtkWidget *editMenu = addSubMenu(m_menuBar, "Edit");
+    addMenuItem(editMenu, "Undo", G_CALLBACK(+[](EditorWidget *s) {
+        if (gtk_source_buffer_can_undo(s->m_buffer)) gtk_source_buffer_undo(s->m_buffer);
+    }), this);
+    addMenuItem(editMenu, "Redo", G_CALLBACK(+[](EditorWidget *s) {
+        if (gtk_source_buffer_can_redo(s->m_buffer)) gtk_source_buffer_redo(s->m_buffer);
+    }), this);
+    gtk_menu_shell_append(GTK_MENU_SHELL(editMenu), gtk_separator_menu_item_new());
+    addMenuItem(editMenu, "Select All", G_CALLBACK(+[](EditorWidget *s) {
+        // Declared on separate lines deliberately: a raw comma here splits the
+        // enclosing G_CALLBACK() macro's argument list (it balances parens, not
+        // braces), which is a compile error, not a style preference.
+        GtkTextIter a;
+        GtkTextIter b;
+        gtk_text_buffer_get_bounds(GTK_TEXT_BUFFER(s->m_buffer), &a, &b);
+        gtk_text_buffer_select_range(GTK_TEXT_BUFFER(s->m_buffer), &a, &b);
+    }), this);
+    gtk_menu_shell_append(GTK_MENU_SHELL(editMenu), gtk_separator_menu_item_new());
+    addMenuItem(editMenu, "Find / Replace", G_CALLBACK(+[](EditorWidget *s) {
+        s->m_findPanel->showPanel(!s->m_findPanel->isPanelVisible());
+    }), this);
+    addMenuItem(editMenu, "Go to Line...", G_CALLBACK(+[](EditorWidget *s) { s->showGotoLineDialog(); }), this);
+    gtk_menu_shell_append(GTK_MENU_SHELL(editMenu), gtk_separator_menu_item_new());
+    GtkWidget *caseSub = addSubMenu(editMenu, "Change Case");
+    struct { const char *label; int mode; } caseItems[] = {
+        {"UPPERCASE", 0}, {"lowercase", 1}, {"Title Case", 2},
+        {"Proper case", 3}, {"Sentence case", 4}, {"camelCase", 5},
+    };
+    using CaseCtx = std::pair<EditorWidget *, int>;
+    for (auto &ci : caseItems) {
+        GtkWidget *item = gtk_menu_item_new_with_label(ci.label);
+        g_signal_connect(item, "activate", G_CALLBACK(+[](GtkMenuItem *, gpointer d) {
+            auto *p = static_cast<CaseCtx *>(d);
+            p->first->applyCaseTransform(p->second);
+        }), new CaseCtx(this, ci.mode));
+        gtk_menu_shell_append(GTK_MENU_SHELL(caseSub), item);
+    }
+
+    // ── View ──
+    GtkWidget *viewMenu = addSubMenu(m_menuBar, "View");
+    GtkSourceView *sv = GTK_SOURCE_VIEW(m_view);
+    addCheckItem(viewMenu, "Line Numbers", true,
+        [sv](bool on) { gtk_source_view_set_show_line_numbers(sv, on); });
+    addCheckItem(viewMenu, "Highlight Current Line", true,
+        [sv](bool on) { gtk_source_view_set_highlight_current_line(sv, on); });
+    addCheckItem(viewMenu, "Right Margin", false,
+        [sv](bool on) { gtk_source_view_set_show_right_margin(sv, on); });
+    addCheckItem(viewMenu, "Show Line Marks", false,
+        [sv](bool on) { gtk_source_view_set_show_line_marks(sv, on); });
+    addCheckItem(viewMenu, "Show Whitespace", false, [sv](bool on) {
+        GtkSourceSpaceDrawer *sd = gtk_source_view_get_space_drawer(sv);
+        gtk_source_space_drawer_set_types_for_locations(sd, GTK_SOURCE_SPACE_LOCATION_ALL,
+            on ? (GtkSourceSpaceTypeFlags)(GTK_SOURCE_SPACE_TYPE_SPACE | GTK_SOURCE_SPACE_TYPE_TAB |
+                                           GTK_SOURCE_SPACE_TYPE_NEWLINE)
+               : GTK_SOURCE_SPACE_TYPE_NONE);
+        gtk_source_space_drawer_set_enable_matrix(sd, on);
+    });
+    gtk_menu_shell_append(GTK_MENU_SHELL(viewMenu), gtk_separator_menu_item_new());
+
+    // Syntax submenu, grouped by GtkSourceView's own language sections --
+    // a flat list would be 200+ entries in one column.
+    GtkWidget *syntaxSub = addSubMenu(viewMenu, "Syntax");
+    GtkWidget *plainItem = gtk_menu_item_new_with_label("Plain Text");
+    g_signal_connect_swapped(plainItem, "activate", G_CALLBACK(+[](EditorWidget *s) {
+        gtk_source_buffer_set_language(s->m_buffer, nullptr);
+        s->updateStatusBar();
+    }), this);
+    gtk_menu_shell_append(GTK_MENU_SHELL(syntaxSub), plainItem);
+    gtk_menu_shell_append(GTK_MENU_SHELL(syntaxSub), gtk_separator_menu_item_new());
+
+    GtkSourceLanguageManager *lm = gtk_source_language_manager_get_default();
+    const gchar *const *langIds = gtk_source_language_manager_get_language_ids(lm);
+    std::map<std::string, GtkWidget *> sections;
+    for (int i = 0; langIds && langIds[i]; ++i) {
+        GtkSourceLanguage *lang = gtk_source_language_manager_get_language(lm, langIds[i]);
+        if (!lang || gtk_source_language_get_hidden(lang)) continue;
+        const char *section = gtk_source_language_get_section(lang);
+        std::string key = section ? section : "Other";
+        auto it = sections.find(key);
+        if (it == sections.end())
+            it = sections.emplace(key, addSubMenu(syntaxSub, key.c_str())).first;
+        GtkWidget *item = gtk_menu_item_new_with_label(gtk_source_language_get_name(lang));
+        using LangCtx = std::pair<EditorWidget *, GtkSourceLanguage *>;
+        g_signal_connect(item, "activate", G_CALLBACK(+[](GtkMenuItem *, gpointer d) {
+            auto *p = static_cast<LangCtx *>(d);
+            gtk_source_buffer_set_language(p->first->m_buffer, p->second);
+            p->first->updateStatusBar();
+        }), new LangCtx(this, lang));
+        gtk_menu_shell_append(GTK_MENU_SHELL(it->second), item);
+    }
+
+    // Color scheme submenu.
+    GtkWidget *schemeSub = addSubMenu(viewMenu, "Color Scheme");
+    GtkSourceStyleSchemeManager *sm = gtk_source_style_scheme_manager_get_default();
+    const gchar *const *schemeIds = gtk_source_style_scheme_manager_get_scheme_ids(sm);
+    for (int i = 0; schemeIds && schemeIds[i]; ++i) {
+        GtkSourceStyleScheme *scheme = gtk_source_style_scheme_manager_get_scheme(sm, schemeIds[i]);
+        if (!scheme) continue;
+        GtkWidget *item = gtk_menu_item_new_with_label(gtk_source_style_scheme_get_name(scheme));
+        using SchemeCtx = std::pair<EditorWidget *, GtkSourceStyleScheme *>;
+        g_signal_connect(item, "activate", G_CALLBACK(+[](GtkMenuItem *, gpointer d) {
+            auto *p = static_cast<SchemeCtx *>(d);
+            gtk_source_buffer_set_style_scheme(p->first->m_buffer, p->second);
+        }), new SchemeCtx(this, scheme));
+        gtk_menu_shell_append(GTK_MENU_SHELL(schemeSub), item);
+    }
+
+    // ── Tools ──
+    GtkWidget *toolsMenu = addSubMenu(m_menuBar, "Tools");
+    addCheckItem(toolsMenu, "Auto Indent", false,
+        [sv](bool on) { gtk_source_view_set_auto_indent(sv, on); });
+    addCheckItem(toolsMenu, "Insert Spaces Instead of Tabs", false,
+        [sv](bool on) { gtk_source_view_set_insert_spaces_instead_of_tabs(sv, on); });
+    addCheckItem(toolsMenu, "Indent on Tab", true,
+        [sv](bool on) { gtk_source_view_set_indent_on_tab(sv, on); });
+    addCheckItem(toolsMenu, "Smart Home/End", true, [sv](bool on) {
+        gtk_source_view_set_smart_home_end(sv,
+            on ? GTK_SOURCE_SMART_HOME_END_BEFORE : GTK_SOURCE_SMART_HOME_END_DISABLED);
+    });
+}
+
+// Word-completion from words already in the buffer. GtkSourceView ships this
+// provider; nothing here is bespoke.
+void EditorWidget::setupCompletion()
+{
+    GtkSourceCompletion *completion = gtk_source_view_get_completion(GTK_SOURCE_VIEW(m_view));
+    if (!completion) return;
+    GtkSourceCompletionWords *words = gtk_source_completion_words_new("Words", nullptr);
+    gtk_source_completion_words_register(words, GTK_TEXT_BUFFER(m_buffer));
+    gtk_source_completion_add_provider(completion, GTK_SOURCE_COMPLETION_PROVIDER(words), nullptr);
+}
+
+void EditorWidget::doPrint()
+{
+    GtkSourcePrintCompositor *compositor = gtk_source_print_compositor_new_from_view(GTK_SOURCE_VIEW(m_view));
+    gtk_source_print_compositor_set_wrap_mode(compositor, GTK_WRAP_WORD_CHAR);
+    gtk_source_print_compositor_set_print_line_numbers(compositor, 1);
+    gtk_source_print_compositor_set_header_format(compositor, TRUE, nullptr,
+        m_currentFile.empty() ? "Untitled" : m_currentFile.c_str(), nullptr);
+    gtk_source_print_compositor_set_print_header(compositor, TRUE);
+
+    GtkPrintOperation *op = gtk_print_operation_new();
+    g_object_set_data_full(G_OBJECT(op), "compositor", compositor, g_object_unref);
+
+    g_signal_connect(op, "paginate", G_CALLBACK(+[](GtkPrintOperation *o, GtkPrintContext *ctx, gpointer) -> gboolean {
+        auto *c = GTK_SOURCE_PRINT_COMPOSITOR(g_object_get_data(G_OBJECT(o), "compositor"));
+        if (!gtk_source_print_compositor_paginate(c, ctx)) return FALSE;
+        gtk_print_operation_set_n_pages(o, gtk_source_print_compositor_get_n_pages(c));
+        return TRUE;
+    }), nullptr);
+    g_signal_connect(op, "draw-page", G_CALLBACK(+[](GtkPrintOperation *o, GtkPrintContext *ctx, gint page, gpointer) {
+        auto *c = GTK_SOURCE_PRINT_COMPOSITOR(g_object_get_data(G_OBJECT(o), "compositor"));
+        gtk_source_print_compositor_draw_page(c, ctx, page);
+    }), nullptr);
+
+    GtkWidget *top = gtk_widget_get_toplevel(m_root);
+    gtk_print_operation_run(op, GTK_PRINT_OPERATION_ACTION_PRINT_DIALOG,
+        GTK_IS_WINDOW(top) ? GTK_WINDOW(top) : nullptr, nullptr);
+    g_object_unref(op);
 }
 
 void EditorWidget::setupToolbar()

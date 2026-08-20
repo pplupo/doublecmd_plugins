@@ -84,6 +84,13 @@ void LogEngine::colorsForRow(int row, LogColor &background, LogColor &foreground
     background = LogColor{};
     foreground = LogColor{};
 
+    // row == -1 is a documented return of log_tree_model_to_engine_row() for a
+    // row outside the active filter, so it genuinely reaches here. The bounds
+    // check below covers row < 0, but only after this line had already indexed
+    // m_matches -- and "row < m_matches.size()" is true for -1, so m_matches[-1]
+    // was read out of bounds before anything rejected it.
+    if (row < 0) return;
+
     if (row < (int)m_matches.size() && m_matches[row]) {
         background = LogColor{60, 60, 0, true}; // dark yellow, matches original
         return;

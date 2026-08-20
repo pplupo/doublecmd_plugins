@@ -586,7 +586,7 @@ void attachContextMenus(CsvGtkState *st)
     // un-parenthesized comma inside a std::pair<A, B> template argument
     // list used directly as a macro argument gets misparsed as an extra
     // macro argument. Using an alias sidesteps that entirely (same fix
-    // as the one in wlx/cuda/src/EditorWidget.cpp's case-conversion menu).
+    // as the one in wlx/sourceview/src/EditorWidget.cpp's case-conversion menu).
     using ColCtx = std::pair<CsvGtkState *, int>;
 
     g_signal_connect(st->grid->treeView(), "button-press-event", G_CALLBACK(onGridButtonPress), st);
@@ -829,6 +829,11 @@ void onToggleShowText(CsvGtkState *st, bool active)
 void onToggleWordWrap(CsvGtkState *st, bool active)
 {
     st->wordWrap = active;
+    // The grid is the primary view -- wrapping only the optional Show Text
+    // panel (which is hidden by default) is why this button read as doing
+    // nothing at all.
+    if (st->grid)
+        st->grid->setWordWrap(active);
     if (st->textView)
         gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(st->textView), active ? GTK_WRAP_WORD_CHAR : GTK_WRAP_NONE);
 }
@@ -982,7 +987,7 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     st->textToggle = st->toolbar->addToggleAction("Show Text", "view-reveal-symbolic", false, [st](bool active) {
         onToggleShowText(st, active);
     });
-    st->wrapToggle = st->toolbar->addToggleAction("Line Wrap", "format-text-wrap-symbolic", false, [st](bool active) {
+    st->wrapToggle = st->toolbar->addToggleAction("Word Wrap", "format-text-wrap-symbolic", false, [st](bool active) {
         onToggleWordWrap(st, active);
     });
     st->toolbar->addToolAction("Open Externally", "document-open-symbolic", [st]() { onOpenExternallyClicked(st); });
