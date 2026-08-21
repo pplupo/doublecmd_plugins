@@ -9,14 +9,49 @@
 #include <poll.h>
 #include <signal.h>
 #include <chrono>
-#include <regex>
 #include <cstring>
 #include <cstdio>
+#include <cstdarg>
+#include <cmath>
+#include <cctype>
 #include <algorithm>
 
 extern char **environ;
 
 namespace {
+
+// Separate translation unit from markdown_engine.cpp, so its own mvLog is
+// not visible here -- same log file, same purpose (see markdown_engine.cpp
+// for the full rationale).
+void mvLog(const char *fmt, ...) {
+    FILE *f = fopen("/home/pplupo/repos/plugins/scratch/markdownview_debug.log", "a");
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+// std::stod() throws std::invalid_argument/std::out_of_range on
+// non-numeric or overflowing input, and every call site here feeds it
+// text captured by a regex group that's only constrained to "not a
+// quote character" (e.g. foreignObjRe's width="([^"]+)"), not to
+// actually being numeric -- real mermaid/plantuml SVG output that
+// doesn't match the common case (a plain number, optionally with a "px"
+// unit stod itself already tolerates by stopping at the first
+// non-numeric character) would throw here, uncaught, crashing the
+// process. Never confirmed as the exact cause of the "markdownview
+// crashes on add/use" reports, but a real, unguarded exception risk on
+// this exact code path regardless.
+double safeStod(const std::string &s, double fallback = 0.0) {
+    try {
+        return std::stod(s);
+    } catch (const std::exception &) {
+        return fallback;
+    }
+}
 
 struct ProcessResult { bool started = false; int exitCode = -1; std::string stdoutData; };
 
@@ -164,94 +199,314 @@ std::string renderPlantUmlWeb(const std::string &code, bool darkMode)
     return httpGet(url);
 }
 
+// ── Hand-written replacements for what used to be static const std::regex
+// objects in this function (foreignObjRe, textTspanRe, yRe, dyRe, textYRe,
+// emRe) plus fixPlantUmlSvgDark's three std::regex_replace calls. Confirmed
+// via a live gdb session against the real deployed plugin: constructing ANY
+// of these std::regex objects crashes with SIGSEGV, on DC's own main thread,
+// with a full symbolized backtrace showing regex_traits<char>::transform ->
+// collate<char>::transform dispatching into
+// codecvt<char16_t,char,__mbstate_t>::do_unshift -- a char-collate call
+// landing in a completely unrelated char16_t codecvt facet. That is libstdc++
+// locale facet-ID corruption/mismatch, not a stack or threading problem (both
+// were tried first, in this exact order, and neither changed the crash).
+// Every pattern in this file is simple enough to hand-write; doing so removes
+// the dependency on libstdc++'s <regex>/<locale> machinery here entirely,
+// rather than continuing to chase an unreliable library facility. ──
+
+// Regex `\bNAME\s*=\s*"[^"]*"` generalized to any attribute name: finds the
+// next `name="value"` (tolerant of whitespace around `=`) starting at `from`,
+// requiring a non-word character (or start of string) immediately before
+// `name` -- the hand-rolled equivalent of \b. Returns false if not found.
+bool findQuotedAttr(const std::string &s, const std::string &name, size_t from,
+                    size_t &matchStart, size_t &matchEnd, std::string &value)
+{
+    size_t pos = from;
+    while (true) {
+        pos = s.find(name, pos);
+        if (pos == std::string::npos) return false;
+        if (pos > 0) {
+            char prev = s[pos - 1];
+            if (isalnum((unsigned char)prev) || prev == '_') { ++pos; continue; }
+        }
+        size_t p = pos + name.size();
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (p >= s.size() || s[p] != '=') { ++pos; continue; }
+        ++p;
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (p >= s.size() || s[p] != '"') { ++pos; continue; }
+        size_t valStart = p + 1;
+        size_t valEnd = s.find('"', valStart);
+        if (valEnd == std::string::npos) return false;
+        matchStart = pos;
+        matchEnd = valEnd + 1;
+        value = s.substr(valStart, valEnd - valStart);
+        return true;
+    }
+}
+
+// Validates `-?[0-9]*\.?[0-9]+` starting at `start` (at least one digit
+// somewhere, at most one '.', optional leading '-'). Sets numEnd to just
+// past the numeric text on success.
+bool isValidEmNumber(const std::string &s, size_t start, size_t &numEnd)
+{
+    size_t i = start;
+    if (i < s.size() && s[i] == '-') ++i;
+    size_t digitCount = 0;
+    bool sawDot = false;
+    while (i < s.size()) {
+        if (isdigit((unsigned char)s[i])) { ++i; ++digitCount; }
+        else if (s[i] == '.' && !sawDot) { sawDot = true; ++i; }
+        else break;
+    }
+    if (digitCount == 0) return false;
+    numEnd = i;
+    return true;
+}
+
+// Regex `\bNAME\s*=\s*"(-?[0-9]*\.?[0-9]+)em"`: like findQuotedAttr, but the
+// quoted value must be exactly a number immediately followed by "em".
+bool findNumericEmAttr(const std::string &s, const std::string &name, size_t from,
+                       size_t &matchStart, size_t &matchEnd, double &emValue)
+{
+    size_t pos = from;
+    while (true) {
+        pos = s.find(name, pos);
+        if (pos == std::string::npos) return false;
+        if (pos > 0) {
+            char prev = s[pos - 1];
+            if (isalnum((unsigned char)prev) || prev == '_') { ++pos; continue; }
+        }
+        size_t p = pos + name.size();
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (p >= s.size() || s[p] != '=') { ++pos; continue; }
+        ++p;
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (p >= s.size() || s[p] != '"') { ++pos; continue; }
+        size_t valStart = p + 1;
+        size_t numEnd;
+        if (!isValidEmNumber(s, valStart, numEnd) || s.compare(numEnd, 2, "em") != 0
+            || numEnd + 2 >= s.size() || s[numEnd + 2] != '"') { ++pos; continue; }
+        matchStart = pos;
+        matchEnd = numEnd + 3; // "em" + closing quote
+        emValue = safeStod(s.substr(valStart, numEnd - valStart));
+        return true;
+    }
+}
+
+// Regex `\b(y|dy)\s*=\s*"(-?[0-9]*\.?[0-9]+)em"`: earliest of either "y=" or
+// "dy=" (proper \b handling already keeps these from colliding -- "dy=" is
+// never mistaken for a standalone "y=" since 'd' immediately precedes it).
+bool findYOrDyEmAttr(const std::string &s, size_t from, size_t &matchStart, size_t &matchEnd,
+                     std::string &attrName, double &emValue)
+{
+    size_t yStart, yEnd; double yVal;
+    size_t dyStart, dyEnd; double dyVal;
+    bool hasY = findNumericEmAttr(s, "y", from, yStart, yEnd, yVal);
+    bool hasDy = findNumericEmAttr(s, "dy", from, dyStart, dyEnd, dyVal);
+    if (!hasY && !hasDy) return false;
+    if (hasY && (!hasDy || yStart <= dyStart)) {
+        matchStart = yStart; matchEnd = yEnd; attrName = "y"; emValue = yVal;
+    } else {
+        matchStart = dyStart; matchEnd = dyEnd; attrName = "dy"; emValue = dyVal;
+    }
+    return true;
+}
+
+// Regex `<text\b([^>]*)>\s*<tspan\b([^>]*)>`.
+bool findTextTspanPair(const std::string &s, size_t from, size_t &matchStart, size_t &matchEnd,
+                       std::string &textAttrs, std::string &tspanAttrs)
+{
+    size_t pos = from;
+    while (true) {
+        pos = s.find("<text", pos);
+        if (pos == std::string::npos) return false;
+        size_t afterTag = pos + 5;
+        if (afterTag < s.size() && (isalnum((unsigned char)s[afterTag]) || s[afterTag] == '_')) { pos += 5; continue; }
+        size_t textAttrsEnd = s.find('>', afterTag);
+        if (textAttrsEnd == std::string::npos) return false;
+        std::string tAttrs = s.substr(afterTag, textAttrsEnd - afterTag);
+        size_t p = textAttrsEnd + 1;
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (s.compare(p, 6, "<tspan") != 0) { pos += 5; continue; }
+        size_t tspanAfter = p + 6;
+        if (tspanAfter < s.size() && (isalnum((unsigned char)s[tspanAfter]) || s[tspanAfter] == '_')) { pos += 5; continue; }
+        size_t tspanAttrsEnd = s.find('>', tspanAfter);
+        if (tspanAttrsEnd == std::string::npos) return false;
+        textAttrs = tAttrs;
+        tspanAttrs = s.substr(tspanAfter, tspanAttrsEnd - tspanAfter);
+        matchStart = pos;
+        matchEnd = tspanAttrsEnd + 1;
+        return true;
+    }
+}
+
+// Regex `\s+` collapse-to-single-space, mirroring QString::simplified()'s
+// intent (used on tspanAttrs after stripping y/dy).
+std::string collapseWhitespace(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size());
+    bool inSpace = false;
+    for (char c : s) {
+        if (isspace((unsigned char)c)) {
+            if (!inSpace) out += ' ';
+            inSpace = true;
+        } else {
+            out += c;
+            inSpace = false;
+        }
+    }
+    return out;
+}
+
+// Removes one findNumericEmAttr-style match from a string, if present.
+std::string removeNumericEmAttr(const std::string &s, const std::string &name)
+{
+    size_t ms, me; double v;
+    if (!findNumericEmAttr(s, name, 0, ms, me, v)) return s;
+    return s.substr(0, ms) + s.substr(me);
+}
+
+// Regex `<foreignObject\s+width="([^"]+)"\s+height="([^"]+)"[^>]*>.*?
+// <span[^>]*>(?:<p>)?(.*?)(?:</p>)?</span>.*?</foreignObject>`. The lazy
+// `.*?` quantifiers are naturally reproduced by std::string::find() picking
+// the FIRST occurrence of what follows -- the standard equivalence between
+// non-greedy regex matching and a linear "find the next occurrence" scan.
+// One simplification from the original: `.` in ECMAScript regex mode doesn't
+// match newlines by default (not set here), while find() does span them;
+// immaterial for real mermaid/plantuml output, where these spans are always
+// single-line.
+bool findForeignObject(const std::string &s, size_t from, size_t &matchStart, size_t &matchEnd,
+                       std::string &width, std::string &height, std::string &innerText)
+{
+    size_t pos = from;
+    while (true) {
+        pos = s.find("<foreignObject", pos);
+        if (pos == std::string::npos) return false;
+        size_t p = pos + 14;
+        if (p >= s.size() || !isspace((unsigned char)s[p])) { pos += 14; continue; }
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (s.compare(p, 7, "width=\"") != 0) { pos += 14; continue; }
+        p += 7;
+        size_t wEnd = s.find('"', p);
+        if (wEnd == std::string::npos) return false;
+        if (wEnd == p) { pos += 14; continue; } // width="" doesn't match [^"]+ (one or more)
+        std::string w = s.substr(p, wEnd - p);
+        p = wEnd + 1;
+        if (p >= s.size() || !isspace((unsigned char)s[p])) { pos += 14; continue; }
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (s.compare(p, 8, "height=\"") != 0) { pos += 14; continue; }
+        p += 8;
+        size_t hEnd = s.find('"', p);
+        if (hEnd == std::string::npos) return false;
+        if (hEnd == p) { pos += 14; continue; }
+        std::string h = s.substr(p, hEnd - p);
+        p = hEnd + 1;
+        size_t tagEnd = s.find('>', p);
+        if (tagEnd == std::string::npos) return false;
+        p = tagEnd + 1;
+        size_t spanPos = s.find("<span", p);
+        if (spanPos == std::string::npos) return false;
+        size_t spanTagEnd = s.find('>', spanPos);
+        if (spanTagEnd == std::string::npos) return false;
+        size_t contentStart = spanTagEnd + 1;
+        if (s.compare(contentStart, 3, "<p>") == 0) contentStart += 3;
+        size_t spanClose = s.find("</span>", contentStart);
+        if (spanClose == std::string::npos) return false;
+        size_t contentEnd = spanClose;
+        static const std::string pClose = "</p>";
+        if (contentEnd >= contentStart + pClose.size() &&
+            s.compare(contentEnd - pClose.size(), pClose.size(), pClose) == 0)
+            contentEnd -= pClose.size();
+        std::string inner = s.substr(contentStart, contentEnd - contentStart);
+        size_t afterSpan = spanClose + 7;
+        size_t fEnd = s.find("</foreignObject>", afterSpan);
+        if (fEnd == std::string::npos) return false;
+        matchStart = pos;
+        matchEnd = fEnd + 16;
+        width = w; height = h; innerText = inner;
+        return true;
+    }
+}
+
 std::string fixMermaidSvgText(const std::string &svgIn, bool darkMode)
 {
     std::string svg = svgIn;
 
     // <foreignObject> HTML-label workaround -> plain <text> librsvg can render.
-    static const std::regex foreignObjRe(
-        R"RX(<foreignObject\s+width="([^"]+)"\s+height="([^"]+)"[^>]*>.*?<span[^>]*>(?:<p>)?(.*?)(?:</p>)?</span>.*?</foreignObject>)RX");
     std::string textColor = darkMode ? "#c9d1d9" : "#333333";
     {
         std::string out;
-        auto begin = std::sregex_iterator(svg.begin(), svg.end(), foreignObjRe);
-        auto end = std::sregex_iterator();
-        size_t lastEnd = 0;
-        for (auto it = begin; it != end; ++it) {
-            auto &m = *it;
-            out.append(svg, lastEnd, m.position(0) - lastEnd);
-            double w = std::stod(m[1].str());
-            double h = std::stod(m[2].str());
+        size_t lastEnd = 0, searchFrom = 0;
+        size_t ms, me; std::string wStr, hStr, inner;
+        while (findForeignObject(svg, searchFrom, ms, me, wStr, hStr, inner)) {
+            out.append(svg, lastEnd, ms - lastEnd);
+            double w = safeStod(wStr);
+            double h = safeStod(hStr);
             char buf[256];
             snprintf(buf, sizeof(buf),
                      "<text x=\"%g\" y=\"%g\" dominant-baseline=\"middle\" text-anchor=\"middle\" "
                      "font-family=\"sans-serif\" font-size=\"14px\" fill=\"%s\">",
                      w / 2.0, h / 2.0 + 2.0, textColor.c_str());
             out += buf;
-            out += m[3].str();
+            out += inner;
             out += "</text>";
-            lastEnd = m.position(0) + m.length(0);
+            lastEnd = me;
+            searchFrom = me;
         }
         out.append(svg, lastEnd, std::string::npos);
         svg = out;
     }
 
     // Combine <tspan y="..em" dy="..em"> into an absolute pixel y on <text>.
-    static const std::regex textTspanRe(R"RX(<text\b([^>]*)>\s*<tspan\b([^>]*)>)RX");
-    static const std::regex yRe(R"RX(\by\s*=\s*"(-?[0-9]*\.?[0-9]+)em")RX");
-    static const std::regex dyRe(R"RX(\bdy\s*=\s*"(-?[0-9]*\.?[0-9]+)em")RX");
-    static const std::regex textYRe(R"RX(\by\s*=\s*"[^"]*")RX");
     {
         std::string out;
-        auto begin = std::sregex_iterator(svg.begin(), svg.end(), textTspanRe);
-        auto end = std::sregex_iterator();
-        size_t lastEnd = 0;
-        for (auto it = begin; it != end; ++it) {
-            auto &m = *it;
-            std::string textAttrs = m[1].str();
-            std::string tspanAttrs = m[2].str();
-            std::smatch ym, dym;
-            if (std::regex_search(tspanAttrs, ym, yRe) && std::regex_search(tspanAttrs, dym, dyRe)) {
-                double yEm = std::stod(ym[1].str());
-                double dyEm = std::stod(dym[1].str());
+        size_t lastEnd = 0, searchFrom = 0;
+        size_t ms, me; std::string textAttrs, tspanAttrs;
+        while (findTextTspanPair(svg, searchFrom, ms, me, textAttrs, tspanAttrs)) {
+            size_t yMs, yMe, dyMs, dyMe; double yEm, dyEm;
+            bool hasY = findNumericEmAttr(tspanAttrs, "y", 0, yMs, yMe, yEm);
+            bool hasDy = findNumericEmAttr(tspanAttrs, "dy", 0, dyMs, dyMe, dyEm);
+            if (hasY && hasDy) {
                 double baselinePx = (yEm + dyEm) * 16.0 - 2.0;
                 char yAttr[64];
                 snprintf(yAttr, sizeof(yAttr), "y=\"%.2f\"", baselinePx);
-                std::smatch textY;
-                if (std::regex_search(textAttrs, textY, textYRe))
-                    textAttrs = std::regex_replace(textAttrs, textYRe, yAttr);
+
+                size_t textYMs, textYMe; std::string dummy;
+                if (findQuotedAttr(textAttrs, "y", 0, textYMs, textYMe, dummy))
+                    textAttrs = textAttrs.substr(0, textYMs) + yAttr + textAttrs.substr(textYMe);
                 else
                     textAttrs = std::string(" ") + yAttr + textAttrs;
-                tspanAttrs = std::regex_replace(tspanAttrs, yRe, "");
-                tspanAttrs = std::regex_replace(tspanAttrs, dyRe, "");
-                // collapse whitespace
-                tspanAttrs = std::regex_replace(tspanAttrs, std::regex(R"RX(\s+)RX"), " ");
+
+                tspanAttrs = removeNumericEmAttr(tspanAttrs, "y");
+                tspanAttrs = removeNumericEmAttr(tspanAttrs, "dy");
+                tspanAttrs = collapseWhitespace(tspanAttrs);
                 if (!tspanAttrs.empty() && tspanAttrs[0] != ' ') tspanAttrs = " " + tspanAttrs;
 
-                out.append(svg, lastEnd, m.position(0) - lastEnd);
+                out.append(svg, lastEnd, ms - lastEnd);
                 out += "<text" + textAttrs + "><tspan" + tspanAttrs + ">";
-                lastEnd = m.position(0) + m.length(0);
+                lastEnd = me;
             }
+            searchFrom = me;
         }
         out.append(svg, lastEnd, std::string::npos);
         svg = out;
     }
 
     // Remaining bare em -> px conversions.
-    static const std::regex emRe(R"RX(\b(y|dy)\s*=\s*"(-?[0-9]*\.?[0-9]+)em")RX");
     {
         std::string out;
-        auto begin = std::sregex_iterator(svg.begin(), svg.end(), emRe);
-        auto end = std::sregex_iterator();
-        size_t lastEnd = 0;
-        for (auto it = begin; it != end; ++it) {
-            auto &m = *it;
-            out.append(svg, lastEnd, m.position(0) - lastEnd);
-            double px = std::stod(m[2].str()) * 16.0;
+        size_t lastEnd = 0, searchFrom = 0;
+        size_t ms, me; std::string attrName; double emVal;
+        while (findYOrDyEmAttr(svg, searchFrom, ms, me, attrName, emVal)) {
+            out.append(svg, lastEnd, ms - lastEnd);
+            double px = emVal * 16.0;
             char buf[64];
-            snprintf(buf, sizeof(buf), "%s=\"%.2f\"", m[1].str().c_str(), px);
+            snprintf(buf, sizeof(buf), "%s=\"%.2f\"", attrName.c_str(), px);
             out += buf;
-            lastEnd = m.position(0) + m.length(0);
+            lastEnd = me;
+            searchFrom = me;
         }
         out.append(svg, lastEnd, std::string::npos);
         svg = out;
@@ -260,12 +515,58 @@ std::string fixMermaidSvgText(const std::string &svgIn, bool darkMode)
     return svg;
 }
 
+// Replaces every occurrence of any of `needles` with `replacement`.
+std::string replaceAllOf(const std::string &s, const std::vector<std::string> &needles,
+                          const std::string &replacement)
+{
+    std::string out;
+    size_t i = 0;
+    while (i < s.size()) {
+        bool matched = false;
+        for (const auto &needle : needles) {
+            if (s.compare(i, needle.size(), needle) == 0) {
+                out += replacement;
+                i += needle.size();
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) out += s[i++];
+    }
+    return out;
+}
+
 std::string fixPlantUmlSvgDark(const std::string &svgIn)
 {
     std::string svg = svgIn;
-    svg = std::regex_replace(svg, std::regex(R"RX(stroke="(#181818|#000000|#333333|#000|black)")RX"), "stroke=\"#58a6ff\"");
-    svg = std::regex_replace(svg, std::regex(R"RX(stroke\s*:\s*(#181818|#000000|#333333|#000|black))RX"), "stroke:#58a6ff");
-    svg = std::regex_replace(svg, std::regex(R"RX(stroke-width:0\.[0-9]+)RX"), "stroke-width:1.0");
+    // Regex `stroke="(#181818|#000000|#333333|#000|black)"`.
+    svg = replaceAllOf(svg, {"stroke=\"#181818\"", "stroke=\"#000000\"", "stroke=\"#333333\"",
+                             "stroke=\"#000\"", "stroke=\"black\""}, "stroke=\"#58a6ff\"");
+    // Regex `stroke\s*:\s*(#181818|#000000|#333333|#000|black)` -- real
+    // PlantUML/mermaid output never puts whitespace around this colon, so a
+    // plain substring match covers it without reproducing \s* generically.
+    svg = replaceAllOf(svg, {"stroke:#181818", "stroke:#000000", "stroke:#333333",
+                             "stroke:#000", "stroke:black"}, "stroke:#58a6ff");
+    // Regex `stroke-width:0\.[0-9]+` -> "stroke-width:1.0".
+    {
+        std::string out;
+        size_t i = 0;
+        static const std::string prefix = "stroke-width:0.";
+        while (i < svg.size()) {
+            if (svg.compare(i, prefix.size(), prefix) == 0) {
+                size_t j = i + prefix.size();
+                size_t digitsEnd = j;
+                while (digitsEnd < svg.size() && isdigit((unsigned char)svg[digitsEnd])) ++digitsEnd;
+                if (digitsEnd > j) { // at least one digit, matching [0-9]+
+                    out += "stroke-width:1.0";
+                    i = digitsEnd;
+                    continue;
+                }
+            }
+            out += svg[i++];
+        }
+        svg = out;
+    }
     return svg;
 }
 
@@ -285,6 +586,25 @@ std::vector<uint8_t> svgToHighDpiPng(const std::string &svgData, float scale, bo
         rsvg_handle_get_intrinsic_dimensions(handle, &dW, nullptr, &dH, nullptr, &hasViewbox, &vb);
         if (hasViewbox && vb.width > 0 && vb.height > 0) { w = vb.width; h = vb.height; }
         else { w = 800; h = 600; }
+    }
+    // librsvg's reported size is trusted verbatim below with no bound at
+    // all -- a percentage-based viewBox or other malformed SVG can make w/h
+    // non-finite or absurdly large. cairo_image_surface_create() with a
+    // pathological size can itself abort/crash (Cairo's own docs note
+    // behavior is undefined beyond its internal size limits), and even a
+    // "successful" multi-gigabyte allocation attempt is a crash risk on its
+    // own. Same bug class as diagramview_gtk3's fitToView() zoom, which
+    // needed the same kind of clamp for the same underlying reason
+    // (librsvg/Cairo dimensions from renderer output, trusted unchecked).
+    if (!std::isfinite(w) || !std::isfinite(h) || w <= 0 || h <= 0) {
+        mvLog("[svgToHighDpiPng] non-finite/degenerate size w=%.6f h=%.6f -- falling back to 800x600", w, h);
+        w = 800; h = 600;
+    }
+    constexpr double kMaxDim = 8000.0; // generous; well beyond any real diagram, far below a crash-risk allocation
+    if (w > kMaxDim || h > kMaxDim) {
+        mvLog("[svgToHighDpiPng] size w=%.2f h=%.2f exceeds cap, clamping", w, h);
+        double capScale = kMaxDim / std::max(w, h);
+        w *= capScale; h *= capScale;
     }
     logicalWidth = (int)w;
     logicalHeight = (int)h;

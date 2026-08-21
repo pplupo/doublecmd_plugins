@@ -168,7 +168,19 @@ if(ENABLE_GTK3)
             ${Freetype2_LIBRARIES}
             Fontconfig::Fontconfig
         )
-        target_link_options(markdownview_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
+        # Deliberately NOT -static-libstdc++/-static-libgcc (unlike the qt6
+        # target above). Confirmed via a live gdb session: statically linking
+        # libstdc++ gives this .wlx its own private copy of C++ locale/
+        # iostream facet templates, separate from the single libstdc++.so
+        # every other component in DC's process shares. When two independent
+        # copies of that machinery register facet IDs against the same
+        # process-wide registry, a subsequent facet lookup can resolve to the
+        # WRONG facet's vtable -- reproduced as a char-based
+        # regex_traits<char> call landing inside an unrelated
+        # codecvt<char16_t,...>::do_unshift, crashing on DC's own main
+        # thread. structview, which never statically links libstdc++, never
+        # showed this symptom. Sharing the dynamic libstdc++.so (the default;
+        # no special flag needed) removes the mechanism outright.
         set_target_properties(markdownview_gtk3 PROPERTIES
             PREFIX ""
             OUTPUT_NAME "markdownview_gtk3"
