@@ -11,10 +11,10 @@
 #include <chrono>
 #include <fstream>
 #include <sstream>
-#include <regex>
 #include <vector>
 #include <map>
 #include <cstdio>
+#include <cctype>
 
 extern char **environ;
 
@@ -234,6 +234,20 @@ std::string trim(const std::string &s)
     return s.substr(b, e - b + 1);
 }
 
+// std::stod throws std::out_of_range for a value beyond double's range and
+// std::invalid_argument if given something it can't parse. This is reached
+// from ListLoad -- an extern "C" boundary called directly by DC's Pascal
+// runtime -- and a C++ exception unwinding across that boundary is undefined
+// behavior, not a clean plugin-only failure.
+double safeStod(const std::string &s, double fallback = 0.0)
+{
+    try {
+        return std::stod(s);
+    } catch (const std::exception &) {
+        return fallback;
+    }
+}
+
 } // namespace
 
 namespace DiagramRenderer {
@@ -323,12 +337,18 @@ void Settings::save(const std::string &iniPath, const std::string &pluginName) c
 
 namespace {
 
-std::string runMermaidWeb(const Settings &s, const std::string &inputPath)
+std::string runMermaidWeb(const Settings &s, const std::string &inputPath, bool darkMode)
 {
     std::string code = readFile(inputPath);
     if (code.empty()) return {};
 
-    std::string url = s.mermaidServerUrl + "/svg/" + percentEncode(base64Encode(code));
+    // mermaid.ink defaults to its light "default" theme regardless of our
+    // own dark background -- confirmed via a direct request that arrows and
+    // edge labels render with dark strokes (#333333/#552222) unless a
+    // `?theme=dark` query param is added, which switches them to light
+    // strokes (#ccc/#ddd) that stay legible on our dark canvas.
+    std::string url = s.mermaidServerUrl + "/svg/" + percentEncode(base64Encode(code)) +
+                       (darkMode ? "?theme=dark" : "");
 
     ProcessResult r = runProcess("curl",
         {"-s", "-f", "--max-time", std::to_string(s.timeoutMs / 1000), url},
@@ -394,16 +414,48 @@ std::string runMermaidLocal(const Settings &s, const std::string &inputPath, boo
         if (auto svg = tryExe("mmdc"); !svg.empty()) return svg;
     }
 
-    // 5. npx fallback (3x timeout, matching original)
-    ProcessResult r = runProcess("npx", buildArgs(true), nullptr, s.timeoutMs * 3);
-    if (r.started && r.exitCode == 0 && fileExists(outputPath)) {
-        std::string svg = readFile(outputPath);
-        cleanup();
-        return svg;
-    }
-
     cleanup();
     return {};
+}
+
+// npx auto-installs @mermaid-js/mermaid-cli on first use, which needs a
+// working npm registry connection and can take much longer than
+// timeoutMs*3 to resolve/download -- confirmed via a live test in this same
+// environment where a bare `npx -y @mermaid-js/mermaid-cli --version`
+// blocked for the full duration with zero output. Kept as a last resort
+// (see renderMermaid) behind the much faster and more reliable web
+// fallback, instead of before it.
+std::string runMermaidNpx(const Settings &s, const std::string &inputPath, bool darkMode)
+{
+    std::string tempConfigPath = "/tmp/diagramview_mermaid_" + std::to_string(getpid()) + ".json";
+    writeFile(tempConfigPath, R"({
+  "htmlLabels": false,
+  "flowchart": { "htmlLabels": false },
+  "sequence": { "htmlLabels": false },
+  "gantt": { "htmlLabels": false },
+  "journey": { "htmlLabels": false },
+  "class": { "htmlLabels": false },
+  "state": { "htmlLabels": false },
+  "er": { "htmlLabels": false },
+  "pie": { "htmlLabels": false },
+  "c4": { "htmlLabels": false }
+})");
+
+    std::string outputPath = "/tmp/diagramview_mermaid_" + std::to_string(getpid()) + ".svg";
+
+    std::vector<std::string> args = {"-y", "@mermaid-js/mermaid-cli",
+                                      "-i", inputPath, "-o", outputPath, "-e", "svg"};
+    if (darkMode) { args.push_back("--theme"); args.push_back("dark"); }
+    if (fileExists(tempConfigPath)) { args.push_back("-c"); args.push_back(tempConfigPath); }
+
+    ProcessResult r = runProcess("npx", args, nullptr, s.timeoutMs * 3);
+    std::string svg;
+    if (r.started && r.exitCode == 0 && fileExists(outputPath))
+        svg = readFile(outputPath);
+
+    remove(tempConfigPath.c_str());
+    remove(outputPath.c_str());
+    return svg;
 }
 
 } // namespace
@@ -411,25 +463,36 @@ std::string runMermaidLocal(const Settings &s, const std::string &inputPath, boo
 std::string renderMermaid(const Settings &s, const std::string &inputPath, bool darkMode)
 {
     if (s.mermaidRenderer == "web") {
-        if (auto svg = runMermaidWeb(s, inputPath); !svg.empty()) return svg;
+        if (auto svg = runMermaidWeb(s, inputPath, darkMode); !svg.empty()) return svg;
     }
     if (auto svg = runMermaidLocal(s, inputPath, darkMode); !svg.empty()) return svg;
     if (s.mermaidRenderer != "web") {
-        if (auto svg = runMermaidWeb(s, inputPath); !svg.empty()) return svg;
+        if (auto svg = runMermaidWeb(s, inputPath, darkMode); !svg.empty()) return svg;
     }
-    return {};
+    // Last resort: auto-install via npx. Tried after the web fallback since
+    // it is far slower and depends on npm registry access, not just a
+    // single SVG-rendering HTTP request (see runMermaidNpx's comment).
+    return runMermaidNpx(s, inputPath, darkMode);
 }
 
 // ── PlantUML ─────────────────────────────────────────────────────────
 
 namespace {
 
-std::string runPlantUmlWeb(const Settings &s, const std::string &inputPath)
+std::string runPlantUmlWeb(const Settings &s, const std::string &inputPath, bool darkMode)
 {
     std::string code = readFile(inputPath);
     if (code.empty()) return {};
 
-    std::string url = s.plantumlServerUrl + "/svg/~h" + hexEncode(code);
+    // The public PlantUML server has no query param for theme -- dark
+    // rendering is a distinct path prefix ("dsvg" vs "svg"), confirmed by
+    // diffing actual server output: /svg/ returns background:#FFFFFF with
+    // stroke:#181818, /dsvg/ returns background:#1B1B1B with
+    // stroke:#E7E7E7. Passing darkMode=true to --dark-mode on the local CLI
+    // path but never selecting this endpoint on the web fallback path meant
+    // the web fallback (the only path that actually works when no local
+    // java/plantuml install is present) always rendered black-on-dark-bg.
+    std::string url = s.plantumlServerUrl + (darkMode ? "/dsvg/~h" : "/svg/~h") + hexEncode(code);
 
     ProcessResult r = runProcess("curl",
         {"-s", "-f", "--max-time", std::to_string(s.timeoutMs / 1000), url},
@@ -493,89 +556,329 @@ std::string runPlantUmlLocal(const Settings &s, const std::string &inputPath, bo
 std::string renderPlantUml(const Settings &s, const std::string &inputPath, bool darkMode)
 {
     if (s.renderer == "web") {
-        if (auto svg = runPlantUmlWeb(s, inputPath); !svg.empty()) return svg;
+        if (auto svg = runPlantUmlWeb(s, inputPath, darkMode); !svg.empty()) return svg;
         return runPlantUmlLocal(s, inputPath, darkMode);
     }
     if (auto svg = runPlantUmlLocal(s, inputPath, darkMode); !svg.empty()) return svg;
-    return runPlantUmlWeb(s, inputPath);
+    return runPlantUmlWeb(s, inputPath, darkMode);
 }
 
 // ── SVG text baseline fixup ──────────────────────────────────────────
 
-std::string fixMermaidSvgText(const std::string &svgData)
+// ── Hand-written replacements for what used to be static const std::regex
+// objects in this function (textTspanRe, yRe, dyRe, textYRe, emRe). Confirmed
+// via a live gdb session against the real deployed plugin (markdownview's
+// identical copy of this logic, in diagram_render.cpp): constructing ANY of
+// these std::regex objects crashes with SIGSEGV, on DC's own main thread,
+// with a full symbolized backtrace showing regex_traits<char>::transform ->
+// collate<char>::transform dispatching into
+// codecvt<char16_t,char,__mbstate_t>::do_unshift -- a char-collate call
+// landing in a completely unrelated char16_t codecvt facet. That is libstdc++
+// locale facet-ID corruption/mismatch, not a stack or threading problem (both
+// were tried first, in that order, on this exact code, and neither changed
+// the crash). Every pattern here is simple enough to hand-write; doing so
+// removes the dependency on libstdc++'s <regex>/<locale> machinery entirely.
+
+// Regex `\bNAME\s*=\s*"[^"]*"`: finds the next `name="value"` (tolerant of
+// whitespace around `=`) starting at `from`, requiring a non-word character
+// (or start of string) immediately before `name` -- \b's hand-rolled
+// equivalent.
+bool findQuotedAttr(const std::string &s, const std::string &name, size_t from,
+                    size_t &matchStart, size_t &matchEnd, std::string &value)
+{
+    size_t pos = from;
+    while (true) {
+        pos = s.find(name, pos);
+        if (pos == std::string::npos) return false;
+        if (pos > 0) {
+            char prev = s[pos - 1];
+            if (isalnum((unsigned char)prev) || prev == '_') { ++pos; continue; }
+        }
+        size_t p = pos + name.size();
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (p >= s.size() || s[p] != '=') { ++pos; continue; }
+        ++p;
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (p >= s.size() || s[p] != '"') { ++pos; continue; }
+        size_t valStart = p + 1;
+        size_t valEnd = s.find('"', valStart);
+        if (valEnd == std::string::npos) return false;
+        matchStart = pos;
+        matchEnd = valEnd + 1;
+        value = s.substr(valStart, valEnd - valStart);
+        return true;
+    }
+}
+
+// Validates `-?[0-9]*\.?[0-9]+` starting at `start` (at least one digit
+// somewhere, at most one '.', optional leading '-'). Sets numEnd to just
+// past the numeric text on success.
+bool isValidEmNumber(const std::string &s, size_t start, size_t &numEnd)
+{
+    size_t i = start;
+    if (i < s.size() && s[i] == '-') ++i;
+    size_t digitCount = 0;
+    bool sawDot = false;
+    while (i < s.size()) {
+        if (isdigit((unsigned char)s[i])) { ++i; ++digitCount; }
+        else if (s[i] == '.' && !sawDot) { sawDot = true; ++i; }
+        else break;
+    }
+    if (digitCount == 0) return false;
+    numEnd = i;
+    return true;
+}
+
+// Regex `\bNAME\s*=\s*"(-?[0-9]*\.?[0-9]+)em"`.
+bool findNumericEmAttr(const std::string &s, const std::string &name, size_t from,
+                       size_t &matchStart, size_t &matchEnd, double &emValue)
+{
+    size_t pos = from;
+    while (true) {
+        pos = s.find(name, pos);
+        if (pos == std::string::npos) return false;
+        if (pos > 0) {
+            char prev = s[pos - 1];
+            if (isalnum((unsigned char)prev) || prev == '_') { ++pos; continue; }
+        }
+        size_t p = pos + name.size();
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (p >= s.size() || s[p] != '=') { ++pos; continue; }
+        ++p;
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (p >= s.size() || s[p] != '"') { ++pos; continue; }
+        size_t valStart = p + 1;
+        size_t numEnd;
+        if (!isValidEmNumber(s, valStart, numEnd) || s.compare(numEnd, 2, "em") != 0
+            || numEnd + 2 >= s.size() || s[numEnd + 2] != '"') { ++pos; continue; }
+        matchStart = pos;
+        matchEnd = numEnd + 3; // "em" + closing quote
+        emValue = safeStod(s.substr(valStart, numEnd - valStart));
+        return true;
+    }
+}
+
+// Regex `\b(y|dy)\s*=\s*"(-?[0-9]*\.?[0-9]+)em"`: earliest of either "y=" or
+// "dy=".
+bool findYOrDyEmAttr(const std::string &s, size_t from, size_t &matchStart, size_t &matchEnd,
+                     std::string &attrName, double &emValue)
+{
+    size_t yStart, yEnd; double yVal;
+    size_t dyStart, dyEnd; double dyVal;
+    bool hasY = findNumericEmAttr(s, "y", from, yStart, yEnd, yVal);
+    bool hasDy = findNumericEmAttr(s, "dy", from, dyStart, dyEnd, dyVal);
+    if (!hasY && !hasDy) return false;
+    if (hasY && (!hasDy || yStart <= dyStart)) {
+        matchStart = yStart; matchEnd = yEnd; attrName = "y"; emValue = yVal;
+    } else {
+        matchStart = dyStart; matchEnd = dyEnd; attrName = "dy"; emValue = dyVal;
+    }
+    return true;
+}
+
+// Regex `<text\b([^>]*)>\s*<tspan\b([^>]*)>`.
+bool findTextTspanPair(const std::string &s, size_t from, size_t &matchStart, size_t &matchEnd,
+                       std::string &textAttrs, std::string &tspanAttrs)
+{
+    size_t pos = from;
+    while (true) {
+        pos = s.find("<text", pos);
+        if (pos == std::string::npos) return false;
+        size_t afterTag = pos + 5;
+        if (afterTag < s.size() && (isalnum((unsigned char)s[afterTag]) || s[afterTag] == '_')) { pos += 5; continue; }
+        size_t textAttrsEnd = s.find('>', afterTag);
+        if (textAttrsEnd == std::string::npos) return false;
+        std::string tAttrs = s.substr(afterTag, textAttrsEnd - afterTag);
+        size_t p = textAttrsEnd + 1;
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (s.compare(p, 6, "<tspan") != 0) { pos += 5; continue; }
+        size_t tspanAfter = p + 6;
+        if (tspanAfter < s.size() && (isalnum((unsigned char)s[tspanAfter]) || s[tspanAfter] == '_')) { pos += 5; continue; }
+        size_t tspanAttrsEnd = s.find('>', tspanAfter);
+        if (tspanAttrsEnd == std::string::npos) return false;
+        textAttrs = tAttrs;
+        tspanAttrs = s.substr(tspanAfter, tspanAttrsEnd - tspanAfter);
+        matchStart = pos;
+        matchEnd = tspanAttrsEnd + 1;
+        return true;
+    }
+}
+
+// Regex `\s+` collapse-to-single-space (mirrors QString::simplified()'s
+// intent, matching the original comment here).
+std::string collapseWhitespace(const std::string &s)
+{
+    std::string out;
+    out.reserve(s.size());
+    bool inSpace = false;
+    for (char c : s) {
+        if (isspace((unsigned char)c)) {
+            if (!inSpace) out += ' ';
+            inSpace = true;
+        } else {
+            out += c;
+            inSpace = false;
+        }
+    }
+    return out;
+}
+
+std::string removeNumericEmAttr(const std::string &s, const std::string &name)
+{
+    size_t ms, me; double v;
+    if (!findNumericEmAttr(s, name, 0, ms, me, v)) return s;
+    return s.substr(0, ms) + s.substr(me);
+}
+
+// Regex `<foreignObject\s+width="([^"]+)"\s+height="([^"]+)"[^>]*>.*?
+// <span[^>]*>(?:<p>)?(.*?)(?:</p>)?</span>.*?</foreignObject>`. Ported from
+// markdownview's identical helper (diagram_render.cpp) -- confirmed via a
+// live test that mermaid's web renderer (mermaid.ink, the fallback actually
+// used whenever no local mmdc binary is installed) always emits HTML labels
+// as <foreignObject><div><span class="nodeLabel">...</span></div>, never
+// plain <text>/<tspan>, regardless of theme. librsvg has no support for
+// foreignObject/HTML content at all, so those labels rendered as
+// completely invisible text until converted to plain <text> here.
+bool findForeignObject(const std::string &s, size_t from, size_t &matchStart, size_t &matchEnd,
+                       std::string &width, std::string &height, std::string &innerText)
+{
+    size_t pos = from;
+    while (true) {
+        pos = s.find("<foreignObject", pos);
+        if (pos == std::string::npos) return false;
+        size_t p = pos + 14;
+        if (p >= s.size() || !isspace((unsigned char)s[p])) { pos += 14; continue; }
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (s.compare(p, 7, "width=\"") != 0) { pos += 14; continue; }
+        p += 7;
+        size_t wEnd = s.find('"', p);
+        if (wEnd == std::string::npos) return false;
+        if (wEnd == p) { pos += 14; continue; } // width="" doesn't match [^"]+ (one or more)
+        std::string w = s.substr(p, wEnd - p);
+        p = wEnd + 1;
+        if (p >= s.size() || !isspace((unsigned char)s[p])) { pos += 14; continue; }
+        while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+        if (s.compare(p, 8, "height=\"") != 0) { pos += 14; continue; }
+        p += 8;
+        size_t hEnd = s.find('"', p);
+        if (hEnd == std::string::npos) return false;
+        if (hEnd == p) { pos += 14; continue; }
+        std::string h = s.substr(p, hEnd - p);
+        p = hEnd + 1;
+        size_t tagEnd = s.find('>', p);
+        if (tagEnd == std::string::npos) return false;
+        p = tagEnd + 1;
+        size_t spanPos = s.find("<span", p);
+        if (spanPos == std::string::npos) return false;
+        size_t spanTagEnd = s.find('>', spanPos);
+        if (spanTagEnd == std::string::npos) return false;
+        size_t contentStart = spanTagEnd + 1;
+        if (s.compare(contentStart, 3, "<p>") == 0) contentStart += 3;
+        size_t spanClose = s.find("</span>", contentStart);
+        if (spanClose == std::string::npos) return false;
+        size_t contentEnd = spanClose;
+        static const std::string pClose = "</p>";
+        if (contentEnd >= contentStart + pClose.size() &&
+            s.compare(contentEnd - pClose.size(), pClose.size(), pClose) == 0)
+            contentEnd -= pClose.size();
+        size_t foClose = s.find("</foreignObject>", spanClose);
+        if (foClose == std::string::npos) return false;
+        matchStart = pos;
+        matchEnd = foClose + 16; // strlen("</foreignObject>")
+        width = w;
+        height = h;
+        innerText = s.substr(contentStart, contentEnd - contentStart);
+        return true;
+    }
+}
+
+std::string fixMermaidSvgText(const std::string &svgData, bool darkMode)
 {
     std::string svg = svgData;
 
-    // Phase 1: fold <text ...><tspan y="..em" dy="..em"> into an absolute
-    // pixel y="" on the parent <text>, dropping y/dy from that first tspan.
-    static const std::regex textTspanRe(R"(<text\b([^>]*)>\s*<tspan\b([^>]*)>)");
-    static const std::regex yRe(R"(\by\s*=\s*"(-?[0-9]*\.?[0-9]+)em")");
-    static const std::regex dyRe(R"(\bdy\s*=\s*"(-?[0-9]*\.?[0-9]+)em")");
-    static const std::regex textYRe(R"(\by\s*=\s*"[^"]*")");
-
-    // Work on a mutable copy; matches are applied back-to-front so earlier
-    // offsets stay valid as the string is edited.
-    std::string working = svg;
-    std::sregex_iterator it(working.begin(), working.end(), textTspanRe);
-    std::sregex_iterator end;
-    // Collect matches first (positions), then rebuild string back-to-front
-    // to keep earlier offsets valid, mirroring the original Qt code.
-    std::vector<std::smatch> matches;
-    for (; it != end; ++it) matches.push_back(*it);
-
-    for (auto mit = matches.rbegin(); mit != matches.rend(); ++mit) {
-        const std::smatch &match = *mit;
-        std::string textAttrs = match[1].str();
-        std::string tspanAttrs = match[2].str();
-
-        std::smatch ym, dym;
-        if (std::regex_search(tspanAttrs, ym, yRe) && std::regex_search(tspanAttrs, dym, dyRe)) {
-            double yEm = std::stod(ym[1].str());
-            double dyEm = std::stod(dym[1].str());
-            double baselinePx = (yEm + dyEm) * 16.0 - 2.0;
-
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "y=\"%.2f\"", baselinePx);
-
-            std::smatch textYm;
-            if (std::regex_search(textAttrs, textYm, textYRe)) {
-                textAttrs = textAttrs.substr(0, textYm.position(0)) + buf +
-                            textAttrs.substr(textYm.position(0) + textYm.length(0));
-            } else {
-                textAttrs = std::string(" ") + buf + textAttrs;
-            }
-
-            tspanAttrs = std::regex_replace(tspanAttrs, yRe, "");
-            tspanAttrs = std::regex_replace(tspanAttrs, dyRe, "");
-            // Collapse runs of whitespace (mirrors QString::simplified()).
-            tspanAttrs = std::regex_replace(tspanAttrs, std::regex(R"(\s+)"), " ");
-            tspanAttrs = trim(tspanAttrs);
-            if (!tspanAttrs.empty()) tspanAttrs = " " + tspanAttrs;
-
-            std::string replacement = "<text" + textAttrs + "><tspan" + tspanAttrs + ">";
-            working = working.substr(0, match.position(0)) + replacement +
-                      working.substr(match.position(0) + match.length(0));
+    // <foreignObject> HTML-label workaround -> plain <text> librsvg can render.
+    {
+        std::string textColor = darkMode ? "#c9d1d9" : "#333333";
+        std::string out;
+        size_t lastEnd = 0, searchFrom = 0;
+        size_t ms, me; std::string wStr, hStr, inner;
+        while (findForeignObject(svg, searchFrom, ms, me, wStr, hStr, inner)) {
+            out.append(svg, lastEnd, ms - lastEnd);
+            double w = safeStod(wStr);
+            double h = safeStod(hStr);
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "<text x=\"%g\" y=\"%g\" dominant-baseline=\"middle\" text-anchor=\"middle\" "
+                          "font-family=\"sans-serif\" font-size=\"14px\" fill=\"%s\">",
+                          w / 2.0, h / 2.0 + 2.0, textColor.c_str());
+            out += buf;
+            out += inner;
+            out += "</text>";
+            lastEnd = me;
+            searchFrom = me;
         }
+        out.append(svg, lastEnd, std::string::npos);
+        svg = out;
     }
 
-    // Phase 2: convert any remaining y/dy em values (outside the pattern
-    // above) to pixel values in place.
-    static const std::regex emRe(R"(\b(y|dy)\s*=\s*"(-?[0-9]*\.?[0-9]+)em")");
-    std::string final;
-    final.reserve(working.size());
-    size_t last = 0;
-    for (std::sregex_iterator eit(working.begin(), working.end(), emRe), eend; eit != eend; ++eit) {
-        const std::smatch &em = *eit;
-        final.append(working, last, static_cast<size_t>(em.position(0)) - last);
-        double pxValue = std::stod(em[2].str()) * 16.0;
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%s=\"%.2f\"", em[1].str().c_str(), pxValue);
-        final += buf;
-        last = static_cast<size_t>(em.position(0) + em.length(0));
-    }
-    final.append(working, last, std::string::npos);
+    // Fold <text ...><tspan y="..em" dy="..em"> into an absolute pixel y=""
+    // on the parent <text>, dropping y/dy from that first tspan.
+    {
+        std::string out;
+        size_t lastEnd = 0, searchFrom = 0;
+        size_t ms, me; std::string textAttrs, tspanAttrs;
+        while (findTextTspanPair(svg, searchFrom, ms, me, textAttrs, tspanAttrs)) {
+            size_t yMs, yMe, dyMs, dyMe; double yEm, dyEm;
+            bool hasY = findNumericEmAttr(tspanAttrs, "y", 0, yMs, yMe, yEm);
+            bool hasDy = findNumericEmAttr(tspanAttrs, "dy", 0, dyMs, dyMe, dyEm);
+            if (hasY && hasDy) {
+                double baselinePx = (yEm + dyEm) * 16.0 - 2.0;
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "y=\"%.2f\"", baselinePx);
 
-    return final;
+                size_t textYMs, textYMe; std::string dummy;
+                if (findQuotedAttr(textAttrs, "y", 0, textYMs, textYMe, dummy)) {
+                    textAttrs = textAttrs.substr(0, textYMs) + buf + textAttrs.substr(textYMe);
+                } else {
+                    textAttrs = std::string(" ") + buf + textAttrs;
+                }
+
+                tspanAttrs = removeNumericEmAttr(tspanAttrs, "y");
+                tspanAttrs = removeNumericEmAttr(tspanAttrs, "dy");
+                tspanAttrs = collapseWhitespace(tspanAttrs);
+                tspanAttrs = trim(tspanAttrs);
+                if (!tspanAttrs.empty()) tspanAttrs = " " + tspanAttrs;
+
+                out.append(svg, lastEnd, ms - lastEnd);
+                out += "<text" + textAttrs + "><tspan" + tspanAttrs + ">";
+                lastEnd = me;
+            }
+            searchFrom = me;
+        }
+        out.append(svg, lastEnd, std::string::npos);
+        svg = out;
+    }
+
+    // Convert any remaining y/dy em values (outside the pattern above) to
+    // pixel values in place.
+    {
+        std::string out;
+        size_t lastEnd = 0, searchFrom = 0;
+        size_t ms, me; std::string attrName; double emVal;
+        while (findYOrDyEmAttr(svg, searchFrom, ms, me, attrName, emVal)) {
+            out.append(svg, lastEnd, ms - lastEnd);
+            double pxValue = emVal * 16.0;
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%s=\"%.2f\"", attrName.c_str(), pxValue);
+            out += buf;
+            lastEnd = me;
+            searchFrom = me;
+        }
+        out.append(svg, lastEnd, std::string::npos);
+        svg = out;
+    }
+
+    return svg;
 }
 
 } // namespace DiagramRenderer

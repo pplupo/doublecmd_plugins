@@ -54,6 +54,6 @@ std::string renderPlantUml(const Settings &settings, const std::string &inputPat
 /// `em` units relative to the parent <text>, which most SVG renderers
 /// (including Qt's and librsvg) don't resolve the way browsers do. This
 /// combines them into an absolute pixel y on the <text> element itself.
-std::string fixMermaidSvgText(const std::string &svgData);
+std::string fixMermaidSvgText(const std::string &svgData, bool darkMode);
 
 } // namespace DiagramRenderer

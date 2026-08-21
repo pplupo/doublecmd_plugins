@@ -162,6 +162,16 @@ struct LogViewerState {
 
     std::vector<EngineHighlightRule> rules;
     std::string iniPath;
+
+    // Source ID of the once-a-second Follow-mode poll (see its
+    // g_timeout_add call below). MUST be removed in destroyState() before
+    // this struct is freed -- g_timeout_add's return value was previously
+    // discarded entirely, so the timer kept firing every second after
+    // ListCloseWindow destroyed this state, dereferencing freed memory on
+    // its next tick. That's what crashed on close: not always instantly
+    // (freed memory can look briefly valid), which is why it read as
+    // unpredictable.
+    guint followTimerId = 0;
 };
 
 // Forward decls
@@ -760,7 +770,9 @@ void clearLogFile(LogViewerState *st)
 
 void destroyState(gpointer data)
 {
-    delete static_cast<LogViewerState *>(data);
+    auto *st = static_cast<LogViewerState *>(data);
+    if (st->followTimerId) g_source_remove(st->followTimerId);
+    delete st;
 }
 
 } // namespace
@@ -959,7 +971,7 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     // is the simplest correct equivalent; a GFileMonitor-based push
     // notification, as diagramview's GTK build uses, would also work but
     // isn't necessary for a once-a-second tail check).
-    g_timeout_add(1000, +[](gpointer data) -> gboolean {
+    st->followTimerId = g_timeout_add(1000, +[](gpointer data) -> gboolean {
         auto *st = static_cast<LogViewerState *>(data);
         if (st->engine->followEnabled()) {
             auto result = st->engine->refreshTail();
