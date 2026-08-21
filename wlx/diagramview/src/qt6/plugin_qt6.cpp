@@ -130,7 +130,7 @@ public:
 					  "Please ensure '@mermaid-js/mermaid-cli' is installed, 'npx' is available, or internet connection is active."));
 				return;
 			}
-			svgStd = DiagramRenderer::fixMermaidSvgText(svgStd);
+			svgStd = DiagramRenderer::fixMermaidSvgText(svgStd, activeDarkMode);
 		} else if (ext == "puml" || ext == "plantuml") {
 			svgStd = DiagramRenderer::renderPlantUml(g_settings, pathStd, activeDarkMode);
 			if (svgStd.empty()) {
