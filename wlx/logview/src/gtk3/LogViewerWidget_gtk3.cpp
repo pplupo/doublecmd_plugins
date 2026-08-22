@@ -11,6 +11,7 @@
  */
 
 #include <gtk/gtk.h>
+#include <glib/gstdio.h>
 #include <re2/re2.h>
 #include <sstream>
 #include <fstream>
@@ -66,11 +67,60 @@ GtkWidget *buildDateTimeSpinner(GtkWidget *spin[kDtSpinCount])
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
 
     // The theme's default vertical-spinbutton steppers render oversized, and
-    // the "down" one draws as an X rather than a minus. Pin both glyphs
-    // explicitly and shrink them, instead of inheriting whatever the ambient
-    // icon theme picks -- installed once, shared by every spinner below.
+    // the "down" one draws as an X rather than a minus.
+    //
+    // Attempt 1: -gtk-icontheme("list-add-symbolic")/("list-remove-symbolic").
+    // Looked like a missing-icon fallback glyph, but is not: confirmed live
+    // that the active theme (breeze-dark) genuinely HAS an icon named
+    // "list-remove-symbolic" and gtk_icon_theme_lookup_icon() resolves it
+    // successfully -- its path data just draws an X-shaped glyph (breeze's
+    // own design choice for that icon name), not a minus. Wrong icon
+    // *concept* for what we want, not a broken lookup.
+    //
+    // Attempt 2: url("data:image/svg+xml,...") to sidestep icon-theme
+    // lookup entirely. Failed for an unrelated reason: GTK's CSS url()
+    // resolves through GIO's GFile, and confirmed live in this environment
+    // that GIO has no "data" URI scheme handler at all
+    // (Gio.File.new_for_uri("data:...") comes back a GDummyFile that always
+    // reports g-io-error "Operation not supported") -- unrelated to gvfsd
+    // being installed/running (it is); GIO simply never registers a data:
+    // backend.
+    //
+    // Attempt 3: prepend a private directory (via
+    // gtk_icon_theme_prepend_search_path) holding our own
+    // "list-add/remove-symbolic.svg", keeping those same names. Also
+    // failed, for the same reason attempt 1 did: a *search path* only
+    // supplies icons the active theme doesn't already have -- since
+    // breeze-dark already has both names (drawing its own +/X glyphs), our
+    // private files were never even consulted.
+    //
+    // Fix: the "up"/plus glyph was never actually broken -- breeze-dark's
+    // own "list-add-symbolic" is a perfectly good plus and was already
+    // rendering correctly before any of this, so leave it alone. Only
+    // "down" needs an icon name that cannot collide with any theme's own
+    // icon set ("logview-spin-minus-symbolic" -- no theme ships this), so
+    // the private search path is the only place it can ever resolve from,
+    // guaranteeing our own glyph regardless of theme.
     static GtkCssProvider *spinCss = nullptr;
     if (!spinCss) {
+        const char *cacheDir = g_get_user_cache_dir();
+        // Flat directory, NOT a themed "16x16/actions" subtree -- confirmed
+        // live that gtk_icon_theme_prepend_search_path()'s fallback
+        // "unthemed" scan (no index.theme present) only finds icons placed
+        // directly in the search-path directory itself; a size/context
+        // subdirectory structure (the normal on-disk layout for an actual
+        // installed icon theme) returned NULL from
+        // gtk_icon_theme_lookup_icon() even though the file was right
+        // there on disk.
+        std::string iconDir = std::string(cacheDir) + "/doublecmd-logview-icons";
+        g_mkdir_with_parents(iconDir.c_str(), 0755);
+        std::string path = iconDir + "/logview-spin-minus-symbolic.svg";
+        std::ofstream f(path, std::ios::trunc);
+        f << "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+             "<path d='M2 8h12' stroke='#000' stroke-width='2' stroke-linecap='round'/></svg>";
+        f.close();
+        gtk_icon_theme_prepend_search_path(gtk_icon_theme_get_default(), iconDir.c_str());
+
         spinCss = gtk_css_provider_new();
         gtk_css_provider_load_from_data(spinCss,
             "spinbutton.vertical button {"
@@ -81,7 +131,7 @@ GtkWidget *buildDateTimeSpinner(GtkWidget *spin[kDtSpinCount])
             "  -gtk-icon-transform: scale(0.65);"
             "}"
             "spinbutton.vertical button.down {"
-            "  -gtk-icon-source: -gtk-icontheme(\"list-remove-symbolic\");"
+            "  -gtk-icon-source: -gtk-icontheme(\"logview-spin-minus-symbolic\");"
             "  -gtk-icon-transform: scale(0.65);"
             "}", -1, nullptr);
     }
@@ -820,7 +870,9 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     GtkWidget *btnResetFilter = gtk_button_new_with_label("✖ Reset");
     st->chkFollow = gtk_check_button_new_with_label("Follow");
     GtkWidget *btnExtract = gtk_button_new_with_label("\U0001F5AB Extract");
-    GtkWidget *btnClearLog = gtk_button_new_with_label("Clean");
+    // Matches Qt's btnClearLog label (LogViewerWidget.cpp) -- this glyph
+    // was missing here entirely, the "missing icon" the user reported.
+    GtkWidget *btnClearLog = gtk_button_new_with_label("⎚︎ Clean");
     GtkWidget *btnSettings = gtk_button_new_with_label("⚙ Settings");
     for (GtkWidget *b : {st->chkFilterMode, btnResetFilter, st->chkFollow, btnExtract, btnClearLog, btnSettings})
         gtk_box_pack_start(GTK_BOX(header), b, FALSE, FALSE, 0);
