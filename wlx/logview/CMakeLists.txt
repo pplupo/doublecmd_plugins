@@ -113,7 +113,20 @@ if(ENABLE_GTK3)
             ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
         )
         target_link_libraries(logviewer_gtk3 PRIVATE logview_core ${GTK3_LIBRARIES})
-        target_link_options(logviewer_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
+        # Deliberately NOT -static-libstdc++/-static-libgcc. Confirmed via a
+        # live gdb session (crash inside saveHighlightRules' `ofstream <<
+        # int` call, faulting in codecvt<char16_t,...>::do_unshift) that
+        # statically linking libstdc++ gives this .wlx its own private copy
+        # of C++ locale/iostream facet templates, separate from the single
+        # libstdc++.so.6 every other component in DC's process shares. Two
+        # independent copies registering facet IDs against the same
+        # process-wide registry causes a facet lookup to resolve to the
+        # wrong vtable -- the same root cause already fixed for
+        # diagramview_gtk3 and markdownview_gtk3 (see their CMakeLists.txt
+        # for the full writeup). structview, which never statically links
+        # libstdc++, never showed this symptom. Sharing the dynamic
+        # libstdc++.so (the default; no special flag needed) removes the
+        # mechanism outright.
         set_target_properties(logviewer_gtk3 PROPERTIES
             PREFIX ""
             OUTPUT_NAME "logviewer_gtk3"
