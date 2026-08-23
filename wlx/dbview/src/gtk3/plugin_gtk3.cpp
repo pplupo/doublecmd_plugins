@@ -15,7 +15,10 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <set>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "wlxplugin.h"
@@ -48,6 +51,12 @@ struct DbViewState {
     bool wordWrap = false;
     bool gridLines = true;
 
+    // Cosmetic-only display toggle for binary cells, mirroring Qt's
+    // KeyValueModel::setHexMode -- purely a GTK-side display swap via
+    // grid->setCellValue(), no engine state involved (matches how the Qt
+    // model's own hex flag never touches the underlying DB either).
+    std::set<std::pair<int, int>> hexCells;
+
     std::string filepath;
 };
 
@@ -55,6 +64,7 @@ enum { COL_NAME = 0, N_COLS };
 
 void onToggleWordWrap(DbViewState *st, bool active);
 void onToggleGridLines(DbViewState *st, bool active);
+gboolean onGridButtonPress(GtkWidget *, GdkEventButton *event, gpointer userData);
 
 void updateStatus(DbViewState *st) {
     if (!st->statusLabel || !st->engine) return;
@@ -91,8 +101,10 @@ void loadGridFromEngine(DbViewState *st) {
         gtk_container_remove(GTK_CONTAINER(st->gridContainer), st->grid->widget());
         st->grid.reset();
     }
+    st->hexCells.clear(); // stale row/col indices from before this reload
     int cols = std::max(1, st->engine->columnCount());
     st->grid = std::make_unique<GtkWlPlugin::GtkEditableGridWidget>(cols, st->focusManager.get());
+    g_signal_connect(st->grid->treeView(), "button-press-event", G_CALLBACK(onGridButtonPress), st);
     for (int c = 0; c < st->engine->columnCount(); c++) {
         st->grid->setColumnTitle(c, st->engine->columnName(c));
         // Editability is effectively per-table, not per-cell, for every
@@ -295,6 +307,157 @@ std::string copySelectionAsText(DbViewState *st) {
     return result;
 }
 
+// ── Cell context menu (right-click on a grid cell) ────────────────────
+// Matches Qt6's DbViewWidget::setupContextMenu item-for-item: Toggle Hex
+// View (binary cells only), Save Cell to File (BLOB Export), Load File
+// into Cell (BLOB Import, hidden when the engine is read-only). GTK
+// previously had NO grid context menu at all.
+
+std::string bytesToHex(const std::vector<uint8_t> &data) {
+    static const char *hexDigits = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(data.size() * 3);
+    for (size_t i = 0; i < data.size(); ++i) {
+        if (i) out += ' ';
+        out += hexDigits[(data[i] >> 4) & 0xF];
+        out += hexDigits[data[i] & 0xF];
+    }
+    return out;
+}
+
+void onToggleHexView(GtkMenuItem *, gpointer userDataRaw) {
+    auto *ctx = static_cast<std::pair<DbViewState *, std::pair<int, int>> *>(userDataRaw);
+    DbViewState *st = ctx->first;
+    int row = ctx->second.first, col = ctx->second.second;
+    auto key = std::make_pair(row, col);
+    bool nowHex = st->hexCells.find(key) == st->hexCells.end();
+    if (nowHex) {
+        st->hexCells.insert(key);
+        st->grid->setCellValue(row, col, bytesToHex(st->engine->cellRawBytes(row, col)));
+    } else {
+        st->hexCells.erase(key);
+        st->grid->setCellValue(row, col, st->engine->cellText(row, col));
+    }
+}
+
+void onSaveCellToFile(GtkMenuItem *, gpointer userDataRaw) {
+    auto *ctx = static_cast<std::pair<DbViewState *, std::pair<int, int>> *>(userDataRaw);
+    DbViewState *st = ctx->first;
+    int row = ctx->second.first, col = ctx->second.second;
+
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Save BLOB Value",
+        GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+        GTK_FILE_CHOOSER_ACTION_SAVE,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, nullptr);
+    gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dialog), TRUE);
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        auto bytes = st->engine->cellRawBytes(row, col);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (out) out.write(reinterpret_cast<const char *>(bytes.data()), (std::streamsize)bytes.size());
+        g_free(path);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+void onLoadFileIntoCell(GtkMenuItem *, gpointer userDataRaw) {
+    auto *ctx = static_cast<std::pair<DbViewState *, std::pair<int, int>> *>(userDataRaw);
+    DbViewState *st = ctx->first;
+    int row = ctx->second.first, col = ctx->second.second;
+
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Load BLOB Value",
+        GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+        GTK_FILE_CHOOSER_ACTION_OPEN,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, nullptr);
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        std::ifstream in(path, std::ios::binary);
+        if (in) {
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            // DbEngineCore::setCellText() takes std::string, not raw bytes --
+            // there is no setCellRawBytes() in the shared Qt-free core (only
+            // cellRawBytes() for reading). A std::string can hold arbitrary
+            // bytes including embedded NULs; this only round-trips correctly
+            // for engine backends whose setCellText() writes the string's
+            // full length rather than treating it as a NUL-terminated
+            // C-string internally.
+            //
+            // setCellText() failing (e.g. cellEditable() is false for this
+            // column/row, or the underlying UPDATE errors) used to fail
+            // completely silently -- reported live as "after selecting the
+            // file, it did nothing", with no way to tell whether the import
+            // was attempted at all. Surface it.
+            bool ok = st->engine->setCellText(row, col, ss.str());
+            if (!ok) {
+                GtkWidget *err = gtk_message_dialog_new(GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+                    GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+                    "Failed to load file into cell.\n\n%s",
+                    st->engine->lastError().empty() ? "This cell may not be editable." : st->engine->lastError().c_str());
+                gtk_dialog_run(GTK_DIALOG(err));
+                gtk_widget_destroy(err);
+            }
+            loadGridFromEngine(st);
+        } else {
+            GtkWidget *err = gtk_message_dialog_new(GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+                GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Could not open file:\n%s", path);
+            gtk_dialog_run(GTK_DIALOG(err));
+            gtk_widget_destroy(err);
+        }
+        g_free(path);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+gboolean onGridButtonPress(GtkWidget *, GdkEventButton *event, gpointer userData) {
+    if (event->button != GDK_BUTTON_SECONDARY) return FALSE;
+    auto *st = static_cast<DbViewState *>(userData);
+    if (!st->grid || !st->engine) return FALSE;
+
+    GtkTreePath *path = nullptr;
+    GtkTreeViewColumn *tvColumn = nullptr;
+    if (!gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(st->grid->treeView()),
+            (gint)event->x, (gint)event->y, &path, &tvColumn, nullptr, nullptr))
+        return FALSE;
+    int row = gtk_tree_path_get_indices(path)[0];
+    gtk_tree_path_free(path);
+
+    GList *columns = gtk_tree_view_get_columns(GTK_TREE_VIEW(st->grid->treeView()));
+    int col = (int)g_list_index(columns, tvColumn);
+    g_list_free(columns);
+    if (row < 0 || col < 0 || row >= (int)st->grid->rowData().size() || col >= st->grid->columnCount())
+        return FALSE;
+
+    GtkWidget *menu = gtk_menu_new();
+    // Leaked deliberately, same lifetime pattern as csvview's per-item
+    // context: freed by the GClosure notify below once the menu item (and
+    // therefore this callback data) is destroyed.
+    auto addItem = [&](const std::string &label, GCallback cb) {
+        GtkWidget *item = gtk_menu_item_new_with_label(label.c_str());
+        auto *ctx = new std::pair<DbViewState *, std::pair<int, int>>(st, std::make_pair(row, col));
+        g_signal_connect_data(item, "activate", cb, ctx,
+            +[](gpointer d, GClosure *) { delete static_cast<std::pair<DbViewState *, std::pair<int, int>> *>(d); },
+            (GConnectFlags)0);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+        return item;
+    };
+
+    if (st->engine->cellIsBinary(row, col)) {
+        bool isHex = st->hexCells.count({row, col}) != 0;
+        addItem(isHex ? "Show Plain Text" : "Toggle Hex View", G_CALLBACK(onToggleHexView));
+    }
+    addItem("Save Cell to File (BLOB Export)...", G_CALLBACK(onSaveCellToFile));
+    if (!st->engine->isReadOnly()) {
+        addItem("Load File into Cell (BLOB Import)...", G_CALLBACK(onLoadFileIntoCell));
+    }
+
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)event);
+    return TRUE;
+}
+
 void destroyState(GtkWidget *, gpointer data) { delete (DbViewState *)data; }
 
 } // namespace
@@ -387,6 +550,32 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
     st->findPanel->onFindRequested = [st](bool forward) { doFind(st, forward); };
     gtk_box_pack_start(GTK_BOX(st->root), st->findPanel->widget(), FALSE, FALSE, 0);
     gtk_box_reorder_child(GTK_BOX(st->root), st->findPanel->widget(), 1);
+
+    // Matches Qt6's toolbar/FocusManager shortcuts (DbViewWidget's
+    // constructor/setupToolbar) -- dbview_gtk3 constructed a
+    // GtkFocusManager but never registered a single shortcut on it, unlike
+    // every other GTK plugin here.
+    if (st->engine->supportsSubmitRevert() && !st->engine->isReadOnly()) {
+        st->focusManager->registerShortcut(GDK_KEY_s, GDK_CONTROL_MASK, GtkFocusManager::Always,
+            [st]() { onSubmitClicked(st); return true; });
+        // Real, granular per-edit undo/redo -- NOT the whole-transaction
+        // "Revert" toolbar button. GtkEditableGridWidget already pushes an
+        // UndoCommand onto this SAME GtkFocusManager on every cell edit
+        // (see its onCellEdited()/pushUndo() calls), so this was already
+        // fully wired and working the moment the grid was constructed with
+        // st->focusManager -- Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y just needed to be
+        // registered to reach it, exactly matching "undo/redo should work
+        // until it's committed" (committing clears the grid's own dirty/
+        // undo state via loadGridFromEngine()'s fresh GtkEditableGridWidget).
+        // Previously Ctrl+Z was bound to onRevertClicked() (roll back the
+        // WHOLE pending transaction) instead, which isn't the same thing;
+        // that action remains available via the Revert toolbar button.
+        st->focusManager->enableUndoShortcuts();
+    }
+    st->focusManager->registerShortcut(GDK_KEY_f, GDK_CONTROL_MASK, GtkFocusManager::Always, [st]() {
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->findToggle), !st->findPanel->isPanelVisible());
+        return true;
+    });
 
     loadGridFromEngine(st);
 

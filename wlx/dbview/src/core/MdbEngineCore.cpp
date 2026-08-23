@@ -25,7 +25,7 @@ public:
     void close() override {
         closeCursor();
         if (m_mdb) { mdb_close(m_mdb); m_mdb = nullptr; }
-        m_currentTable.clear(); m_columns.clear(); m_rows.clear(); m_binary.clear();
+        m_currentTable.clear(); m_columns.clear(); m_rows.clear(); m_binary.clear(); m_rawBytes.clear();
         m_totalRows = 0;
     }
 
@@ -77,7 +77,7 @@ public:
     bool selectTable(const std::string &tableName) override {
         closeCursor();
         m_currentTable = tableName;
-        m_columns.clear(); m_rows.clear(); m_binary.clear(); m_totalRows = 0;
+        m_columns.clear(); m_rows.clear(); m_binary.clear(); m_rawBytes.clear(); m_totalRows = 0;
         if (!m_mdb) return false;
 
         auto *entry = mdb_get_catalogentry_by_name(m_mdb, tableName.c_str());
@@ -106,13 +106,27 @@ public:
         int fetched = 0;
         while (fetched < kChunkSize && mdb_fetch_row(m_table)) {
             std::vector<std::string> row; std::vector<bool> bin;
+            std::vector<std::vector<uint8_t>> raw(m_table->num_cols);
             for (unsigned int i = 0; i < m_table->num_cols; i++) {
                 auto *col = (MdbColumn *)g_ptr_array_index(m_table->columns, i);
-                if (col->col_type == MDB_OLE || col->col_type == MDB_BINARY) { row.push_back("[Binary Data]"); bin.push_back(true); }
-                else { row.push_back((const char *)col->bind_ptr); bin.push_back(false); }
+                if (col->col_type == MDB_OLE || col->col_type == MDB_BINARY) {
+                    row.push_back("[Binary Data]"); bin.push_back(true);
+                    // fetchMore() never captured the actual bytes -- only
+                    // the "[Binary Data]" placeholder -- so "Save Cell to
+                    // File"/"Toggle Hex View" always had nothing to show
+                    // for an MDB binary column. len_ptr is populated by
+                    // mdb_fetch_row() with the real byte count for this row.
+                    if (col->bind_ptr && col->len_ptr && *col->len_ptr > 0) {
+                        auto *bytes = static_cast<uint8_t *>(col->bind_ptr);
+                        raw[i].assign(bytes, bytes + *col->len_ptr);
+                    }
+                } else {
+                    row.push_back((const char *)col->bind_ptr); bin.push_back(false);
+                }
             }
             m_rows.push_back(std::move(row));
             m_binary.push_back(std::move(bin));
+            m_rawBytes.push_back(std::move(raw));
             fetched++;
         }
         return fetched;
@@ -129,6 +143,11 @@ public:
     bool cellIsBinary(int row, int col) const override {
         return row >= 0 && row < (int)m_binary.size() && col >= 0 && col < (int)m_binary[row].size() && m_binary[row][col];
     }
+    std::vector<uint8_t> cellRawBytes(int row, int col) const override {
+        if (row < 0 || row >= (int)m_rawBytes.size() || col < 0 || col >= (int)m_rawBytes[row].size())
+            return {};
+        return m_rawBytes[row][col];
+    }
 
     std::string currentTableName() const override { return m_currentTable; }
     bool supportsMultipleTables() const override { return true; }
@@ -143,6 +162,7 @@ private:
     std::vector<std::string> m_columns;
     std::vector<std::vector<std::string>> m_rows;
     std::vector<std::vector<bool>> m_binary;
+    std::vector<std::vector<std::vector<uint8_t>>> m_rawBytes;
 };
 
 std::unique_ptr<DbEngineCore> createMdbEngineCore() { return std::make_unique<MdbEngineCore>(); }
