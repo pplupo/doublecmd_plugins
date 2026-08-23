@@ -196,14 +196,74 @@ public:
     bool cellIsBinary(int row, int col) const override {
         return row >= 0 && row < (int)m_binary.size() && col >= 0 && col < (int)m_binary[row].size() && m_binary[row][col];
     }
+    // appendResultRows() never extracts a BLOB's actual bytes -- it stores
+    // the literal placeholder text "[Binary Data]" and just flags m_binary,
+    // same gap as SqliteEngineCore's cellToString(). Re-query the single
+    // row/column by rowid (same identifier setCellText() uses for UPDATE).
+    std::vector<uint8_t> cellRawBytes(int row, int col) const override {
+        if (!m_conn || !m_hasRowId || row < 0 || row >= (int)m_rowIds.size() ||
+            col < 0 || col >= (int)m_columns.size())
+            return {};
+        try {
+            std::string sql = "SELECT \"" + m_columns[col] + "\" FROM \"" + m_currentTable +
+                               "\" WHERE rowid = " + std::to_string(m_rowIds[row]);
+            auto result = m_conn->Query(sql);
+            if (!result || result->HasError()) return {};
+            // row.GetValue<string>(0) goes through Value::GetValue<T>(),
+            // which CASTS (BLOB -> VARCHAR) rather than returning the raw
+            // bytes -- the same escaping behavior that broke the write
+            // side (Value::BLOB(string) vs BLOB_RAW()), just on read.
+            // GetValueUnsafe<string>() returns the actual internal bytes
+            // uncast, which is what "Save Cell to File"/"Toggle Hex View"
+            // need.
+            for (auto &row : *result) {
+                std::string bytes = row.GetValue<duckdb::Value>(0).GetValueUnsafe<std::string>();
+                return std::vector<uint8_t>(bytes.begin(), bytes.end());
+            }
+            return {};
+        } catch (...) { return {}; }
+    }
     bool cellEditable(int, int) const override { return m_hasRowId && !m_isQuery; }
     bool setCellText(int row, int col, const std::string &text) override {
-        if (!m_hasRowId || m_isQuery || row < 0 || row >= (int)m_rows.size()) return false;
+        // Was a bare `return false` with m_lastError never touched anywhere
+        // in this function AT ALL -- every failure, for every reason,
+        // showed the GTK side's generic "may not be editable" fallback.
+        if (m_isQuery) { m_lastError = "This is a query result, not a browsed table -- open the table via the schema list to edit cells."; return false; }
+        if (!m_hasRowId) { m_lastError = "This table has no usable rowid to address the row for an UPDATE."; return false; }
+        if (row < 0 || row >= (int)m_rows.size()) { m_lastError = "Row index out of range."; return false; }
         try {
-            std::string sql = "UPDATE \"" + m_currentTable + "\" SET \"" + m_columns[col] + "\" = '" + text + "' WHERE rowid = " + std::to_string(m_rowIds[row]);
-            auto result = m_conn->Query(sql);
+            // Was building the SQL by concatenating `text` directly into a
+            // single-quoted literal -- broken for ANY binary content
+            // containing a literal apostrophe byte (0x27) or other
+            // SQL-significant character, which a JPEG's raw bytes are
+            // essentially guaranteed to contain somewhere. A parameterized
+            // query (DuckDB's Value::BLOB, bound positionally) is the same
+            // fix already applied to SqliteEngineCore's use of
+            // sqlite3_bind_blob-style explicit-length binding.
+            std::string sql = "UPDATE \"" + m_currentTable + "\" SET \"" + m_columns[col] +
+                               "\" = ? WHERE rowid = " + std::to_string(m_rowIds[row]);
+            auto stmt = m_conn->Prepare(sql);
+            if (!stmt || stmt->HasError()) { m_lastError = stmt ? stmt->GetError() : "Failed to prepare UPDATE statement."; return false; }
+            // duckdb::vector<T> is DuckDB's own std::vector subclass, not a
+            // typedef for std::vector<T> -- passing a plain std::vector
+            // here doesn't match PreparedStatement::Execute(vector<Value>&,
+            // bool) at all, so overload resolution silently fell through
+            // to the variadic Execute(ARGS...) template instead (which
+            // then failed trying to wrap the whole vector as a single
+            // bound Value).
+            // Value::BLOB(const string&) is NOT "wrap these raw bytes" --
+            // it parses the string AS a blob literal, interpreting \xAA
+            // escape sequences and rejecting any other non-ASCII byte
+            // outright (confirmed live: "Invalid byte encountered in
+            // STRING -> BLOB conversion... All non-ascii characters must
+            // be escaped with hex codes"). BLOB_RAW() is the actual
+            // "these exact bytes, uninterpreted" constructor.
+            duckdb::vector<duckdb::Value> params{duckdb::Value::BLOB_RAW(text)};
+            auto result = stmt->Execute(params, true);
             if (result && !result->HasError()) { m_rows[row][col] = text; m_binary[row][col] = false; return true; }
-        } catch (...) {}
+            m_lastError = result ? result->GetError() : "UPDATE returned no result.";
+        } catch (const std::exception &e) { m_lastError = e.what(); }
+        catch (...) { m_lastError = "Unknown error executing UPDATE."; }
         return false;
     }
 

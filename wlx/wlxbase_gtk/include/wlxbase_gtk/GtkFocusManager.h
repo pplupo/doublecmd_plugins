@@ -66,6 +66,32 @@ private:
     static gboolean onKeyPress(GtkWidget *widget, GdkEventKey *event, gpointer userData);
     bool handleKeyPress(GdkEventKey *event);
 
+    // Live-tested against the real dcgtk process: DC (a Lazarus/LCL app)
+    // intercepts most of our registered shortcuts before this class's
+    // "key-press-event" handler on pluginRoot ever runs -- Ctrl+S, Ctrl+P,
+    // F5, Ctrl+O, Ctrl+Shift+S, Ctrl+Shift+Z all got swallowed by DC's own
+    // global keyboard handling, while Ctrl+Z (which DC apparently has no
+    // competing global binding for) worked correctly via the normal
+    // "key-press-event" bubbling path. That means DC's own key handling
+    // runs at a point that pre-empts ordinary GTK widget-level dispatch
+    // for any key it cares about, most plausibly a
+    // gtk_key_snooper_install() callback (Lazarus/LCL is a known user of
+    // this GTK3 API for its own global accelerator table) -- key snoopers
+    // are checked before GTK ever delivers the event to a focus widget at
+    // all, so no amount of signal-handler placement on our side of the
+    // widget tree can out-race it.
+    //
+    // Fix: install our own key snooper too. GTK's snooper list is a
+    // GSList built via prepend, so the most-recently-installed snooper is
+    // checked first -- ours, installed when a plugin panel is first
+    // constructed (necessarily after DC's own snooper, installed at
+    // DC startup), runs BEFORE DC's, giving us first refusal on any key
+    // while our own plugin panel is the one that's focused. The original
+    // "key-press-event" connection is left in place as a harmless
+    // fallback for whatever this doesn't need to handle.
+    static gint snoopKeyPress(GtkWidget *grabWidget, GdkEventKey *event, gpointer);
+    static std::vector<GtkFocusManager *> s_instances;
+
     GtkWidget *m_pluginRoot;
     GtkWidget *m_primaryView;
     std::vector<GtkWidget *> m_inputWidgets;

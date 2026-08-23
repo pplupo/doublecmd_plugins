@@ -195,10 +195,44 @@ public:
     bool cellIsBinary(int row, int col) const override {
         return row >= 0 && row < (int)m_binary.size() && col >= 0 && col < (int)m_binary[row].size() && m_binary[row][col];
     }
+    // cellToString() (this file's cellToString(), called from fetchChunk())
+    // never actually reads a BLOB's bytes -- it just flags isBinary and
+    // returns "", so m_rows never holds the real content for a binary cell
+    // at all. Confirmed live: "Save Cell to File" always produced an empty
+    // file and "Toggle Hex View" always showed nothing, for every engine
+    // (none of them override this; the base class default is `return {}`).
+    // Re-query the single row/column directly via its rowid (same
+    // identifier setCellText() already uses for UPDATE) rather than
+    // growing every cached row with a byte blob it almost never needs.
+    std::vector<uint8_t> cellRawBytes(int row, int col) const override {
+        if (!m_db || !m_hasRowId || row < 0 || row >= (int)m_rowIds.size() ||
+            col < 0 || col >= (int)m_columns.size())
+            return {};
+        std::string sql = "SELECT " + quoteIdent(m_columns[col]) + " FROM " + quoteIdent(m_currentTable) +
+                           " WHERE rowid = ?1";
+        sqlite3_stmt *stmt = nullptr;
+        std::vector<uint8_t> result;
+        if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, m_rowIds[row]);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const void *blob = sqlite3_column_blob(stmt, 0);
+                int len = sqlite3_column_bytes(stmt, 0);
+                if (blob && len > 0) result.assign((const uint8_t *)blob, (const uint8_t *)blob + len);
+            }
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    }
     bool cellEditable(int, int) const override { return !m_isQuery && m_hasRowId; }
 
     bool setCellText(int row, int col, const std::string &text) override {
-        if (m_isQuery || !m_hasRowId || row < 0 || row >= (int)m_rows.size()) return false;
+        // Was a bare `return false` with m_lastError left untouched, so a
+        // GTK-side caller showing lastError() on failure (e.g. "Load File
+        // into Cell") had nothing to show beyond a generic "not editable"
+        // guess -- set a real reason for each case.
+        if (m_isQuery) { m_lastError = "This is a query result, not a browsed table -- open the table via the schema list to edit cells."; return false; }
+        if (!m_hasRowId) { m_lastError = "This table has no usable rowid to address the row for an UPDATE."; return false; }
+        if (row < 0 || row >= (int)m_rows.size()) { m_lastError = "Row index out of range."; return false; }
         std::string sql = "UPDATE " + quoteIdent(m_currentTable) + " SET " + quoteIdent(m_columns[col]) + " = ?1 WHERE rowid = ?2";
         sqlite3_stmt *stmt = nullptr;
         if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) { m_lastError = sqlite3_errmsg(m_db); return false; }

@@ -643,6 +643,31 @@ void onSaveClicked(CsvGtkState *st)
     updateDirtyLabel(st, false);
 }
 
+// Swaps the Save As dialog's proposed filename extension to match whichever
+// format filter (CSV/TSV) the user just picked -- previously the typed/
+// pre-filled name kept whatever extension it started with regardless of
+// filter choice, so saving as TSV via the CSV-suffixed default name (or
+// vice versa) silently produced a mismatched extension.
+struct SaveAsFilterCtx { GtkFileFilter *csvFilter; GtkFileFilter *tsvFilter; };
+
+void onSaveAsFilterChanged(GObject *chooserObj, GParamSpec *, gpointer data)
+{
+    auto *ctx = static_cast<SaveAsFilterCtx *>(data);
+    GtkFileChooser *chooser = GTK_FILE_CHOOSER(chooserObj);
+    GtkFileFilter *chosen = gtk_file_chooser_get_filter(chooser);
+    const char *newExt = (chosen == ctx->tsvFilter) ? ".tsv" : ".csv";
+
+    gchar *currentName = gtk_file_chooser_get_current_name(chooser);
+    if (!currentName) return;
+    std::string name = currentName;
+    g_free(currentName);
+
+    if (endsWithNoCase(name, ".csv") || endsWithNoCase(name, ".tsv"))
+        name = name.substr(0, name.size() - 4);
+    name += newExt;
+    gtk_file_chooser_set_current_name(chooser, name.c_str());
+}
+
 void onSaveAsClicked(CsvGtkState *st)
 {
     GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
@@ -667,6 +692,9 @@ void onSaveAsClicked(CsvGtkState *st)
         gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), csvFilter);
         gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dlg), tsvFilter);
     }
+
+    SaveAsFilterCtx filterCtx{csvFilter, tsvFilter};
+    g_signal_connect(dlg, "notify::filter", G_CALLBACK(onSaveAsFilterChanged), &filterCtx);
 
     if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
@@ -796,7 +824,20 @@ void onOpenExternallyClicked(CsvGtkState *st)
     if (st->currentFile.empty()) return;
     GError *error = nullptr;
     std::string uri = "file://" + st->currentFile;
+    // A failure here used to be completely silent -- confirmed live that
+    // g_app_info_launch_default_for_uri() itself can report success (no
+    // GError) while the resolved default-app command still fails to
+    // actually start (e.g. a stale/uninstalled default-app association),
+    // so a user sees nothing happen with no indication why. Surface an
+    // explicit GError when GIO does report one, at least.
     if (!g_app_info_launch_default_for_uri(uri.c_str(), nullptr, &error)) {
+        GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+        GtkWidget *dlg = gtk_message_dialog_new(GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            "Could not open file externally.\n\n%s",
+            error ? error->message : "No default application is associated with this file type.");
+        gtk_dialog_run(GTK_DIALOG(dlg));
+        gtk_widget_destroy(dlg);
         if (error) g_error_free(error);
     }
 }
@@ -1034,6 +1075,28 @@ HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
         onSaveClicked(st);
         return true;
     });
+    // Matches Qt6's toolbar/FocusManager shortcuts (csvview/src/plugin.cpp
+    // setupToolbar/setupFindReplace) -- these buttons already existed here
+    // but had no keybinding at all.
+    st->fm->registerShortcut(GDK_KEY_r, GDK_CONTROL_MASK, GtkFocusManager::Always, [st]() {
+        bool nowVisible = !st->findPanel->isPanelVisible();
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->findToggle), nowVisible);
+        return true;
+    });
+    st->fm->registerShortcut(GDK_KEY_s, static_cast<GdkModifierType>(GDK_CONTROL_MASK | GDK_SHIFT_MASK),
+        GtkFocusManager::Always, [st]() { onSaveAsClicked(st); return true; });
+    st->fm->registerShortcut(GDK_KEY_p, GDK_CONTROL_MASK, GtkFocusManager::Always,
+        [st]() { onPrintClicked(st); return true; });
+    st->fm->registerShortcut(GDK_KEY_F5, static_cast<GdkModifierType>(0), GtkFocusManager::Always, [st]() {
+        if (!st->currentFile.empty()) loadFile(st, st->currentFile);
+        return true;
+    });
+    // Ctrl+O (Qt's binding) is unusable here -- see structview_gtk3.cpp's
+    // identical comment for why (DC's own Ctrl+O TAction accelerator wins
+    // regardless of our key snooper). Ctrl+E doesn't collide with any of
+    // DC's default hotkeys.
+    st->fm->registerShortcut(GDK_KEY_e, GDK_CONTROL_MASK, GtkFocusManager::Always,
+        [st]() { onOpenExternallyClicked(st); return true; });
 
     g_object_set_data_full(G_OBJECT(st->root), "csv-state", st, destroyState);
 

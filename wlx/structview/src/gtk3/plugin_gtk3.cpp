@@ -192,7 +192,17 @@ void onOpenExternally(StructViewState *st) {
     if (st->filepath.empty()) return;
     GError *error = nullptr;
     std::string uri = "file://" + st->filepath;
+    // Was completely silent on failure -- see csvview_gtk3.cpp's identical
+    // fix for why (a stale/uninstalled default-app association can fail
+    // to actually start the process even when GIO itself reports success).
     if (!g_app_info_launch_default_for_uri(uri.c_str(), nullptr, &error)) {
+        GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+        GtkWidget *dlg = gtk_message_dialog_new(GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
+            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
+            "Could not open file externally.\n\n%s",
+            error ? error->message : "No default application is associated with this file type.");
+        gtk_dialog_run(GTK_DIALOG(dlg));
+        gtk_widget_destroy(dlg);
         if (error) g_error_free(error);
     }
 }
@@ -454,6 +464,23 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(st->findToggle), !st->findPanel->isPanelVisible());
         return true;
     });
+    // Matches Qt6's toolbar shortcuts (StructViewWidget::setupToolbar) --
+    // these buttons already existed here but had no keybinding at all.
+    st->focusManager->registerShortcut(GDK_KEY_s, static_cast<GdkModifierType>(GDK_CONTROL_MASK | GDK_SHIFT_MASK),
+        GtkFocusManager::Always, [st]() { showSaveAsDialog(st); return true; });
+    st->focusManager->registerShortcut(GDK_KEY_p, GDK_CONTROL_MASK, GtkFocusManager::Always,
+        [st]() { onPrint(st); return true; });
+    st->focusManager->registerShortcut(GDK_KEY_F5, static_cast<GdkModifierType>(0), GtkFocusManager::Always,
+        [st]() { reloadFile(st); return true; });
+    // Ctrl+O (Qt's binding) is unusable here: confirmed live that DC has
+    // its own Ctrl+O ("Toggle Fullscreen Console", a TAction with a real
+    // menu accelerator, uglobs.pas) that fires regardless of what our own
+    // key snooper does -- unlike a plain hotkey-table-only binding (e.g.
+    // Ctrl+F), a TAction's accelerator appears to go through a GTK/LCL
+    // code path our snooper can't preempt. Ctrl+E doesn't collide with any
+    // of DC's default hotkeys.
+    st->focusManager->registerShortcut(GDK_KEY_e, GDK_CONTROL_MASK, GtkFocusManager::Always,
+        [st]() { onOpenExternally(st); return true; });
 
     g_signal_connect(st->root, "destroy", G_CALLBACK(destroyState), st);
     g_object_set_data(G_OBJECT(st->root), "__structview_state_ptr", st);

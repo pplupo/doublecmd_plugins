@@ -1,8 +1,11 @@
 #include "wlxbase_gtk/GtkFocusManager.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace GtkWlPlugin {
+
+std::vector<GtkFocusManager *> GtkFocusManager::s_instances;
 
 GtkFocusManager::GtkFocusManager(GtkWidget *pluginRoot, GtkWidget *primaryView)
     : m_pluginRoot(pluginRoot)
@@ -10,9 +13,40 @@ GtkFocusManager::GtkFocusManager(GtkWidget *pluginRoot, GtkWidget *primaryView)
 {
     gtk_widget_add_events(m_pluginRoot, GDK_KEY_PRESS_MASK);
     g_signal_connect(m_pluginRoot, "key-press-event", G_CALLBACK(onKeyPress), this);
+
+    static guint snooperId = 0;
+    if (snooperId == 0)
+        snooperId = gtk_key_snooper_install(snoopKeyPress, nullptr);
+    s_instances.push_back(this);
 }
 
-GtkFocusManager::~GtkFocusManager() = default;
+GtkFocusManager::~GtkFocusManager()
+{
+    s_instances.erase(std::remove(s_instances.begin(), s_instances.end(), this), s_instances.end());
+}
+
+gint GtkFocusManager::snoopKeyPress(GtkWidget *, GdkEventKey *event, gpointer)
+{
+    // The `grab_widget` parameter is ONLY non-NULL while an explicit GTK
+    // modal grab (gtk_grab_add()) is active -- nothing here ever
+    // establishes one, so it was always NULL and the original version of
+    // this function (bailing out via `!grabWidget`) discarded every single
+    // key event unconditionally, silently doing nothing. Confirmed live:
+    // shortcuts were still 100% intercepted by DC after that "fix" shipped.
+    // Real GTK keyboard focus (gtk_window_get_focus() on the toplevel) is
+    // the correct thing to scope against instead.
+    if (event->type != GDK_KEY_PRESS) return 0;
+    for (GtkFocusManager *instance : s_instances) {
+        GtkWidget *toplevel = gtk_widget_get_toplevel(instance->m_pluginRoot);
+        if (!GTK_IS_WINDOW(toplevel)) continue;
+        GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(toplevel));
+        if (!focus) continue;
+        if (focus != instance->m_pluginRoot && !gtk_widget_is_ancestor(focus, instance->m_pluginRoot))
+            continue;
+        if (instance->handleKeyPress(event)) return 1; // stop: fully handled, DC never sees it
+    }
+    return 0; // not ours -- let it fall through to DC's own handling
+}
 
 void GtkFocusManager::addInputWidget(GtkWidget *w)
 {
@@ -66,9 +100,36 @@ bool GtkFocusManager::handleKeyPress(GdkEventKey *event)
 
     bool inputFocused = anyInputFocused();
 
+    // GDK delivers the SHIFTED keyval when Shift is held -- e.g. Ctrl+Shift+S
+    // arrives as keyval 'S' (83), not 's' (115) plus a Shift bit on top of
+    // it. Every call site here registers shortcuts with the plain lowercase
+    // GDK_KEY_<letter> constant regardless of whether Shift is part of the
+    // combo, so a raw keyval comparison silently never matched any
+    // Ctrl+Shift+<letter> shortcut at all (confirmed live via a diagnostic
+    // log: handleKeyPress ran and evaluated the shortcut list, but s.keyval
+    // != event->keyval failed every time for Ctrl+Shift+S and
+    // Ctrl+Shift+Z). Comparing the lowercased form of both sides fixes
+    // every such registration in one place instead of needing each caller
+    // to know to use the uppercase constant for shift combos.
+    guint incomingKeyval = gdk_keyval_to_lower(event->keyval);
+
+    // TEMPORARY diagnostic: Ctrl+E ("Open Externally") reportedly does
+    // nothing at all in csvview/structview, unlike Ctrl+O (which at least
+    // visibly loses to DC). Need to see whether this even reaches a
+    // registered shortcut, or matches one that then no-ops. Remove once
+    // resolved.
+    if (incomingKeyval == GDK_KEY_e) {
+        fprintf(stderr, "[GtkFocusManager] Ctrl+E-ish keypress: keyval=%u relevant=0x%x shortcuts=%zu inputFocused=%d\n",
+                event->keyval, relevant, m_shortcuts.size(), inputFocused);
+        for (const auto &s : m_shortcuts) {
+            fprintf(stderr, "[GtkFocusManager]   registered: keyval=%u(lower=%u) mods=0x%x ctx=%d\n",
+                    s.keyval, gdk_keyval_to_lower(s.keyval), s.mods, (int)s.ctx);
+        }
+    }
+
     for (const auto &s : m_shortcuts) {
         if (s.ctx == WhenNoInput && inputFocused) continue;
-        if (s.keyval != event->keyval) continue;
+        if (gdk_keyval_to_lower(s.keyval) != incomingKeyval) continue;
         if (s.mods != relevant) continue;
         if (s.handler && s.handler())
             return true;

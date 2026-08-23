@@ -441,6 +441,9 @@ std::string replaceMathTags(const std::string &htmlIn, bool darkMode) {
 // --- Theming + final document wrap ---
 
 const char *DEFAULT_LIGHT_CSS = R"(
+html {
+    background-color: #ffffff;
+}
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: #24292e;
@@ -508,6 +511,9 @@ hr {
 )";
 
 const char *DEFAULT_DARK_CSS = R"(
+html {
+    background-color: #0d1117;
+}
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: #c9d1d9;
@@ -585,8 +591,17 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
         replaceAll(html, "<pre class=",
             "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; color:#e6edf3; margin:0; padding:0;\" class=");
     } else {
+        // Reported live as "very light gray, almost unreadable" even
+        // though #24292e is a genuinely dark hex value -- confirmed via a
+        // rendered-HTML dump that the color itself was correct and
+        // nothing else overrides it, so the perceived low contrast is
+        // WebKitGTK's italic font rendering reading visually lighter than
+        // the same color in an upright weight (thin italic strokes +
+        // antialiasing). Dropped the italic and darkened to match the
+        // heading color (#1b1f23) rather than chase the font-rendering
+        // theory further.
         replaceAll(html, "<blockquote>",
-            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#1B2B3C\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td style=\"font-style: italic; color: #24292e;\">");
+            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#1B2B3C\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td style=\"color: #1b1f23;\">");
         replaceAll(html, "<pre>",
             "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; color:#24292e; margin:0; padding:0;\">");
         replaceAll(html, "<pre class=",

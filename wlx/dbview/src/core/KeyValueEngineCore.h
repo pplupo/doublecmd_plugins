@@ -52,6 +52,14 @@ public:
         return m_binary[row] ? ("[Binary Data - " + std::to_string(m_values[row].size()) + " bytes]") : m_values[row];
     }
     bool cellIsBinary(int row, int col) const override { return col == 1 && row >= 0 && row < (int)m_binary.size() && m_binary[row]; }
+    // Unlike the SQL engines (SqliteEngineCore/DuckDbEngineCore), m_values
+    // already holds the real bytes for every row -- fetchWindow() never
+    // discarded them, cellText() just substitutes a placeholder for
+    // display. So this is a straight return, no re-query needed.
+    std::vector<uint8_t> cellRawBytes(int row, int col) const override {
+        if (col != 1 || row < 0 || row >= (int)m_values.size()) return {};
+        return std::vector<uint8_t>(m_values[row].begin(), m_values[row].end());
+    }
     bool cellEditable(int, int col) const override { return col == 1 && !m_readOnly; }
 
     bool setCellText(int row, int col, const std::string &text) override {
