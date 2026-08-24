@@ -72,11 +72,9 @@ std::vector<uint8_t> renderLatexToPng(const std::string &tex, bool darkMode,
         Cairo::ImageSurface::create(Cairo::FORMAT_ARGB32, physicalWidth, physicalHeight);
     Cairo::RefPtr<Cairo::Context> cr = Cairo::Context::create(surface);
 
-    // Opaque background fill (same intent as the Qt path's QPixmap::fill()).
-    if (darkMode) cr->set_source_rgb(0x0d / 255.0, 0x11 / 255.0, 0x17 / 255.0);
-    else cr->set_source_rgb(0xFA / 255.0, 0xFA / 255.0, 0xFA / 255.0);
-    cr->paint();
-
+    // Transparent background: ARGB32 surfaces are already zero-initialized
+    // (fully transparent), so skip the paint() fill entirely instead of
+    // matting onto an opaque page color.
     tex::Graphics2D_cairo g2(cr);
     render->draw(g2, padding, padding);
     delete render;

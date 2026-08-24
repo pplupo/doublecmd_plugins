@@ -48,6 +48,28 @@ std::string readFileUtf8(const std::string &path) {
     return ss.str();
 }
 
+// Plain POSIX mkdir() per path component, not GLib's g_mkdir_with_parents
+// -- this file is deliberately toolkit-neutral (no Qt, no GTK), shared
+// identically by both plugin variants.
+void mkdirParents(const std::string &dir) {
+    std::string partial;
+    for (size_t i = 1; i <= dir.size(); ++i) {
+        if (i == dir.size() || dir[i] == '/') {
+            partial = dir.substr(0, i);
+            if (!partial.empty()) mkdir(partial.c_str(), 0755); // ignore EEXIST and other errors
+        }
+    }
+}
+
+bool writeFileUtf8(const std::string &path, const std::string &content) {
+    auto slash = path.find_last_of('/');
+    if (slash != std::string::npos) mkdirParents(path.substr(0, slash));
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f << content;
+    return static_cast<bool>(f);
+}
+
 std::string homeDir() {
     const char *h = std::getenv("HOME");
     return h ? h : "";
@@ -441,9 +463,6 @@ std::string replaceMathTags(const std::string &htmlIn, bool darkMode) {
 // --- Theming + final document wrap ---
 
 const char *DEFAULT_LIGHT_CSS = R"(
-html {
-    background-color: #ffffff;
-}
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: #24292e;
@@ -484,6 +503,12 @@ pre {
 pre *, code, code * {
     background-color: transparent !important;
 }
+table.blockquote {
+    color: #808080;
+}
+table.blockquote td {
+    border: none;
+}
 table {
     border-collapse: collapse;
     width: 100%;
@@ -505,15 +530,12 @@ hr {
     height: .25em;
     padding: 0;
     margin: 24px 0;
-    background-color: #e1e4e8;
+    background-color: #58a6ff;
     border: 0;
 }
 )";
 
 const char *DEFAULT_DARK_CSS = R"(
-html {
-    background-color: #0d1117;
-}
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     color: #c9d1d9;
@@ -554,6 +576,12 @@ pre {
 pre *, code, code * {
     background-color: transparent !important;
 }
+table.blockquote {
+    color: #aaaaaa;
+}
+table.blockquote td {
+    border: none;
+}
 table {
     border-collapse: collapse;
     width: 100%;
@@ -575,7 +603,7 @@ hr {
     height: .25em;
     padding: 0;
     margin: 24px 0;
-    background-color: #30363d;
+    background-color: #58a6ff;
     border: 0;
 }
 )";
@@ -583,55 +611,100 @@ hr {
 std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std::string &customCssPath) {
     std::string html = rawHtml;
 
+    // The blockquote/pre text color used to be a hardcoded inline
+    // style="color:..." here, always winning over ANY loaded stylesheet's
+    // own rule for it (inline style beats a CSS class selector no matter
+    // what's loaded) -- confirmed live as the actual cause of "the
+    // blockquote color changes when I switch light/dark even though my
+    // own custom markdownpart.css sets table.blockquote { color: ... }":
+    // the custom CSS's color was never reaching the page at all. Left the
+    // accent-bar/background colors (structural, not something a
+    // text-focused custom stylesheet would reasonably target) hardcoded
+    // per mode, but the TEXT color is now left for whichever stylesheet
+    // loads below (default or custom) to control via its own rules,
+    // inherited normally by the child <td>/<pre> the way CSS is supposed
+    // to work.
     if (darkMode) {
         replaceAll(html, "<blockquote>",
-            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#2f81f7\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td style=\"font-style: italic; color: #c9d1d9;\">");
+            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#58a6ff\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td>");
         replaceAll(html, "<pre>",
-            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; color:#e6edf3; margin:0; padding:0;\">");
+            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0;\">");
         replaceAll(html, "<pre class=",
-            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; color:#e6edf3; margin:0; padding:0;\" class=");
+            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0;\" class=");
     } else {
-        // Reported live as "very light gray, almost unreadable" even
-        // though #24292e is a genuinely dark hex value -- confirmed via a
-        // rendered-HTML dump that the color itself was correct and
-        // nothing else overrides it, so the perceived low contrast is
-        // WebKitGTK's italic font rendering reading visually lighter than
-        // the same color in an upright weight (thin italic strokes +
-        // antialiasing). Dropped the italic and darkened to match the
-        // heading color (#1b1f23) rather than chase the font-rendering
-        // theory further.
         replaceAll(html, "<blockquote>",
-            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#1B2B3C\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td style=\"color: #1b1f23;\">");
+            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#58a6ff\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td>");
         replaceAll(html, "<pre>",
-            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; color:#24292e; margin:0; padding:0;\">");
+            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; margin:0; padding:0;\">");
         replaceAll(html, "<pre class=",
-            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; color:#24292e; margin:0; padding:0;\" class=");
+            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; margin:0; padding:0;\" class=");
     }
 
     replaceAll(html, "</blockquote>", "</td></tr></table>");
     replaceAll(html, "</pre>", "</pre></td></tr></table>");
 
-    std::string hrReplacement = darkMode ? "<hr color=\"#30363d\" size=\"2\" />" : "<hr color=\"#1A2B3C\" size=\"2\" />";
+    std::string hrReplacement = darkMode ? "<hr color=\"#58a6ff\" size=\"2\" />" : "<hr color=\"#58a6ff\" size=\"2\" />";
     replaceAll(html, "<hr />", hrReplacement);
     replaceAll(html, "<hr>", hrReplacement);
 
     // CSS lookup precedence: customCssPath -> plugin CSS -> markdownpart.css -> built-in default.
+    // Each candidate is checked for a "-dark" suffixed sibling first when
+    // in dark mode (e.g. markdownpart.css -> markdownpart-dark.css), so a
+    // custom theme can have distinct light/dark variants the same way the
+    // built-in default does -- previously a custom file, once found, was
+    // used as-is for BOTH modes with no way to differentiate.
+    auto darkVariantOf = [](const std::string &path) {
+        size_t dot = path.find_last_of('.');
+        return dot == std::string::npos ? path + "-dark" : path.substr(0, dot) + "-dark" + path.substr(dot);
+    };
+    auto resolveCandidate = [&](const std::string &path) -> std::string {
+        if (darkMode && fileExists(darkVariantOf(path))) return darkVariantOf(path);
+        if (fileExists(path)) return path;
+        return {};
+    };
+
     std::string cssStr, targetCssFile;
-    if (!customCssPath.empty() && fileExists(customCssPath)) {
-        targetCssFile = customCssPath;
-    } else {
+    if (!customCssPath.empty()) {
+        targetCssFile = resolveCandidate(customCssPath);
+    }
+    std::string pluginDirCss;
+    if (targetCssFile.empty()) {
         std::string home = homeDir();
-        std::string pluginDirCss = home + "/.config/doublecmd/plugins/wlx/markdownview.css";
+        pluginDirCss = home + "/.config/doublecmd/plugins/wlx/markdownview.css";
         std::string pluginPartCss = home + "/.config/doublecmd/plugins/wlx/markdownpart.css";
         std::string userPartCss = home + "/.config/markdownpart.css";
-        if (fileExists(pluginDirCss)) targetCssFile = pluginDirCss;
-        else if (fileExists(pluginPartCss)) targetCssFile = pluginPartCss;
-        else if (fileExists(userPartCss)) targetCssFile = userPartCss;
+        targetCssFile = resolveCandidate(pluginDirCss);
+        if (targetCssFile.empty()) targetCssFile = resolveCandidate(pluginPartCss);
+        if (targetCssFile.empty()) targetCssFile = resolveCandidate(userPartCss);
     }
     if (!targetCssFile.empty()) cssStr = readFileUtf8(targetCssFile);
-    if (cssStr.empty()) cssStr = darkMode ? DEFAULT_DARK_CSS : DEFAULT_LIGHT_CSS;
+    if (cssStr.empty()) {
+        cssStr = darkMode ? DEFAULT_DARK_CSS : DEFAULT_LIGHT_CSS;
+        // Nothing on disk anywhere in the lookup chain -- seed a real,
+        // user-editable file at the wlx-dir slot (the first
+        // filesystem-backed precedence level) instead of only ever using
+        // this in-memory constant, so there's always something to
+        // customize from. Written once; every subsequent render finds it
+        // via the normal resolveCandidate() lookup above and this branch
+        // never runs again.
+        if (!pluginDirCss.empty()) {
+            writeFileUtf8(pluginDirCss, DEFAULT_LIGHT_CSS);
+            writeFileUtf8(darkVariantOf(pluginDirCss), DEFAULT_DARK_CSS);
+        }
+    }
 
-    return "<!DOCTYPE html><html><head><style>" + cssStr + "</style></head><body>" + html + "</body></html>";
+    // <body> always carries a class naming the active mode, so a single
+    // custom theme file can hold both a light and a dark ruleset (scoped
+    // as `body.theme-light { ... }` / `body.theme-dark { ... }`) instead of
+    // needing two separate files. Deliberately NOT `@media
+    // (prefers-color-scheme)` -- that's a real browser media query WebKit
+    // (the GTK plugin) would honor but Qt's QTextBrowser (a rich-text
+    // renderer, not a browser engine) does not support at all, which would
+    // make a single theme file behave differently on the two platforms
+    // that share this exact rendering code. A plain class selector is
+    // supported by both.
+    std::string bodyClass = darkMode ? "theme-dark" : "theme-light";
+    return "<!DOCTYPE html><html><head><style>" + cssStr + "</style></head><body class=\"" + bodyClass + "\">" + html + "</body></html>";
 }
 
 std::string renderMarkdown(const std::string &markdown, bool darkMode, const std::string &customCssPath) {
