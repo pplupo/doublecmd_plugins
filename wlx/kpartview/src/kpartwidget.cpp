@@ -581,7 +581,7 @@ void KPartWidget::instantiatePart()
                                              actionName == QLatin1String("view_actual_size"));
                         
                         if (!isZoomAction || checked) {
-                            QSettings s(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("doublecmd"), QStringLiteral("wlx_kpart"));
+                            QSettings s(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("doublecmd"), QStringLiteral("kpartview"));
                             s.setValue(actionName, checked);
                             
                             if (isZoomAction && checked) {
@@ -631,7 +631,7 @@ void KPartWidget::instantiatePart()
             // Now restore saved settings (connections are already established above).
             // We must use trigger() instead of setChecked() so the KPart's internal
             // handler fires (e.g. Gwenview actually changes zoom mode, not just checkbox).
-            QSettings settings(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("doublecmd"), QStringLiteral("wlx_kpart"));
+            QSettings settings(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("doublecmd"), QStringLiteral("kpartview"));
             qDebug() << "[KPartWidget] Restoring settings from" << settings.fileName() << "keys:" << settings.allKeys();
             
             restoreZoom();
@@ -830,7 +830,7 @@ void KPartWidget::restoreZoom()
 {
     if (!m_part) return;
     
-    QSettings settings(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("doublecmd"), QStringLiteral("wlx_kpart"));
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("doublecmd"), QStringLiteral("kpartview"));
     
     static const QString zoomFit = QStringLiteral("view_zoom_to_fit");
     static const QString zoomActual = QStringLiteral("view_actual_size");

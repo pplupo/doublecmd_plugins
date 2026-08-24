@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(kpart_host_qt6 LANGUAGES CXX)
+project(kpartview_host_qt6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,12 +21,12 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
 )
 
-add_library(kpart_host_qt6 SHARED
+add_library(kpartview_host_qt6 SHARED
     src/main.cpp
     src/kpartwidget.cpp
 )
 
-target_link_libraries(kpart_host_qt6
+target_link_libraries(kpartview_host_qt6
     PRIVATE
     Qt6::Core
     Qt6::Gui

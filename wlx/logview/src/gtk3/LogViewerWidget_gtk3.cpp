@@ -28,6 +28,13 @@
 
 namespace {
 
+// Populated by ListSetDefaultParams from DC's DefaultIniName -- previously
+// this plugin ignored that struct entirely and hardcoded its own path
+// under ~/.config/doublecmd/plugins/wlx/, unlike every other WLX plugin in
+// this repo that derives its ini path from the directory DC actually hands
+// it.
+std::string g_configPath;
+
 // ── Time-range spinners ─────────────────────────────────────────────
 //
 // Qt's time slicer uses QDateTimeEdit (a single field with per-segment spin
@@ -836,7 +843,7 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags)
     GtkWidget *parent = GTK_WIDGET(ParentWin);
     auto *st = new LogViewerState();
     st->currentFile = FileToLoad;
-    st->iniPath = std::string(g_get_user_config_dir()) + "/doublecmd/plugins/wlx/logview_gtk3.ini";
+    st->iniPath = g_configPath;
 
     st->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     // gtk_container_add() doesn't register the child the way GtkLayout
@@ -1066,8 +1073,13 @@ EXPORT void DCPCALL ListGetDetectString(char *DetectString, int maxlen)
     snprintf(DetectString, maxlen - 1, "EXT=\"LOG\" | EXT=\"TXT\"");
 }
 
-EXPORT void DCPCALL ListSetDefaultParams(ListDefaultParamStruct *)
+EXPORT void DCPCALL ListSetDefaultParams(ListDefaultParamStruct *dps)
 {
+    if (!dps) return;
+    std::string iniName(dps->DefaultIniName);
+    auto slash = iniName.find_last_of('/');
+    std::string dir = slash == std::string::npos ? "." : iniName.substr(0, slash);
+    g_configPath = dir + "/logview.ini";
 }
 
 } // extern "C"

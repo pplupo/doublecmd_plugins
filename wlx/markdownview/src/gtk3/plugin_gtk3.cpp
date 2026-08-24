@@ -226,6 +226,11 @@ void reloadContentNow(MarkdownState *st)
     st->loadInFlight = true;
     bool activeDarkMode = resolveDarkMode();
     std::string html = MarkdownEngine::renderFileToHtml(st->filePath, activeDarkMode, g_settings.themeFilePath);
+    std::string autoResolvedCss = MarkdownEngine::getLastAutoResolvedCssPath();
+    if (!autoResolvedCss.empty() && autoResolvedCss != g_settings.themeFilePath) {
+        g_settings.themeFilePath = autoResolvedCss;
+        g_settings.save(g_configPath, PLUGNAME);
+    }
     std::string baseUri = "file://" + st->filePath.substr(0, st->filePath.find_last_of('/') + 1);
     webkit_web_view_load_html(WEBKIT_WEB_VIEW(st->webView), html.c_str(), baseUri.c_str());
 }
@@ -533,6 +538,7 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct *dps)
     std::string dir = slash == std::string::npos ? "." : iniName.substr(0, slash);
     g_configPath = dir + "/markdownview.ini";
     g_settings.loadOrInitDefaults(g_configPath, PLUGNAME);
+    MarkdownEngine::setPluginConfigDir(dir);
 }
 
 } // extern "C"

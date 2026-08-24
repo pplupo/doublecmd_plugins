@@ -1,9 +1,9 @@
-# KPart Host Double Commander Plugin
+# kpartview Double Commander Plugin
 
 A "Universal KDE Wrapper" WLX (Lister) plugin for Double Commander. This plugin acts as a host for KDE KParts, allowing Double Commander to view any file type supported by a KDE application (like Okular for PDFs or LibreOffice for documents) directly in the Quick View panel.
 
-![Markdown Screenshot](kpart_md.png)
-![SVG Screenshot](kpart_svg.png)
+![Markdown Screenshot](kpartview_md.png)
+![SVG Screenshot](kpartview_svg.png)
 
 ## Features
 - Dynamic MIME-type detection using `QMimeDatabase`.
@@ -23,4 +23,4 @@ cmake ..
 make
 ```
 
-The build will produce `kpart_host.wlx`.
+The build will produce `kpartview_host_qt6.wlx`.
