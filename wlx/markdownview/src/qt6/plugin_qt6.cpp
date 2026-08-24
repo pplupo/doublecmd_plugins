@@ -95,6 +95,40 @@ public:
             activeDarkMode,
             g_themeFilePath.toStdString()
         );
+        QString autoResolvedCss = QString::fromStdString(MarkdownEngine::getLastAutoResolvedCssPath());
+        if (!autoResolvedCss.isEmpty() && autoResolvedCss != g_themeFilePath) {
+            g_themeFilePath = autoResolvedCss;
+            saveSettings();
+        }
+
+        // QTextBrowser paints its own viewport background from
+        // QPalette::Base BEFORE the document is drawn on top -- a `body {
+        // background-color: ... }` CSS rule only colors the document's
+        // root frame, not the surrounding widget/viewport, so without this
+        // any area the document doesn't fully cover (margins, a
+        // shorter-than-viewport document) shows through as whatever the
+        // ambient/system palette's Base color is. On a dark system theme
+        // that made the "light" markdown theme look mostly dark outside
+        // the actual text blocks. Match the same body background colors
+        // DEFAULT_CSS uses so the two stay in sync.
+        //
+        // QPalette::Text/WindowText matter too, not just Base/Window --
+        // QTextDocument's CSS engine doesn't reliably cascade a
+        // class-scoped `body.theme-light { color: ... }` rule down to
+        // every paragraph the way a real browser would, so any text that
+        // doesn't inherit it falls back to the palette's default text
+        // color. On a dark system theme that default is light/white,
+        // which on the light markdown theme's white background rendered
+        // as invisible text -- visible only once selected, since selection
+        // painting uses a different color pair.
+        QPalette pal = palette();
+        QColor bg = activeDarkMode ? QColor("#0d1117") : QColor("#ffffff");
+        QColor fg = activeDarkMode ? QColor("#c9d1d9") : QColor("#24292e");
+        pal.setColor(QPalette::Base, bg);
+        pal.setColor(QPalette::Window, bg);
+        pal.setColor(QPalette::Text, fg);
+        pal.setColor(QPalette::WindowText, fg);
+        setPalette(pal);
 
         int currentScrollX = horizontalScrollBar() ? horizontalScrollBar()->value() : 0;
         int currentScrollY = verticalScrollBar() ? verticalScrollBar()->value() : 0;
@@ -270,6 +304,7 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
     if (!dps) return;
     QFileInfo defini(QString::fromUtf8(dps->DefaultIniName));
     g_configPath = defini.absolutePath() + "/markdownview.ini";
+    MarkdownEngine::setPluginConfigDir(defini.absolutePath().toStdString());
     QSettings settings(g_configPath, QSettings::IniFormat);
 
     if (!settings.contains(PLUGNAME "/theme_file_path"))

@@ -1116,7 +1116,7 @@ std::vector<HighlightRule> LogViewerWidget::loadHighlightRules() {
     std::vector<HighlightRule> rules;
     QString path = g_iniPath;
     if (path.isEmpty()) {
-        path = QDir::homePath() + "/.config/doublecmd/logviewer.ini";
+        path = QDir::homePath() + "/.config/doublecmd/logview.ini";
     }
 
     QSettings settings(path, QSettings::IniFormat);
@@ -1184,7 +1184,7 @@ std::vector<HighlightRule> LogViewerWidget::loadHighlightRules() {
 void LogViewerWidget::saveHighlightRules(const std::vector<HighlightRule>& rules) {
     QString path = g_iniPath;
     if (path.isEmpty()) {
-        path = QDir::homePath() + "/.config/doublecmd/logviewer.ini";
+        path = QDir::homePath() + "/.config/doublecmd/logview.ini";
     }
 
     QSettings settings(path, QSettings::IniFormat);

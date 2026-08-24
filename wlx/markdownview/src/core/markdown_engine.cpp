@@ -75,6 +75,20 @@ std::string homeDir() {
     return h ? h : "";
 }
 
+// Set via MarkdownEngine::setPluginConfigDir() (called once from
+// ListSetDefaultParams with DefaultIniName's directory) and read by the CSS
+// lookup chain below, so the "plugin dir" candidate is anchored to the
+// location DC actually handed the plugin instead of an independently
+// guessed ~/.config/doublecmd/plugins/wlx path.
+std::string g_pluginConfigDir;
+
+// Set whenever the CSS lookup chain resolves to something other than the
+// caller-supplied customCssPath as-is (i.e. customCssPath was empty/stale
+// and a fallback candidate -- or a freshly-written default -- was used
+// instead). Read via MarkdownEngine::getLastAutoResolvedCssPath() so
+// callers can persist the actual file in use back into their ini.
+std::string g_lastAutoResolvedCssPath;
+
 std::string htmlUnescape(const std::string &s) {
     std::string out;
     out.reserve(s.size());
@@ -462,53 +476,60 @@ std::string replaceMathTags(const std::string &htmlIn, bool darkMode) {
 
 // --- Theming + final document wrap ---
 
-const char *DEFAULT_LIGHT_CSS = R"(
+// Single merged stylesheet covering both themes via the `body.theme-light`
+// / `body.theme-dark` class selectors postProcessHtml() below always stamps
+// onto <body> -- NOT `@media (prefers-color-scheme)`, which Qt's
+// QTextBrowser (a QTextDocument rich-text renderer, not a browser engine)
+// doesn't support at all, unlike WebKitGTK which does. A plain class
+// selector is the one mechanism both toolkits actually honor identically.
+const char *DEFAULT_CSS = R"(
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    color: #24292e;
-    background-color: #ffffff;
     line-height: 1.6;
     padding: 16px;
 }
+body.theme-light { color: #24292e; background-color: #ffffff; }
+body.theme-dark { color: #c9d1d9; background-color: #0d1117; }
 h1, h2, h3, h4, h5, h6 {
     margin-top: 24px;
     margin-bottom: 16px;
     font-weight: 600;
     line-height: 1.25;
-    color: #1b1f23;
 }
-h1 { font-size: 2em; border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
-h2 { font-size: 1.5em; border-bottom: 1px solid #eaecef; padding-bottom: .3em; }
+body.theme-light h1, body.theme-light h2, body.theme-light h3,
+body.theme-light h4, body.theme-light h5, body.theme-light h6 { color: #1b1f23; }
+body.theme-dark h1, body.theme-dark h2, body.theme-dark h3,
+body.theme-dark h4, body.theme-dark h5, body.theme-dark h6 { color: #f0f6fc; }
+h1 { font-size: 2em; padding-bottom: .3em; }
+h2 { font-size: 1.5em; padding-bottom: .3em; }
 h3 { font-size: 1.25em; }
 h4 { font-size: 1em; }
+body.theme-light h1, body.theme-light h2 { border-bottom: 1px solid #eaecef; }
+body.theme-dark h1, body.theme-dark h2 { border-bottom: 1px solid #21262d; }
 code {
     font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace;
     font-size: 85%;
-    background-color: #e4e4e4;
-    color: #24292e;
     border-radius: 3px;
     padding: .2em .4em;
 }
+body.theme-light code { background-color: #e4e4e4; color: #24292e; }
+body.theme-dark code { background-color: #2d333b; color: #e6edf3; }
 pre {
     font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace;
     font-size: 85%;
-    background-color: #eef1f5;
-    color: #24292e;
     border-radius: 6px;
     padding: 0;
     margin: 0;
     overflow: auto;
     line-height: 1.45;
 }
+body.theme-light pre { background-color: #bec0c4; color: #24292e; }
+body.theme-dark pre { background-color: #2d333b; color: #e6edf3; }
 pre *, code, code * {
     background-color: transparent !important;
 }
-table.blockquote {
-    color: #808080;
-}
-table.blockquote td {
-    border: none;
-}
+body.theme-light table.blockquote { color: #808080; }
+body.theme-dark table.blockquote { color: #aaaaaa; }
 table {
     border-collapse: collapse;
     width: 100%;
@@ -517,84 +538,21 @@ table {
 }
 table th, table td {
     padding: 6px 13px;
-    border: 1px solid #dfe2e5;
 }
-table tr:nth-child(2n) {
-    background-color: #f6f8fa;
+/* !important here isn't decorative -- the themed border rule below is
+   scoped under body.theme-light/body.theme-dark for color, which raises
+   its specificity above a plain "table.blockquote td" selector. Without
+   this, that generic themed rule wins and re-adds borders to the
+   blockquote's accent-bar table and the code block's wrapper table (which
+   is a plain, unclassed <table> for background-color reasons, so it needs
+   excluding here too). */
+table.blockquote td, table.codeblock td {
+    border: none !important;
 }
-img {
-    max-width: 100%;
-    box-sizing: content-box;
-}
-hr {
-    height: .25em;
-    padding: 0;
-    margin: 24px 0;
-    background-color: #58a6ff;
-    border: 0;
-}
-)";
-
-const char *DEFAULT_DARK_CSS = R"(
-body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    color: #c9d1d9;
-    background-color: #0d1117;
-    line-height: 1.6;
-    padding: 16px;
-}
-h1, h2, h3, h4, h5, h6 {
-    margin-top: 24px;
-    margin-bottom: 16px;
-    font-weight: 600;
-    line-height: 1.25;
-    color: #f0f6fc;
-}
-h1 { font-size: 2em; border-bottom: 1px solid #21262d; padding-bottom: .3em; }
-h2 { font-size: 1.5em; border-bottom: 1px solid #21262d; padding-bottom: .3em; }
-h3 { font-size: 1.25em; }
-h4 { font-size: 1em; }
-code {
-    font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace;
-    font-size: 85%;
-    background-color: #2d333b;
-    color: #e6edf3;
-    border-radius: 3px;
-    padding: .2em .4em;
-}
-pre {
-    font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace;
-    font-size: 85%;
-    background-color: #2d333b;
-    color: #e6edf3;
-    border-radius: 6px;
-    padding: 0;
-    margin: 0;
-    overflow: auto;
-    line-height: 1.45;
-}
-pre *, code, code * {
-    background-color: transparent !important;
-}
-table.blockquote {
-    color: #aaaaaa;
-}
-table.blockquote td {
-    border: none;
-}
-table {
-    border-collapse: collapse;
-    width: 100%;
-    margin-top: 0;
-    margin-bottom: 16px;
-}
-table th, table td {
-    padding: 6px 13px;
-    border: 1px solid #30363d;
-}
-table tr:nth-child(2n) {
-    background-color: #161b22;
-}
+body.theme-light table th, body.theme-light table td { border: 1px solid #dfe2e5; }
+body.theme-dark table th, body.theme-dark table td { border: 1px solid #30363d; }
+body.theme-light table tr:nth-child(2n) { background-color: #f6f8fa; }
+body.theme-dark table tr:nth-child(2n) { background-color: #161b22; }
 img {
     max-width: 100%;
     box-sizing: content-box;
@@ -628,16 +586,16 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
         replaceAll(html, "<blockquote>",
             "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#58a6ff\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td>");
         replaceAll(html, "<pre>",
-            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0;\">");
+            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0;\">");
         replaceAll(html, "<pre class=",
-            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0;\" class=");
+            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0;\" class=");
     } else {
         replaceAll(html, "<blockquote>",
             "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#58a6ff\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td>");
         replaceAll(html, "<pre>",
-            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; margin:0; padding:0;\">");
+            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#bec0c4\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#bec0c4\"><pre style=\"background-color:#bec0c4; margin:0; padding:0;\">");
         replaceAll(html, "<pre class=",
-            "<table border=\"0\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#eef1f5\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#eef1f5\"><pre style=\"background-color:#eef1f5; margin:0; padding:0;\" class=");
+            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#bec0c4\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#bec0c4\"><pre style=\"background-color:#bec0c4; margin:0; padding:0;\" class=");
     }
 
     replaceAll(html, "</blockquote>", "</td></tr></table>");
@@ -647,49 +605,50 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
     replaceAll(html, "<hr />", hrReplacement);
     replaceAll(html, "<hr>", hrReplacement);
 
-    // CSS lookup precedence: customCssPath -> plugin CSS -> markdownpart.css -> built-in default.
-    // Each candidate is checked for a "-dark" suffixed sibling first when
-    // in dark mode (e.g. markdownpart.css -> markdownpart-dark.css), so a
-    // custom theme can have distinct light/dark variants the same way the
-    // built-in default does -- previously a custom file, once found, was
-    // used as-is for BOTH modes with no way to differentiate.
-    auto darkVariantOf = [](const std::string &path) {
-        size_t dot = path.find_last_of('.');
-        return dot == std::string::npos ? path + "-dark" : path.substr(0, dot) + "-dark" + path.substr(dot);
-    };
-    auto resolveCandidate = [&](const std::string &path) -> std::string {
-        if (darkMode && fileExists(darkVariantOf(path))) return darkVariantOf(path);
-        if (fileExists(path)) return path;
-        return {};
-    };
+    // CSS lookup precedence: customCssPath (the ini's theme_file_path) ->
+    // <dir of DefaultIniName>/markdownview.css -> ~/.config/markdownpart.css
+    // -> built-in default (written out to <dir of DefaultIniName>/markdownview.css
+    // if nothing was found anywhere, so there's always a real file to edit).
+    // One file covers BOTH themes (see DEFAULT_CSS above) -- no more
+    // "-dark"-suffixed sibling file lookup; the `body.theme-light`/
+    // `body.theme-dark` class selector on <body> below does the
+    // light/dark split within a single stylesheet.
+    //
+    // Whenever customCssPath itself isn't what ends up being used (empty,
+    // stale, or nothing found at all), g_lastAutoResolvedCssPath records
+    // the file that WAS used so the caller can write it back into the ini's
+    // theme_file_path -- keeping the ini honest about what's actually
+    // rendering instead of silently drifting from it.
+    g_lastAutoResolvedCssPath.clear();
 
     std::string cssStr, targetCssFile;
-    if (!customCssPath.empty()) {
-        targetCssFile = resolveCandidate(customCssPath);
+    if (!customCssPath.empty() && fileExists(customCssPath)) {
+        targetCssFile = customCssPath;
     }
-    std::string pluginDirCss;
+    std::string dirCss;
     if (targetCssFile.empty()) {
-        std::string home = homeDir();
-        pluginDirCss = home + "/.config/doublecmd/plugins/wlx/markdownview.css";
-        std::string pluginPartCss = home + "/.config/doublecmd/plugins/wlx/markdownpart.css";
-        std::string userPartCss = home + "/.config/markdownpart.css";
-        targetCssFile = resolveCandidate(pluginDirCss);
-        if (targetCssFile.empty()) targetCssFile = resolveCandidate(pluginPartCss);
-        if (targetCssFile.empty()) targetCssFile = resolveCandidate(userPartCss);
+        dirCss = g_pluginConfigDir + "/markdownview.css";
+        std::string userPartCss = homeDir() + "/.config/markdownpart.css";
+        if (fileExists(dirCss)) {
+            targetCssFile = dirCss;
+            g_lastAutoResolvedCssPath = dirCss;
+        } else if (fileExists(userPartCss)) {
+            targetCssFile = userPartCss;
+            g_lastAutoResolvedCssPath = userPartCss;
+        }
     }
     if (!targetCssFile.empty()) cssStr = readFileUtf8(targetCssFile);
     if (cssStr.empty()) {
-        cssStr = darkMode ? DEFAULT_DARK_CSS : DEFAULT_LIGHT_CSS;
+        cssStr = DEFAULT_CSS;
         // Nothing on disk anywhere in the lookup chain -- seed a real,
-        // user-editable file at the wlx-dir slot (the first
-        // filesystem-backed precedence level) instead of only ever using
-        // this in-memory constant, so there's always something to
-        // customize from. Written once; every subsequent render finds it
-        // via the normal resolveCandidate() lookup above and this branch
-        // never runs again.
-        if (!pluginDirCss.empty()) {
-            writeFileUtf8(pluginDirCss, DEFAULT_LIGHT_CSS);
-            writeFileUtf8(darkVariantOf(pluginDirCss), DEFAULT_DARK_CSS);
+        // user-editable file at <dir of DefaultIniName>/markdownview.css
+        // instead of only ever using this in-memory constant, so there's
+        // always something to customize from. Written once; every
+        // subsequent render finds it via the normal fileExists() check
+        // above and this branch never runs again.
+        if (!dirCss.empty()) {
+            writeFileUtf8(dirCss, DEFAULT_CSS);
+            g_lastAutoResolvedCssPath = dirCss;
         }
     }
 
@@ -730,6 +689,14 @@ void init() {
         mvLog("[init] tex::LaTeX::init done, RES_BASE='%s'", tex::RES_BASE.c_str());
         microtex_initialized = true;
     }
+}
+
+void setPluginConfigDir(const std::string &dir) {
+    g_pluginConfigDir = dir;
+}
+
+std::string getLastAutoResolvedCssPath() {
+    return g_lastAutoResolvedCssPath;
 }
 
 std::string renderFileToHtml(const std::string &filePath, bool darkMode, const std::string &customCssPath) {

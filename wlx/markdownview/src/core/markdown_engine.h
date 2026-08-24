@@ -12,6 +12,25 @@ namespace MarkdownEngine {
 void init();
 
 /**
+ * Tell the engine which directory DC's DefaultIniName lives in, so the
+ * CSS lookup chain's "plugin dir" candidate (markdownview.css) is anchored
+ * to the location DC actually handed the plugin, rather than an
+ * independently-guessed ~/.config/doublecmd/plugins/wlx path. Call once
+ * from ListSetDefaultParams before any render call.
+ */
+void setPluginConfigDir(const std::string &dir);
+
+/**
+ * After a render call, returns the CSS file path the engine auto-resolved
+ * to when customCssPath was empty or didn't point at an existing file
+ * (i.e. it fell through to markdownview.css or ~/.config/markdownpart.css,
+ * or just wrote a fresh markdownview.css). Empty if customCssPath itself
+ * was used as-is. Callers should persist this back into their ini's
+ * theme_file_path setting so the ini reflects what's actually in use.
+ */
+std::string getLastAutoResolvedCssPath();
+
+/**
  * Parse a markdown file and render it to HTML string with inline LaTeX (MicroTeX)
  * images and embedded diagram SVGs/PNGs.
  * 

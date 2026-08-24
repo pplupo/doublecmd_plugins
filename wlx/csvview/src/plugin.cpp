@@ -1211,7 +1211,7 @@ void DCPCALL ListGetDetectString(char* DetectString, int maxlen)
 void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
 {
 	QFileInfo defini(QString::fromStdString(dps->DefaultIniName));
-	QString cfgpath = defini.absolutePath() + "/wlx_csvview.ini";
+	QString cfgpath = defini.absolutePath() + "/csvview.ini";
 	QSettings settings(cfgpath, QSettings::IniFormat);
 
 	if (!settings.contains(PLUGNAME "/resize_columns")) settings.setValue(PLUGNAME "/resize_columns", gResize);
