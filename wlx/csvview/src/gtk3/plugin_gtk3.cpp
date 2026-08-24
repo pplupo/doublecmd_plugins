@@ -822,22 +822,48 @@ void onPrintClicked(CsvGtkState *st)
 void onOpenExternallyClicked(CsvGtkState *st)
 {
     if (st->currentFile.empty()) return;
-    GError *error = nullptr;
-    std::string uri = "file://" + st->currentFile;
-    // A failure here used to be completely silent -- confirmed live that
-    // g_app_info_launch_default_for_uri() itself can report success (no
-    // GError) while the resolved default-app command still fails to
-    // actually start (e.g. a stale/uninstalled default-app association),
-    // so a user sees nothing happen with no indication why. Surface an
-    // explicit GError when GIO does report one, at least.
-    if (!g_app_info_launch_default_for_uri(uri.c_str(), nullptr, &error)) {
-        GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    auto showError = [&](const std::string &msg) {
         GtkWidget *dlg = gtk_message_dialog_new(GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
-            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            "Could not open file externally.\n\n%s",
-            error ? error->message : "No default application is associated with this file type.");
+            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Could not open file externally.\n\n%s", msg.c_str());
         gtk_dialog_run(GTK_DIALOG(dlg));
         gtk_widget_destroy(dlg);
+    };
+
+    // g_app_info_launch_default_for_uri() reports success as soon as it
+    // has spawned SOMETHING -- confirmed live that it returns TRUE with no
+    // GError even when the resolved default-app command doesn't actually
+    // exist (a stale/uninstalled default-app association), because the
+    // exec() failure happens in the spawned process, not synchronously
+    // here. Resolving the GAppInfo ourselves first and checking its
+    // executable is actually on PATH catches that case explicitly instead
+    // of silently doing nothing.
+    gboolean uncertain = FALSE;
+    gchar *contentType = g_content_type_guess(st->currentFile.c_str(), nullptr, 0, &uncertain);
+    GAppInfo *appInfo = contentType ? g_app_info_get_default_for_type(contentType, FALSE) : nullptr;
+    if (contentType) g_free(contentType);
+
+    if (!appInfo) {
+        showError("No default application is associated with this file type.");
+        return;
+    }
+    const char *executable = g_app_info_get_executable(appInfo);
+    gchar *resolvedPath = executable ? g_find_program_in_path(executable) : nullptr;
+    if (!resolvedPath) {
+        showError(std::string("The associated application (\"") + (executable ? executable : "?") +
+                   "\") is not installed or not on PATH.");
+        g_object_unref(appInfo);
+        return;
+    }
+    g_free(resolvedPath);
+
+    GError *error = nullptr;
+    GList *files = g_list_append(nullptr, g_file_new_for_path(st->currentFile.c_str()));
+    bool ok = g_app_info_launch(appInfo, files, nullptr, &error);
+    g_list_free_full(files, g_object_unref);
+    g_object_unref(appInfo);
+    if (!ok) {
+        showError(error ? error->message : "Unknown error.");
         if (error) g_error_free(error);
     }
 }

@@ -190,19 +190,46 @@ void reloadFile(StructViewState *st) {
 
 void onOpenExternally(StructViewState *st) {
     if (st->filepath.empty()) return;
-    GError *error = nullptr;
-    std::string uri = "file://" + st->filepath;
-    // Was completely silent on failure -- see csvview_gtk3.cpp's identical
-    // fix for why (a stale/uninstalled default-app association can fail
-    // to actually start the process even when GIO itself reports success).
-    if (!g_app_info_launch_default_for_uri(uri.c_str(), nullptr, &error)) {
-        GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    GtkWidget *toplevel = gtk_widget_get_toplevel(st->root);
+    auto showError = [&](const std::string &msg) {
         GtkWidget *dlg = gtk_message_dialog_new(GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr,
-            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-            "Could not open file externally.\n\n%s",
-            error ? error->message : "No default application is associated with this file type.");
+            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Could not open file externally.\n\n%s", msg.c_str());
         gtk_dialog_run(GTK_DIALOG(dlg));
         gtk_widget_destroy(dlg);
+    };
+
+    // g_app_info_launch_default_for_uri() reports success as soon as it
+    // has spawned SOMETHING -- see csvview_gtk3.cpp's identical fix for
+    // why (a stale/uninstalled default-app association's exec() failure
+    // happens in the spawned process, not synchronously here). Resolving
+    // the GAppInfo ourselves and checking its executable is actually on
+    // PATH catches that case explicitly instead of silently doing nothing.
+    gboolean uncertain = FALSE;
+    gchar *contentType = g_content_type_guess(st->filepath.c_str(), nullptr, 0, &uncertain);
+    GAppInfo *appInfo = contentType ? g_app_info_get_default_for_type(contentType, FALSE) : nullptr;
+    if (contentType) g_free(contentType);
+
+    if (!appInfo) {
+        showError("No default application is associated with this file type.");
+        return;
+    }
+    const char *executable = g_app_info_get_executable(appInfo);
+    gchar *resolvedPath = executable ? g_find_program_in_path(executable) : nullptr;
+    if (!resolvedPath) {
+        showError(std::string("The associated application (\"") + (executable ? executable : "?") +
+                   "\") is not installed or not on PATH.");
+        g_object_unref(appInfo);
+        return;
+    }
+    g_free(resolvedPath);
+
+    GError *error = nullptr;
+    GList *files = g_list_append(nullptr, g_file_new_for_path(st->filepath.c_str()));
+    bool ok = g_app_info_launch(appInfo, files, nullptr, &error);
+    g_list_free_full(files, g_object_unref);
+    g_object_unref(appInfo);
+    if (!ok) {
+        showError(error ? error->message : "Unknown error.");
         if (error) g_error_free(error);
     }
 }

@@ -148,6 +148,14 @@ cairo_status_t writeToString(void *closure, const unsigned char *data, unsigned 
 
 namespace DiagramRender {
 
+// Single accent color used everywhere a diagram needs a line/border/arrow
+// color, matching PlantUML's own accent below and the blockquote left-bar
+// color in the theme CSS -- previously mermaid used its own generic
+// "dark"/"default" built-in theme with no accent override at all, so its
+// lines never matched PlantUML's explicit blue skinparam accents in the
+// same document.
+constexpr const char *kAccentColor = "#58a6ff";
+
 std::string renderMermaidWeb(const std::string &code, bool darkMode)
 {
     std::string theme = darkMode ? "\"dark\"" : "\"default\"";
@@ -156,7 +164,18 @@ std::string renderMermaidWeb(const std::string &code, bool darkMode)
         "\"gantt\": {\"htmlLabels\": false}, \"journey\": {\"htmlLabels\": false}, "
         "\"class\": {\"htmlLabels\": false}, \"state\": {\"htmlLabels\": false}, "
         "\"er\": {\"htmlLabels\": false}, \"pie\": {\"htmlLabels\": false}, "
-        "\"c4\": {\"htmlLabels\": false}, \"themeVariables\": {\"background\": \"transparent\"}}}%%\n";
+        "\"c4\": {\"htmlLabels\": false}, \"themeVariables\": {\"background\": \"transparent\", "
+        "\"lineColor\": \"" + std::string(kAccentColor) + "\", "
+        "\"primaryBorderColor\": \"" + std::string(kAccentColor) + "\", "
+        "\"secondaryBorderColor\": \"" + std::string(kAccentColor) + "\", "
+        "\"tertiaryBorderColor\": \"" + std::string(kAccentColor) + "\", "
+        "\"nodeBorder\": \"" + std::string(kAccentColor) + "\", "
+        "\"clusterBorder\": \"" + std::string(kAccentColor) + "\", "
+        "\"defaultLinkColor\": \"" + std::string(kAccentColor) + "\", "
+        "\"actorBorder\": \"" + std::string(kAccentColor) + "\", "
+        "\"activationBorderColor\": \"" + std::string(kAccentColor) + "\", "
+        "\"labelBoxBorderColor\": \"" + std::string(kAccentColor) + "\", "
+        "\"signalColor\": \"" + std::string(kAccentColor) + "\"}}}%%\n";
     std::string url = "https://mermaid.ink/svg/" + base64UrlEncode(config + code);
     return httpGet(url);
 }
@@ -169,28 +188,35 @@ std::string renderPlantUmlWeb(const std::string &code, bool darkMode)
         ? "\nskinparam backgroundColor transparent\n"
           "skinparam defaultFontColor #f0f6fc\n"
           "skinparam ParticipantBackgroundColor #21262d\n"
-          "skinparam ParticipantBorderColor #58a6ff\n"
+          "skinparam ParticipantBorderColor " + std::string(kAccentColor) + "\n"
           "skinparam ParticipantFontColor #f0f6fc\n"
           "skinparam ActorBackgroundColor #21262d\n"
-          "skinparam ActorBorderColor #58a6ff\n"
+          "skinparam ActorBorderColor " + std::string(kAccentColor) + "\n"
           "skinparam ActorFontColor #f0f6fc\n"
           "skinparam SequenceGroupBackgroundColor #161b22\n"
           "skinparam SequenceGroupBorderColor #8b949e\n"
           "skinparam SequenceGroupHeaderFontColor #f0f6fc\n"
-          "skinparam SequenceLifeLineBorderColor #58a6ff\n"
+          "skinparam SequenceLifeLineBorderColor " + std::string(kAccentColor) + "\n"
           "skinparam SequenceLifeLineBackgroundColor #161b22\n"
-          "skinparam ArrowColor #58a6ff\n"
+          "skinparam ArrowColor " + std::string(kAccentColor) + "\n"
           "skinparam ActivityBackgroundColor #21262d\n"
-          "skinparam ActivityBorderColor #58a6ff\n"
+          "skinparam ActivityBorderColor " + std::string(kAccentColor) + "\n"
           "skinparam ActivityFontColor #f0f6fc\n"
           "skinparam ClassBackgroundColor #21262d\n"
           "skinparam ClassHeaderBackgroundColor #161b22\n"
-          "skinparam ClassBorderColor #58a6ff\n"
+          "skinparam ClassBorderColor " + std::string(kAccentColor) + "\n"
           "skinparam ClassFontColor #f0f6fc\n"
           "skinparam NoteBackgroundColor #21262d\n"
-          "skinparam NoteBorderColor #58a6ff\n"
+          "skinparam NoteBorderColor " + std::string(kAccentColor) + "\n"
           "skinparam NoteFontColor #f0f6fc\n"
-        : "\nskinparam backgroundColor transparent\n";
+        : "\nskinparam backgroundColor transparent\n"
+          "skinparam ParticipantBorderColor " + std::string(kAccentColor) + "\n"
+          "skinparam ActorBorderColor " + std::string(kAccentColor) + "\n"
+          "skinparam SequenceLifeLineBorderColor " + std::string(kAccentColor) + "\n"
+          "skinparam ArrowColor " + std::string(kAccentColor) + "\n"
+          "skinparam ActivityBorderColor " + std::string(kAccentColor) + "\n"
+          "skinparam ClassBorderColor " + std::string(kAccentColor) + "\n"
+          "skinparam NoteBorderColor " + std::string(kAccentColor) + "\n";
 
     if (startIdx != std::string::npos) modified.insert(startIdx + 9, skin);
     else modified = skin + modified;

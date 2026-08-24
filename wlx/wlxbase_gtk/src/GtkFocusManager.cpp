@@ -1,7 +1,6 @@
 #include "wlxbase_gtk/GtkFocusManager.h"
 
 #include <algorithm>
-#include <cstdio>
 
 namespace GtkWlPlugin {
 
@@ -112,20 +111,6 @@ bool GtkFocusManager::handleKeyPress(GdkEventKey *event)
     // every such registration in one place instead of needing each caller
     // to know to use the uppercase constant for shift combos.
     guint incomingKeyval = gdk_keyval_to_lower(event->keyval);
-
-    // TEMPORARY diagnostic: Ctrl+E ("Open Externally") reportedly does
-    // nothing at all in csvview/structview, unlike Ctrl+O (which at least
-    // visibly loses to DC). Need to see whether this even reaches a
-    // registered shortcut, or matches one that then no-ops. Remove once
-    // resolved.
-    if (incomingKeyval == GDK_KEY_e) {
-        fprintf(stderr, "[GtkFocusManager] Ctrl+E-ish keypress: keyval=%u relevant=0x%x shortcuts=%zu inputFocused=%d\n",
-                event->keyval, relevant, m_shortcuts.size(), inputFocused);
-        for (const auto &s : m_shortcuts) {
-            fprintf(stderr, "[GtkFocusManager]   registered: keyval=%u(lower=%u) mods=0x%x ctx=%d\n",
-                    s.keyval, gdk_keyval_to_lower(s.keyval), s.mods, (int)s.ctx);
-        }
-    }
 
     for (const auto &s : m_shortcuts) {
         if (s.ctx == WhenNoInput && inputFocused) continue;
