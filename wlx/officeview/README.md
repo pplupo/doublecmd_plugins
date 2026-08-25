@@ -7,6 +7,16 @@ and file lister, without opening a separate editor. It can also preview
 native Google Docs/Sheets/Slides files under an `rclone` mount (see
 [Google Drive support](#google-drive-support-via-rclone) below).
 
+This plugin ships as **two independent native builds** — one for DC's
+**GTK3** build, one for its **Qt6** build. Both share the same
+`officeview_core` (`src/core/OfficeCore.*` — the x2t/LOK engine selection,
+size-limit enforcement, and Google Drive/rclone handling) and have
+equivalent feature sets across the board: engine auto-detection, PDF
+click-and-drag text selection, LOK select-all copy, zoom, the sheet-tab
+bar, and rclone/Google Drive export are all implemented identically in
+both variants. Install whichever one matches your Double Commander
+build — they cannot be mixed.
+
 ## What it does
 
 - Converts Microsoft-format documents (legacy binary, OOXML, and
@@ -35,6 +45,43 @@ its detect string, i.e. which files it offers to preview): `DOC`, `DOCX`,
 `DOCM`, `XLS`, `XLSX`, `XLSM`, `PPT`, `PPTX`, `PPTM`, `ODT`, `ODS`, `ODP`.
 Template variants (`DOT`, `DOTX`, `DOTM`, `XLT`, `XLTX`, `XLTM`, `POT`,
 `POTX`, `POTM`, `OTT`, `OTS`, `OTP`) are intentionally not included.
+
+## Building and Installation
+
+### Prerequisites (both variants)
+* CMake 3.16+
+* C++17 compiler
+* MuPDF, FreeType, HarfBuzz (fetched/built automatically as part of the `officeview_core` static library)
+
+### GTK3 variant
+
+Additional prerequisites: GTK3 (`gtk+-3.0`) development packages.
+
+```bash
+cd wlx/officeview
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc) officeview_gtk3
+```
+
+Output: `officeview_gtk3.wlx`
+
+### Qt6 variant
+
+Additional prerequisites: Qt6 Development Libraries (`Qt6Core`, `Qt6Gui`, `Qt6Widgets`).
+
+```bash
+cd wlx/officeview
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc) officeview_qt6
+```
+
+Output: `officeview_qt6.wlx`
+
+### Installation
+
+Copy the `.wlx` file matching your Double Commander build to its plugin directory and register it under **Options -> Plugins -> WLX (Lister Plugins)**.
 
 ## Finding an office suite, and what happens if more than one is installed
 
