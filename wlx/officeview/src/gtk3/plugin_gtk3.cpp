@@ -410,6 +410,16 @@ EXPORT HWND DCPCALL ListLoad(HWND ParentWin, char *FileToLoad, int ShowFlags) {
 
     // --- Build the widget tree ---
     st->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    // GTK_CONTAINER(ParentWin)->add() doesn't register the child the way
+    // GtkLayout expects: DC's own ResizeWindow (uwlxmodule.pas) later calls
+    // gtk_layout_move() on this widget, which asserts the widget's parent
+    // is exactly this GtkLayout -- only gtk_layout_put() sets that up. This
+    // was missing entirely here, which is why the plugin "loaded" (status
+    // bar showed its name, no crash) but drew nothing: the fully-built,
+    // correctly-sized widget tree was never actually parented into DC's
+    // panel, so it was never realized/mapped and "draw" never fired at
+    // all. Same fix already applied to markdownview_gtk3/diagramview_gtk3.
+    gtk_layout_put(GTK_LAYOUT(GTK_WIDGET(ParentWin)), st->root, 0, 0);
 
     if (st->sheetNames.size() > 1 && st->sheetNames.size() == st->sheetStartPages.size()) {
         st->tabBar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
