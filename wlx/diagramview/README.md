@@ -1,12 +1,14 @@
 # Unified Diagram Lister Plugin for Double Commander (Linux/Wayland)
 
-A unified WLX (Lister) plugin for Double Commander built with Qt6 to visualize **Mermaid** (`.mmd` / `.mermaid`) and **PlantUML** (`.puml` / `.plantuml`) files as interactive vector diagrams.
+A unified WLX (Lister) plugin for Double Commander to visualize **Mermaid** (`.mmd` / `.mermaid`) and **PlantUML** (`.puml` / `.plantuml`) files as interactive vector diagrams.
 
-By configurations and CLI subprocesses, it parses text files to SVG format and displays them natively using the Qt Graphics View Framework. This SVG-first approach avoids heavy Chromium processes (`QWebEngineView`), resulting in a fast, lightweight, and stable plugin.
+By configuration and CLI subprocesses, it parses text files to SVG format and displays them natively. This SVG-first approach avoids heavy browser-engine widgets, resulting in a fast, lightweight, and stable plugin.
+
+This plugin ships as **two independent native builds** — one for DC's **GTK3** build, one for its **Qt6** build. They share the same rendering core (`src/core/DiagramRenderer.*` — the CLI subprocess invocation, web-fallback rendering, settings, and dark-mode SVG post-processing) and have equivalent feature sets end to end; only the SVG display widget differs (see [Implementation Notes](#implementation-notes-gtk3-vs-qt6)). Install whichever one matches your Double Commander build — they cannot be mixed.
 
 ---
 
-## Screenshots
+## Screenshots (Qt6 variant)
 
 ### Mermaid Diagram Render
 ![Mermaid Diagram](mmd.png)
@@ -16,7 +18,7 @@ By configurations and CLI subprocesses, it parses text files to SVG format and d
 
 ---
 
-## Features
+## Features (both variants)
 
 - **Format Support**: Automatically detects and loads Mermaid and PlantUML files.
 - **Interactive Panning and Zooming**:
@@ -24,7 +26,7 @@ By configurations and CLI subprocesses, it parses text files to SVG format and d
   - Mouse wheel scroll zoom that anchors automatically under your mouse cursor.
   - Crisp rendering at any zoom level due to native SVG vector display.
 - **File Watching & Auto-Reload**:
-  - Automatically monitors the current diagram file using `QFileSystemWatcher`.
+  - Automatically monitors the current diagram file for changes.
   - Re-renders instantly when edits are saved in an external editor. Includes a debounced timer (200ms) to support editors using atomic temp-rename saving.
 - **Right-Click Context Menu Options**:
   - **Reload Diagram**: Manually reload the active file.
@@ -34,7 +36,17 @@ By configurations and CLI subprocesses, it parses text files to SVG format and d
   - **Auto-Reload on Save** (Toggle): Enable or disable automated reloading.
   - **Use System Dark Mode** (Toggle): Match plugin palette style with system theme automatically.
   - **Force Dark Mode** (Toggle): Manually override light/dark theme.
-  - **Renderer Options**: Choose between local command-line rendering or online web API fallback.
+  - **Renderer Options**: Choose between local command-line rendering or online web API fallback, independently for Mermaid and PlantUML.
+
+---
+
+## Implementation Notes (GTK3 vs Qt6)
+
+No functional feature gaps between the two variants — every context-menu action, renderer option, and theme toggle above works identically on both. The only real difference is the display widget each toolkit uses to rasterize/render the generated SVG:
+
+| | GTK3 | Qt6 |
+|---|---|---|
+| SVG display | `librsvg` + Cairo, drawn onto a `GtkDrawingArea` | `QSvgRenderer` inside a `QGraphicsView` |
 
 ---
 
@@ -54,13 +66,44 @@ If local tools are not present or you choose Web mode:
 
 ---
 
-## Installation
+## Building and Installation
 
-1. Switch to the `diagramview` branch and run `./build.sh` to compile the plugin.
-2. The binary `diagramview_qt6.wlx` will be built under `release/wlx/diagramview/`.
-3. In Double Commander, open **Options** -> **Plugins** -> **WLX**.
-4. Click **Add** and select `/path/to/diagramview_qt6.wlx`.
-5. Double Commander will register the extension string. Ensure the detect string is configured as:
+### Prerequisites (both variants)
+* CMake 3.16+
+* C++17 compiler
+* `java` runtime + `plantuml.jar` and/or `mmdc`/`npx` on `$PATH`, for local rendering (optional — web fallback works without them)
+
+### GTK3 variant
+
+Additional prerequisites: GTK3 (`gtk+-3.0`), `librsvg-2.0`, `cairo` development packages.
+
+```bash
+cd wlx/diagramview
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc) diagramview_gtk3
+```
+
+Output: `diagramview_gtk3.wlx`
+
+### Qt6 variant
+
+Additional prerequisites: Qt6 Development Libraries (`Qt6Core`, `Qt6Gui`, `Qt6Widgets`, `Qt6Svg`).
+
+```bash
+cd wlx/diagramview
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc) diagramview_qt6
+```
+
+Output: `diagramview_qt6.wlx`
+
+### Installation
+
+1. In Double Commander, open **Options** -> **Plugins** -> **WLX**.
+2. Click **Add** and select the `.wlx` file matching your DC build (`diagramview_gtk3.wlx` or `diagramview_qt6.wlx`).
+3. Ensure the detect string is configured as:
    ```
    (EXT="PUML" | EXT="PLANTUML" | EXT="MMD" | EXT="MERMAID")
    ```
@@ -69,4 +112,4 @@ If local tools are not present or you choose Web mode:
 
 ## Configuration
 
-The plugin settings are stored in `j2969719.ini` inside the Double Commander configuration directory. You can tweak parameters such as render timeouts, local command paths, and default themes under the `[diagramview]` section.
+Both variants store their settings identically — as `diagramview.ini`, in the directory Double Commander hands the plugin at load time (its `DefaultIniName`), under the `[diagramview]` section. You can tweak parameters such as render timeouts, local command paths, and default themes there.
