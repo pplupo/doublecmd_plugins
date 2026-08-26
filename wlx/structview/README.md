@@ -15,11 +15,11 @@ This plugin ships as **two independent native builds** — one for DC's **GTK3**
 - **Open Externally** — launches the file in the system's default external application (see shortcut difference below)
 - **Word wrap** and **grid lines** toggles
 
-![](/home/pplupo/.config/marktext/images/2026-08-26-15-50-19-structview_json.png)
+![Screenshot 1](2026-08-26-15-50-19-structview_json.png)
 
-![](/home/pplupo/.config/marktext/images/2026-08-26-15-50-26-structview_xml.png)
+![Screenshot 2](2026-08-26-15-50-26-structview_xml.png)
 
-![](/home/pplupo/.config/marktext/images/2026-08-26-15-50-35-structview_cbor_edit.png)
+!Screenshot 3[](2026-08-26-15-50-35-structview_cbor_edit.png)
 
 ## Feature Differences (GTK3 vs Qt6)
 
