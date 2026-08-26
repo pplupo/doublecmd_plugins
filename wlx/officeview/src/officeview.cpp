@@ -809,6 +809,7 @@ public:
         QString bwrapBin = QStandardPaths::findExecutable("bwrap");
         if (!bwrapBin.isEmpty() && !fontPath.isEmpty()) {
             QString fontSelectionBin = QFileInfo(fontPath).absolutePath() + "/font_selection.bin";
+            QString converterDir = libPath + "/converter";
             QStringList bwrapArgs;
             bwrapArgs << "--ro-bind" << "/usr" << "/usr"
                       << "--symlink" << "usr/lib" << "lib"
@@ -818,10 +819,34 @@ public:
                       << "--ro-bind" << "/etc" << "/etc"
                       << "--bind" << "/home" << "/home"
                       << "--bind" << "/tmp" << "/tmp"
-                      << "--dev" << "/dev" << "--proc" << "/proc"
-                      << "--ro-bind" << fontPath << (libPath + "/converter/AllFonts.js")
-                      << "--ro-bind" << fontSelectionBin << (libPath + "/converter/font_selection.bin")
-                      << "--chdir" << libPath
+                      << "--dev" << "/dev" << "--proc" << "/proc";
+            // Give converter/ its own writable tmpfs overlay inside the
+            // sandbox instead of relying on the real (often root-owned)
+            // install directory allowing a new AllFonts.js/font_selection.bin
+            // mount point to be created under it -- confirmed live: without
+            // a REAL font cache physically present beside x2t, its font
+            // matching badly misresolves some fonts (e.g. substituting an
+            // unrelated icon font for real text) even with m_sAllFontsPath
+            // set correctly in the XML config above, so this isn't optional
+            // cosmetic behavior. bwrap resolves every --ro-bind SOURCE
+            // against the real host filesystem regardless of what's
+            // already mounted in the sandbox under construction, so
+            // re-bind each of converter/'s real top-level entries directly
+            // onto itself: the source read is against the real (still
+            // readable, just not writable) directory, and the target
+            // write succeeds because tmpfs already made that path
+            // writable in the sandbox. Same fix as GTK3's OfficeCore.cpp
+            // -- this is a separate, duplicate implementation of the same
+            // logic.
+            bwrapArgs << "--tmpfs" << converterDir;
+            const QStringList realEntries = QDir(converterDir).entryList(QDir::AllEntries | QDir::NoDotAndDotDot);
+            for (const QString &name : realEntries) {
+                if (name == "AllFonts.js" || name == "font_selection.bin") continue;
+                bwrapArgs << "--ro-bind" << (converterDir + "/" + name) << (converterDir + "/" + name);
+            }
+            bwrapArgs << "--ro-bind" << fontPath << (converterDir + "/AllFonts.js")
+                      << "--ro-bind" << fontSelectionBin << (converterDir + "/font_selection.bin");
+            bwrapArgs << "--chdir" << libPath
                       << x2tBin << configXml.fileName();
             proc.start(bwrapBin, bwrapArgs);
         } else {
@@ -829,8 +854,6 @@ public:
         }
 
         if (proc.waitForFinished(10000)) {
-
-            
             if (QFileInfo::exists(outputPath) && QFileInfo(outputPath).size() > 0) {
                 if (proc.exitCode() != 0) {
                     printf("[OfficeView] x2t exited with %d but generated a valid PDF. Proceeding!\n", proc.exitCode());

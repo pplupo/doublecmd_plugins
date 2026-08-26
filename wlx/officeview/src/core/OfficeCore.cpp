@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <pwd.h>
+#include <dirent.h>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -200,6 +201,23 @@ std::string extensionOf(const std::string &path) {
 bool fileExists(const std::string &path) {
     struct stat st;
     return stat(path.c_str(), &st) == 0;
+}
+
+// Top-level entry names only (not recursive) -- used to symlink a real
+// directory's contents into a tmpfs overlay standing in for it. "." and
+// ".." are excluded.
+std::vector<std::string> listDirTopLevel(const std::string &dir) {
+    std::vector<std::string> names;
+    DIR *d = opendir(dir.c_str());
+    if (!d) return names;
+    struct dirent *entry;
+    while ((entry = readdir(d)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        names.push_back(name);
+    }
+    closedir(d);
+    return names;
 }
 
 long long fileSize(const std::string &path) {
@@ -580,6 +598,7 @@ bool X2TConverter::convertToPdf(const std::string &inputPath, const std::string 
 
     if (!bwrapBin.empty() && !fontPath.empty()) {
         std::string fontSelectionBin = fontPath.substr(0, fontPath.find_last_of('/')) + "/font_selection.bin";
+        std::string converterDir = libPath + "/converter";
         std::vector<std::string> args = {
             "--ro-bind", "/usr", "/usr",
             "--symlink", "usr/lib", "lib",
@@ -590,10 +609,37 @@ bool X2TConverter::convertToPdf(const std::string &inputPath, const std::string 
             "--bind", "/home", "/home",
             "--bind", "/tmp", "/tmp",
             "--dev", "/dev", "--proc", "/proc",
-            "--ro-bind", fontPath, libPath + "/converter/AllFonts.js",
-            "--ro-bind", fontSelectionBin, libPath + "/converter/font_selection.bin",
-            "--chdir", libPath,
-            x2tBin, configPath};
+        };
+        // Give converter/ its own writable tmpfs overlay inside the
+        // sandbox instead of relying on the real (often root-owned)
+        // install directory allowing a new AllFonts.js/font_selection.bin
+        // mount point to be created under it -- confirmed live: without a
+        // REAL font cache physically present beside x2t, its font
+        // matching badly misresolves some fonts (e.g. substituting an
+        // unrelated icon font for real text) even with m_sAllFontsPath
+        // set correctly in the XML config, so this isn't optional
+        // cosmetic behavior. bwrap resolves every --ro-bind SOURCE against
+        // the real host filesystem regardless of what's already been
+        // mounted in the sandbox under construction (confirmed live: an
+        // intermediate "mirror the original elsewhere, symlink back from
+        // there" approach fails with "Can't find source path" because the
+        // mirror destination only exists inside the sandbox's own view,
+        // not on the real host) -- so re-bind each of converter/'s real
+        // top-level entries directly onto itself: the source read is
+        // against the real (still readable, just not writable) directory,
+        // and the target write succeeds because tmpfs already made that
+        // path writable in the sandbox.
+        args.push_back("--tmpfs"); args.push_back(converterDir);
+        for (const auto &name : listDirTopLevel(converterDir)) {
+            if (name == "AllFonts.js" || name == "font_selection.bin") continue;
+            args.push_back("--ro-bind");
+            args.push_back(converterDir + "/" + name);
+            args.push_back(converterDir + "/" + name);
+        }
+        args.push_back("--ro-bind"); args.push_back(fontPath); args.push_back(converterDir + "/AllFonts.js");
+        args.push_back("--ro-bind"); args.push_back(fontSelectionBin); args.push_back(converterDir + "/font_selection.bin");
+        args.push_back("--chdir"); args.push_back(libPath);
+        args.push_back(x2tBin); args.push_back(configPath);
         res = runProcess(bwrapBin, args, 10000, nullptr, &extraEnv);
     } else {
         std::string workDir = libPath + "/converter";
