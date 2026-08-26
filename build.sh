@@ -186,6 +186,15 @@ mkdir -p wlx/markdownview/build
 install -m 644 wlx/markdownview/build/markdownview_qt6.wlx release/wlx/markdownview/
 [ -f wlx/markdownview/build/markdownview_gtk3.wlx ] && install -m 644 wlx/markdownview/build/markdownview_gtk3.wlx release/wlx/markdownview/
 
+# Zip each plugin individually (rather than one big tarball) so a user only
+# has to download the plugin(s) they actually want -- keeps free-tier GitHub
+# release download quotas from being burned on unrelated plugins.
 pushd release
-tar -czpf ../plugins-$(date +%y.%m.%d)-$ARCH.tar.gz *
+for category_dir in */; do
+  for plugin_dir in "$category_dir"*/; do
+    plugin_dir=${plugin_dir%/}
+    plugin_name=$(basename "$plugin_dir")
+    (cd "$plugin_dir" && zip -rq "../../../${plugin_name}-$(date +%y.%m.%d)-$ARCH.zip" .)
+  done
+done
 popd

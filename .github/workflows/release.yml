@@ -24,7 +24,7 @@ jobs:
       run: sudo apt install -y libgtk2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
     - name: Install base build tooling (CMake-based plugins)
-      run: sudo apt install -y build-essential cmake ninja-build meson pkg-config git curl wget zlib1g-dev libssl-dev
+      run: sudo apt install -y build-essential cmake ninja-build meson pkg-config git curl wget zlib1g-dev libssl-dev zip
 
     - name: Install GTK3 + its plugin-specific dependencies
       run: |
@@ -77,10 +77,14 @@ jobs:
     - name: Build packages
       run: ./build.sh
 
+    # Only meaningful on an actual GitHub Release (tag ref) -- a
+    # workflow_dispatch run's github.ref is a branch (e.g. refs/heads/master),
+    # not a tag, so there's no release to attach the zips to.
     - name: Upload binaries to release
+      if: github.event_name == 'release'
       uses: svenstaro/upload-release-action@v2
       with:
-        file: plugins-*.tar.gz
+        file: "*.zip"
         tag: ${{ github.ref }}
         overwrite: true
         file_glob: true
