@@ -3,7 +3,9 @@ name: build-release
 on:
   workflow_dispatch:
   release:
-    types: [released]
+    # "released" alone excludes pre-releases -- also listen for
+    # "prereleased" since you mark early builds as pre-release.
+    types: [released, prereleased]
 
 concurrency:
   group: ${{ github.ref }}
