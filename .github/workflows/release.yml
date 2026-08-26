@@ -11,14 +11,65 @@ concurrency:
 
 jobs:
   build-lin:
-    runs-on: ubuntu-22.04
+    # noble (24.04), not jammy (22.04): the Qt6/KDE Frameworks 6 plugins
+    # (csvview, dbview, diagramview, kpartview, kate, logview, markdownview,
+    # mdk, mpv_wayland, officeview, structview) need apt packages that
+    # jammy's repos don't carry at all.
+    runs-on: ubuntu-24.04
     steps:
     - name: Install Lazarus
-      run: sudo apt install lazarus
+      run: sudo apt install -y lazarus
 
-    - name: Install GTK library 
-      run: sudo apt install libgtk2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-    
+    - name: Install GTK2 library (legacy Pascal/Lazarus plugins)
+      run: sudo apt install -y libgtk2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+    - name: Install base build tooling (CMake-based plugins)
+      run: sudo apt install -y build-essential cmake ninja-build meson pkg-config git curl wget zlib1g-dev libssl-dev
+
+    - name: Install GTK3 + its plugin-specific dependencies
+      run: |
+        sudo apt install -y \
+          libgtk-3-dev \
+          libwebkit2gtk-4.1-dev \
+          libcairomm-1.0-dev \
+          libpangomm-1.4-dev \
+          libfreetype-dev \
+          libfontconfig-dev \
+          librsvg2-dev \
+          libepoxy-dev \
+          libmpv-dev \
+          libxml2-dev
+
+    - name: Install Qt6 + its plugin-specific dependencies
+      run: |
+        sudo apt install -y \
+          qt6-base-dev \
+          qt6-base-dev-tools \
+          qt6-svg-dev \
+          libqt6opengl6-dev \
+          libqt6openglwidgets6-dev \
+          libqt6printsupport6-dev
+
+    - name: Install structview's yaml-cpp dependency
+      run: sudo apt install -y libyaml-cpp-dev
+
+    # Best-effort: KDE Frameworks 6 packaging on a given Ubuntu release can
+    # lag behind Qt6 itself. If these aren't available, kpartview and kate
+    # (the only two plugins that need them) are skipped further down via
+    # `cmake --build . --target <name> || true` rather than failing the
+    # whole workflow.
+    - name: Install KDE Frameworks 6 (kpartview, kate) - best effort
+      continue-on-error: true
+      run: |
+        sudo apt install -y \
+          extra-cmake-modules \
+          libkf6parts-dev \
+          libkf6kio-dev \
+          libkf6coreaddons-dev \
+          libkf6xmlgui-dev \
+          libkf6texteditor-dev \
+          libkf6config-dev
+
     - name: Checkout source
       uses: actions/checkout@v2
 
