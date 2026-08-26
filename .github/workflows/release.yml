@@ -1,10 +1,23 @@
 name: build-release
 
 on:
+  # `release` events don't reliably reach Actions on a forked repo (this repo
+  # is a fork of doublecmd/plugins) -- confirmed empirically: two published
+  # releases here, zero release-triggered runs. workflow_dispatch is the
+  # trigger that's actually confirmed to work, so it takes an optional tag
+  # input: leave blank for a plain build-only smoke test, or fill in an
+  # existing release's tag to also upload zips + set its release notes.
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to upload zips to (leave blank to just build)"
+        required: false
+        type: string
   release:
     # "released" alone excludes pre-releases -- also listen for
-    # "prereleased" since you mark early builds as pre-release.
+    # "prereleased" since you mark early builds as pre-release. Kept even
+    # though it isn't currently firing, in case GitHub's fork behavior here
+    # changes or this repo stops being treated as a fork.
     types: [released, prereleased]
 
 concurrency:
@@ -82,22 +95,31 @@ jobs:
     - name: Build packages
       run: ./build.sh
 
-    # Only meaningful on an actual GitHub Release (tag ref) -- a
-    # workflow_dispatch run's github.ref is a branch (e.g. refs/heads/master),
-    # not a tag, so there's no release to attach the zips to.
+    # Resolves to the release tag whichever way we got triggered: the real
+    # tag on a `release` event, or whatever was typed into the manual
+    # workflow_dispatch input. Empty on a plain build-only dispatch run.
+    - name: Determine target release tag
+      id: target
+      run: |
+        if [ "${{ github.event_name }}" = "release" ]; then
+          echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Upload binaries to release
-      if: github.event_name == 'release'
+      if: steps.target.outputs.tag != ''
       uses: svenstaro/upload-release-action@v2
       with:
         file: "*.zip"
-        tag: ${{ github.ref }}
+        tag: ${{ steps.target.outputs.tag }}
         overwrite: true
         file_glob: true
 
     - name: Set release notes (plugin list, toolkit, docs links)
-      if: github.event_name == 'release'
+      if: steps.target.outputs.tag != ''
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        ./.github/generate_release_notes.sh "$GITHUB_REPOSITORY" "${{ github.ref_name }}" > /tmp/notes.md
-        gh release edit "${{ github.ref_name }}" --notes-file /tmp/notes.md
+        ./.github/generate_release_notes.sh "$GITHUB_REPOSITORY" "${{ steps.target.outputs.tag }}" > /tmp/notes.md
+        gh release edit "${{ steps.target.outputs.tag }}" --notes-file /tmp/notes.md
