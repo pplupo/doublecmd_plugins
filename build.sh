@@ -189,13 +189,17 @@ install -m 644 wlx/markdownview/build/markdownview_qt6.wlx release/wlx/markdownv
 
 # Zip each plugin individually (rather than one big tarball) so a user only
 # has to download the plugin(s) they actually want -- keeps free-tier GitHub
-# release download quotas from being burned on unrelated plugins.
+# release download quotas from being burned on unrelated plugins. READMEs and
+# screenshots stay in release/ (for anyone browsing the build output) but are
+# excluded from the zip itself -- they're documentation, not runtime files,
+# and only add dead weight to the download.
 pushd release
 for category_dir in */; do
   for plugin_dir in "$category_dir"*/; do
     plugin_dir=${plugin_dir%/}
     plugin_name=$(basename "$plugin_dir")
-    (cd "$plugin_dir" && zip -rq "../../../${plugin_name}-$(date +%y.%m.%d)-$ARCH.zip" .)
+    (cd "$plugin_dir" && zip -rq "../../../${plugin_name}-$(date +%y.%m.%d)-$ARCH.zip" . \
+      -x "*.md" "*.png" "*.jpg" "*.jpeg" "*.gif")
   done
 done
 popd

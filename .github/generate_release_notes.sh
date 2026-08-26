@@ -49,7 +49,7 @@ row wlx/kpartview     "Qt6 + KDE Frameworks 6" "Universal KDE KParts host (Okula
 row wlx/officeview    "GTK3 + Qt6"       "MS Office / OpenDocument file preview"
 row wlx/logview       "GTK3 + Qt6"       "Large log file viewer with search/filter"
 row wlx/mpv_wayland   "GTK3 + Qt6"       "Video playback via libmpv"
-row wlx/kate          "Qt6 + KDE Frameworks 6" "KTextEditor-based code preview/editing"
+row wlx/kate          "Qt6 + KDE Frameworks 6" "Text editor with syntax highlighting"
 row wlx/diagramview   "GTK3 + Qt6"       "Mermaid/PlantUML diagram viewer"
 row wlx/mdk           "GTK3 + Qt6"       "Multimedia preview via MDK SDK"
 row wlx/markdownview  "GTK3 + Qt6"       "Rich Markdown preview"
