@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 :: Build rclone WFX plugin on Windows
-:: Copyright (C) 2026 Miklos Mukka Szel <contact@miklos-szel.com>
+:: Copyright (C) 2026 Miklos Mukka Szel <hello@miklos-szel.com>
 :: Requires Lazarus IDE installed
 ::
 :: Usage:

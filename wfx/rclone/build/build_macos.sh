@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build rclone WFX plugin on macOS using Free Pascal
-# Copyright (C) 2026 Miklos Mukka Szel <contact@miklos-szel.com>
+# Copyright (C) 2026 Miklos Mukka Szel <hello@miklos-szel.com>
 #
 # Usage:
 #   ./build_macos.sh         Build the plugin
@@ -11,7 +11,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SRC_DIR="$PLUGIN_DIR/src"
-SDK_DIR="$PLUGIN_DIR/../../../sdk"
+SDK_DIR="$PLUGIN_DIR/../../sdk"
 OUTPUT="$PLUGIN_DIR/rclone.wfx"
 LIB_DIR="$PLUGIN_DIR/lib"
 
