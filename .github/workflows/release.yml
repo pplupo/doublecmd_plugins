@@ -40,15 +40,16 @@ jobs:
           libmpv-dev \
           libxml2-dev
 
+    # qt6-base-dev already ships the QtOpenGLWidgets/QtPrintSupport headers on
+    # noble -- there's no separate -dev package for those modules, only
+    # runtime libqt6*t64 packages, which qt6-base-dev pulls in as deps anyway.
     - name: Install Qt6 + its plugin-specific dependencies
       run: |
         sudo apt install -y \
           qt6-base-dev \
           qt6-base-dev-tools \
           qt6-svg-dev \
-          libqt6opengl6-dev \
-          libqt6openglwidgets6-dev \
-          libqt6printsupport6-dev
+          libqt6opengl6-dev
 
     - name: Install structview's yaml-cpp dependency
       run: sudo apt install -y libyaml-cpp-dev
