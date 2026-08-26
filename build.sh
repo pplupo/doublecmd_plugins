@@ -111,6 +111,7 @@ mkdir -p release/wlx/sourceview
 mkdir -p wlx/sourceview/build
 (cd wlx/sourceview/build && cmake .. && make)
 install -m 644 wlx/sourceview/build/sourceview_gtk3.wlx release/wlx/sourceview/
+install -m 644 wlx/sourceview/*.md release/wlx/sourceview/
 
 # kpartview: Qt6/KDE Frameworks 6 only (KParts has no GTK3 equivalent).
 # Tolerant of failure: KF6 packaging availability varies by distro/runner,
