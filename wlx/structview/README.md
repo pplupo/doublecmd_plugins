@@ -15,12 +15,18 @@ This plugin ships as **two independent native builds** — one for DC's **GTK3**
 - **Open Externally** — launches the file in the system's default external application (see shortcut difference below)
 - **Word wrap** and **grid lines** toggles
 
+![](/home/pplupo/.config/marktext/images/2026-08-26-15-50-19-structview_json.png)
+
+![](/home/pplupo/.config/marktext/images/2026-08-26-15-50-26-structview_xml.png)
+
+![](/home/pplupo/.config/marktext/images/2026-08-26-15-50-35-structview_cbor_edit.png)
+
 ## Feature Differences (GTK3 vs Qt6)
 
-| | GTK3 | Qt6 |
-|---|---|---|
-| Open Externally shortcut | **`Ctrl+E`** — DC's GTK3 build treats `Ctrl+O` as a hardcoded hotkey that a plugin's key-snooper cannot preempt, so this variant deliberately uses a different binding | **`Ctrl+O`** |
-| Encoding auto-detection | **Not implemented** — files are read as-is, no non-UTF-8 encoding conversion | Detects file encoding via `EncodingUtils`/enca and auto-converts non-UTF-8 files |
+|                          | GTK3                                                                                                                                                                   | Qt6                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Open Externally shortcut | **`Ctrl+E`** — DC's GTK3 build treats `Ctrl+O` as a hardcoded hotkey that a plugin's key-snooper cannot preempt, so this variant deliberately uses a different binding | **`Ctrl+O`**                                                                     |
+| Encoding auto-detection  | **Not implemented** — files are read as-is, no non-UTF-8 encoding conversion                                                                                           | Detects file encoding via `EncodingUtils`/enca and auto-converts non-UTF-8 files |
 
 Everything else — JSON/XML/INI parsing and editing, Find, undo/redo, Save, Word wrap/grid lines — is implemented equivalently in both variants via the shared `structview_core` library.
 
@@ -62,6 +68,7 @@ structview_gtk3.wlx (shared library)
 ## Building
 
 ### Prerequisites (both variants)
+
 - CMake ≥ 3.20
 - C++17 compiler
 
@@ -101,16 +108,16 @@ EXT="JSON" | EXT="XML" | EXT="INI"
 
 ## Keyboard Shortcuts
 
-| Shortcut | Action | GTK3 | Qt6 |
-|----------|--------|:---:|:---:|
-| Ctrl+S | Save file | ✅ | ✅ |
-| Ctrl+Z | Undo | ✅ | ✅ |
-| Ctrl+Shift+Z / Ctrl+Y | Redo | ✅ | ✅ |
-| Ctrl+F | Toggle Find panel | ✅ | ✅ |
-| Ctrl+C | Copy selection | ✅ | ✅ |
-| Ctrl+V | Paste | ✅ | ✅ |
-| Ctrl+E | Open Externally | ✅ | — |
-| Ctrl+O | Open Externally | — | ✅ |
+| Shortcut              | Action            | GTK3 | Qt6 |
+| --------------------- | ----------------- |:----:|:---:|
+| Ctrl+S                | Save file         | ✅    | ✅   |
+| Ctrl+Z                | Undo              | ✅    | ✅   |
+| Ctrl+Shift+Z / Ctrl+Y | Redo              | ✅    | ✅   |
+| Ctrl+F                | Toggle Find panel | ✅    | ✅   |
+| Ctrl+C                | Copy selection    | ✅    | ✅   |
+| Ctrl+V                | Paste             | ✅    | ✅   |
+| Ctrl+E                | Open Externally   | ✅    | —   |
+| Ctrl+O                | Open Externally   | —    | ✅   |
 
 ## Future
 
