@@ -16,6 +16,23 @@ option(ENABLE_GTK3 "Build GTK3 plugin variant" OFF)
 
 set(MDK_SDK_INCLUDE "$ENV{HOME}/mdk-sdk/include" CACHE PATH "Path to the MDK SDK include directory")
 
+# CI (and any dev machine without the SDK manually installed to
+# ~/mdk-sdk) won't have MDK_SDK_INCLUDE populated -- fetch just the
+# headers-only Linux SDK tarball to compile against. libmdk.so itself is
+# loaded via dlopen() at runtime (see MdkEngine.cpp), not linked here, so
+# only the C headers are actually needed at build time.
+if(NOT EXISTS "${MDK_SDK_INCLUDE}/mdk/c/Player.h")
+    include(FetchContent)
+    message(STATUS "mdk: MDK SDK headers not found at ${MDK_SDK_INCLUDE} -- fetching mdk-sdk v0.38.0 (linux-x64) for build-time declarations")
+    FetchContent_Declare(mdk_sdk_headers
+        URL https://github.com/wang-bin/mdk-sdk/releases/download/v0.38.0/mdk-sdk-linux-x64.tar.xz
+        URL_HASH SHA256=9ce29b1c29aa2d051e52f50af8a1578ab80f6d17955a2935514e1c69b8a23d3e
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_Populate(mdk_sdk_headers)
+    set(MDK_SDK_INCLUDE "${mdk_sdk_headers_SOURCE_DIR}/include")
+endif()
+
 # --- Shared core: dlopen-based libmdk wrapper, zero Qt/GTK dependency ---
 # See §2.1 of the GTK porting plan — this must stay Qt-free; do not add
 # find_package(Qt6 ...) or Qt6::* to this target.

@@ -55,7 +55,7 @@ function FsDisconnectW(DisconnectRoot: PWideChar): BOOL; dcpcall;
 procedure FsGetDefRootName(DefRootName: PAnsiChar; MaxLen: Integer); dcpcall;
 procedure FsSetDefaultParams(dps: pFsDefaultParamStruct); dcpcall;
 function FsGetBackgroundFlags: Integer; dcpcall;
-function FsExtractCustomIconW(RemoteName: PWideChar; ExtractFlags: Integer; TheIcon: PWfxIcon): Integer; dcpcall;
+function FsExtractCustomIconW(RemoteName: PWideChar; ExtractFlags: Integer; var TheIcon: hicon): Integer; dcpcall;
 
 { Extension API }
 procedure ExtensionInitialize(StartupInfo: PExtensionStartupInfo); dcpcall;
@@ -470,26 +470,13 @@ begin
   Result := BG_DOWNLOAD or BG_UPLOAD;
 end;
 
-function FsExtractCustomIconW(RemoteName: PWideChar; ExtractFlags: Integer; TheIcon: PWfxIcon): Integer; dcpcall;
-var
-  RemoteStr: UnicodeString;
-  IconPath: AnsiString;
+function FsExtractCustomIconW(RemoteName: PWideChar; ExtractFlags: Integer; var TheIcon: hicon): Integer; dcpcall;
 begin
+  // This SDK's FsExtractCustomIconW expects a loaded icon handle (hicon) on
+  // extraction, not a file path -- and this plugin has no icon-loading code
+  // to produce one, so it always defers to DC's default icon rather than
+  // returning FS_ICON_EXTRACTED with an unset handle.
   Result := FS_ICON_USEDEFAULT;
-  RemoteStr := RemoteName;
-
-  // Check if at root level - show rclone icon for all remotes
-  if (ExtractFileDir(RemoteStr) = PathDelim) then
-  begin
-    IconPath := gStartupInfo.PluginDir + 'rclone.ico';
-
-    if FileExists(IconPath) then
-    begin
-      Result := FS_ICON_EXTRACTED;
-      TheIcon^.Format := FS_ICON_FORMAT_FILE;
-      StrPLCopy(RemoteName, UTF8ToWide(IconPath), MAX_PATH - 1);
-    end;
-  end;
 end;
 
 procedure ExtensionInitialize(StartupInfo: PExtensionStartupInfo); dcpcall;

@@ -394,16 +394,17 @@ private:
 LogFilterProxy::LogFilterProxy(QObject *parent)
     : QSortFilterProxyModel(parent) {}
 
+// beginFilterChange()/endFilterChange() are Qt 6.7+ only (the runner's
+// qt6-base-dev ships 6.4.2) -- invalidateFilter() is the pre-6.7 equivalent
+// for telling the proxy its filtering criteria changed.
 void LogFilterProxy::setRegexFilterActive(bool active) {
-    beginFilterChange();
     m_regexActive = active;
-    endFilterChange();
+    invalidateFilter();
 }
 
 void LogFilterProxy::setTimeFilterActive(bool active) {
-    beginFilterChange();
     m_timeActive = active;
-    endFilterChange();
+    invalidateFilter();
 }
 
 void LogFilterProxy::setTimeRange(const QDateTime &start, const QDateTime &end) {
@@ -412,15 +413,13 @@ void LogFilterProxy::setTimeRange(const QDateTime &start, const QDateTime &end) 
         m_timeEnd = end;
         return;
     }
-    beginFilterChange();
     m_timeStart = start;
     m_timeEnd = end;
-    endFilterChange();
+    invalidateFilter();
 }
 
 void LogFilterProxy::refreshFilter() {
-    beginFilterChange();
-    endFilterChange();
+    invalidateFilter();
 }
 
 bool LogFilterProxy::filterAcceptsRow(int sourceRow,

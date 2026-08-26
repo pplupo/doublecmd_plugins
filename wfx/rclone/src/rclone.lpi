@@ -30,8 +30,8 @@
             <Filename Value="..\rclone.wfx" ApplyConventions="False"/>
           </Target>
           <SearchPaths>
-            <IncludeFiles Value="$(ProjOutDir);..\..\..\..\sdk"/>
-            <OtherUnitFiles Value="..\..\..\..\sdk"/>
+            <IncludeFiles Value="$(ProjOutDir);..\..\..\sdk"/>
+            <OtherUnitFiles Value="..\..\..\sdk"/>
             <UnitOutputDirectory Value="..\lib"/>
           </SearchPaths>
           <Conditionals Value="if (TargetCPU &lt;> &apos;arm&apos;) then
@@ -124,8 +124,8 @@ end;"/>
       <Filename Value="..\rclone.wfx" ApplyConventions="False"/>
     </Target>
     <SearchPaths>
-      <IncludeFiles Value="$(ProjOutDir);..\..\..\..\sdk"/>
-      <OtherUnitFiles Value="..\..\..\..\sdk"/>
+      <IncludeFiles Value="$(ProjOutDir);..\..\..\sdk"/>
+      <OtherUnitFiles Value="..\..\..\sdk"/>
       <UnitOutputDirectory Value="..\lib"/>
     </SearchPaths>
     <Conditionals Value="if (TargetCPU &lt;> &apos;arm&apos;) then

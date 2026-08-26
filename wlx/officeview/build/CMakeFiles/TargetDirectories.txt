@@ -1,5 +1,0 @@
-/home/pplupo/repos/plugins/wlx/officeview/build/CMakeFiles/officeview.dir
-/home/pplupo/repos/plugins/wlx/officeview/build/CMakeFiles/edit_cache.dir
-/home/pplupo/repos/plugins/wlx/officeview/build/CMakeFiles/rebuild_cache.dir
-/home/pplupo/repos/plugins/wlx/officeview/build/CMakeFiles/officeview_autogen_timestamp_deps.dir
-/home/pplupo/repos/plugins/wlx/officeview/build/CMakeFiles/officeview_autogen.dir
