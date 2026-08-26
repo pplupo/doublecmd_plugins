@@ -3,7 +3,7 @@
    -------------------------------------------------------------------------
    WFX plugin for working with rclone remotes
 
-   Copyright (C) 2026 Miklos Mukka Szel <contact@miklos-szel.com>
+   Copyright (C) 2026 Miklos Mukka Szel <hello@miklos-szel.com>
 
    This library is free software; you can redistribute it and/or
    modify it under the terms of the GNU Lesser General Public
@@ -55,7 +55,7 @@ function FsDisconnectW(DisconnectRoot: PWideChar): BOOL; dcpcall;
 procedure FsGetDefRootName(DefRootName: PAnsiChar; MaxLen: Integer); dcpcall;
 procedure FsSetDefaultParams(dps: pFsDefaultParamStruct); dcpcall;
 function FsGetBackgroundFlags: Integer; dcpcall;
-function FsExtractCustomIconW(RemoteName: PWideChar; ExtractFlags: Integer; var TheIcon: hicon): Integer; dcpcall;
+function FsExtractCustomIconW(RemoteName: PWideChar; ExtractFlags: Integer; TheIcon: PWfxIcon): Integer; dcpcall;
 
 { Extension API }
 procedure ExtensionInitialize(StartupInfo: PExtensionStartupInfo); dcpcall;
@@ -83,6 +83,27 @@ type
 
 var
   gRcloneCli: TRcloneCli;
+
+{ Report a failure to the user through Double Commander's log window. Without this a
+  failed listing is indistinguishable from an empty directory, since both leave the
+  panel empty. }
+procedure LogError(const Operation: UnicodeString; const RcloneError: RawByteString);
+var
+  Message: UnicodeString;
+  I: Integer;
+begin
+  if not Assigned(gLogProc) then Exit;
+  Message := Operation;
+  if RcloneError <> '' then
+  begin
+    Message := Message + ': ' + UTF8ToWide(RcloneError);
+    // Keep it to a single log line
+    for I := 1 to Length(Message) do
+      if (Message[I] = #13) or (Message[I] = #10) then
+        Message[I] := ' ';
+  end;
+  gLogProc(gPluginNr, msgtype_importanterror, PWideChar(Message));
+end;
 
 function ProgressCallback(SourceName, TargetName: PWideChar;
   PercentDone: Integer): Integer;
@@ -178,7 +199,7 @@ begin
   if IsRootPath(PathStr) then
   begin
     ListRec^.RemoteList := gRcloneCli.ListRemotes;
-    if ListRec^.RemoteList.Count > 0 then
+    if (ListRec^.RemoteList <> nil) and (ListRec^.RemoteList.Count > 0) then
     begin
       FillRemoteFindData(FindData, UTF8ToWide(ListRec^.RemoteList[0]));
       ListRec^.Index := 1;
@@ -186,6 +207,10 @@ begin
     end
     else
     begin
+      // nil means rclone itself failed; an empty list just means no remotes
+      if ListRec^.RemoteList = nil then
+        LogError('rclone listremotes failed', gRcloneCli.LastError);
+      FreeAndNil(ListRec^.RemoteList);
       Dispose(ListRec);
     end;
   end
@@ -206,10 +231,13 @@ begin
     end
     else
     begin
-      // Empty directory or error - return invalid handle
-      // but first check if we got any data at all
-      if ListRec^.FileList <> nil then
-        ListRec^.FileList.Free;
+      // Either way there is nothing to enumerate, so the handle stays invalid and
+      // Double Commander shows an empty panel. Only a nil list is an actual failure,
+      // and that one gets reported rather than passed off as an empty directory.
+      if ListRec^.FileList = nil then
+        LogError('rclone lsjson failed for ' + BuildRclonePath(RemoteName, RemotePath),
+                 gRcloneCli.LastError);
+      FreeAndNil(ListRec^.FileList);
       Dispose(ListRec);
     end;
   end;
@@ -470,13 +498,26 @@ begin
   Result := BG_DOWNLOAD or BG_UPLOAD;
 end;
 
-function FsExtractCustomIconW(RemoteName: PWideChar; ExtractFlags: Integer; var TheIcon: hicon): Integer; dcpcall;
+function FsExtractCustomIconW(RemoteName: PWideChar; ExtractFlags: Integer; TheIcon: PWfxIcon): Integer; dcpcall;
+var
+  RemoteStr: UnicodeString;
+  IconPath: AnsiString;
 begin
-  // This SDK's FsExtractCustomIconW expects a loaded icon handle (hicon) on
-  // extraction, not a file path -- and this plugin has no icon-loading code
-  // to produce one, so it always defers to DC's default icon rather than
-  // returning FS_ICON_EXTRACTED with an unset handle.
   Result := FS_ICON_USEDEFAULT;
+  RemoteStr := RemoteName;
+
+  // Check if at root level - show rclone icon for all remotes
+  if (ExtractFileDir(RemoteStr) = PathDelim) then
+  begin
+    IconPath := gStartupInfo.PluginDir + 'rclone.ico';
+
+    if FileExists(IconPath) then
+    begin
+      Result := FS_ICON_EXTRACTED;
+      TheIcon^.Format := FS_ICON_FORMAT_FILE;
+      StrPLCopy(RemoteName, UTF8ToWide(IconPath), MAX_PATH - 1);
+    end;
+  end;
 end;
 
 procedure ExtensionInitialize(StartupInfo: PExtensionStartupInfo); dcpcall;

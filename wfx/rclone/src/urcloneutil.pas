@@ -3,7 +3,7 @@
    -------------------------------------------------------------------------
    WFX plugin for working with rclone remotes
 
-   Copyright (C) 2026 Miklos Mukka Szel <contact@miklos-szel.com>
+   Copyright (C) 2026 Miklos Mukka Szel <hello@miklos-szel.com>
 
    This library is free software; you can redistribute it and/or
    modify it under the terms of the GNU Lesser General Public
@@ -36,8 +36,8 @@ function BuildRclonePath(const RemoteName, RemotePath: UnicodeString): UnicodeSt
 function IsRootPath(const Path: UnicodeString): Boolean;
 
 { String conversion utilities }
-function WideToUTF8(const S: UnicodeString): AnsiString;
-function UTF8ToWide(const S: AnsiString): UnicodeString;
+function WideToUTF8(const S: UnicodeString): RawByteString;
+function UTF8ToWide(const S: RawByteString): UnicodeString;
 function StrToFileTime(const ISOTime: AnsiString): TFileTime;
 
 { File attribute helpers }
@@ -97,8 +97,12 @@ begin
   else
     Result := '';
 
-  // Convert backslashes to forward slashes for rclone
-  Result := StringReplace(Result, '\', '/', [rfReplaceAll]);
+  // Convert backslashes to forward slashes for rclone. Done in place rather than with
+  // StringReplace, which has no UnicodeString overload and would round-trip the path
+  // through the system code page.
+  for I := 1 to Length(Result) do
+    if Result[I] = '\' then
+      Result[I] := '/';
 end;
 
 function BuildRclonePath(const RemoteName, RemotePath: UnicodeString): UnicodeString;
@@ -114,14 +118,41 @@ begin
   Result := (Path = '/') or (Path = '\') or (Path = '');
 end;
 
-function WideToUTF8(const S: UnicodeString): AnsiString;
+{ Convert UTF-16 to UTF-8 bytes.
+
+  Uses the System unit primitives rather than UTF8Encode/UTF8Decode on purpose: those
+  go through the widestring manager, which without cwstring maps every code point above
+  U+007F to '?'. RawByteString (CP_NONE) keeps the compiler from inserting an implicit
+  code page conversion at the call sites. }
+function WideToUTF8(const S: UnicodeString): RawByteString;
+var
+  Len: SizeUInt;
 begin
-  Result := UTF8Encode(S);
+  Result := '';
+  if S = '' then Exit;
+  // Worst case is 3 bytes per UTF-16 code unit, plus the terminating #0
+  SetLength(Result, Length(S) * 3 + 1);
+  Len := System.UnicodeToUtf8(PAnsiChar(Result), Length(Result), PUnicodeChar(S), Length(S));
+  if Len > 1 then
+    SetLength(Result, Len - 1)  // Len counts the terminating #0
+  else
+    Result := '';
 end;
 
-function UTF8ToWide(const S: AnsiString): UnicodeString;
+{ Convert UTF-8 bytes to UTF-16. See the note on WideToUTF8. }
+function UTF8ToWide(const S: RawByteString): UnicodeString;
+var
+  Len: SizeUInt;
 begin
-  Result := UTF8Decode(S);
+  Result := '';
+  if S = '' then Exit;
+  // UTF-8 never expands: at most one UTF-16 code unit per byte, plus the terminating #0
+  SetLength(Result, Length(S) + 1);
+  Len := System.Utf8ToUnicode(PUnicodeChar(Result), Length(Result), PAnsiChar(S), Length(S));
+  if Len > 1 then
+    SetLength(Result, Len - 1)  // Len counts the terminating #0
+  else
+    Result := '';
 end;
 
 function StrToFileTime(const ISOTime: AnsiString): TFileTime;

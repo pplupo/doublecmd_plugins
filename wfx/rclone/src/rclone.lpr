@@ -5,7 +5,7 @@ library rclone;
    -------------------------------------------------------------------------
    WFX plugin for working with rclone remotes
 
-   Copyright (C) 2026 Miklos Mukka Szel <contact@miklos-szel.com>
+   Copyright (C) 2026 Miklos Mukka Szel <hello@miklos-szel.com>
 
    This library is free software; you can redistribute it and/or
    modify it under the terms of the GNU Lesser General Public
@@ -55,4 +55,14 @@ exports
 {$R *.res}
 
 begin
+  { A plugin is a shared library with its own RTL instance, so it gets the RTL's
+    default code page (CP_ACP) rather than the host's. Combined with the fallback
+    widestring manager (no cwstring), every UnicodeString -> AnsiString conversion
+    would then replace code points above U+007F with '?' - which is what fpjson does
+    internally while scanning the JSON that rclone prints. Declaring UTF-8 up front
+    keeps non-ASCII file names intact on the way in and out. }
+  DefaultSystemCodePage := CP_UTF8;
+  DefaultUnicodeCodePage := CP_UTF8;
+  DefaultFileSystemCodePage := CP_UTF8;
+  DefaultRTLFileSystemCodePage := CP_UTF8;
 end.

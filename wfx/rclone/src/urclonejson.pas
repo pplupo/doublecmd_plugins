@@ -3,7 +3,7 @@
    -------------------------------------------------------------------------
    WFX plugin for working with rclone remotes - JSON parsing
 
-   Copyright (C) 2026 Miklos Mukka Szel <contact@miklos-szel.com>
+   Copyright (C) 2026 Miklos Mukka Szel <hello@miklos-szel.com>
 
    This library is free software; you can redistribute it and/or
    modify it under the terms of the GNU Lesser General Public
@@ -46,37 +46,48 @@ type
     property Items[Index: Integer]: TRcloneFile read GetItem; default;
   end;
 
-{ Parse rclone lsjson output }
-function ParseLsJson(const JsonOutput: AnsiString): TRcloneFileList;
+{ Parse rclone lsjson output (raw UTF-8 bytes as printed by rclone) }
+function ParseLsJson(const JsonOutput: RawByteString): TRcloneFileList;
 
 { Parse rclone listremotes output }
-function ParseListRemotes(const Output: AnsiString): TStringList;
+function ParseListRemotes(const Output: RawByteString): TStringList;
 
 implementation
 
 uses
-  fpjson, jsonparser;
+  fpjson, jsonparser, uRcloneUtil;
 
 function TRcloneFileList.GetItem(Index: Integer): TRcloneFile;
 begin
   Result := TRcloneFile(inherited Items[Index]);
 end;
 
-function ParseLsJson(const JsonOutput: AnsiString): TRcloneFileList;
+function ParseLsJson(const JsonOutput: RawByteString): TRcloneFileList;
 var
   JsonData: TJSONData;
   JsonArray: TJSONArray;
   JsonObj: TJSONObject;
-  I: Integer;
+  I, StartPos: Integer;
   RcloneFile: TRcloneFile;
+  Text: RawByteString;
 begin
   Result := TRcloneFileList.Create(True);
 
-  if Trim(JsonOutput) = '' then
+  Text := Trim(JsonOutput);
+  if Text = '' then
     Exit;
 
+  // Be tolerant of anything printed before the array (log lines, warnings)
+  if Text[1] <> '[' then
+  begin
+    StartPos := Pos('[', Text);
+    if StartPos = 0 then
+      Exit;
+    Text := Copy(Text, StartPos, Length(Text) - StartPos + 1);
+  end;
+
   try
-    JsonData := GetJSON(JsonOutput);
+    JsonData := GetJSON(Text);
     try
       if not (JsonData is TJSONArray) then
         Exit;
@@ -91,9 +102,10 @@ begin
         JsonObj := TJSONObject(JsonArray.Items[I]);
         RcloneFile := TRcloneFile.Create;
 
-        // Parse Name
+        // Parse Name. The explicit TJSONStringType cast picks the byte-string
+        // overload of Get, so the name arrives as UTF-8 and is decoded exactly once.
         if JsonObj.Find('Name') <> nil then
-          RcloneFile.Name := UTF8Decode(JsonObj.Get('Name', ''));
+          RcloneFile.Name := UTF8ToWide(JsonObj.Get('Name', TJSONStringType('')));
 
         // Parse Size
         if JsonObj.Find('Size') <> nil then
@@ -121,11 +133,11 @@ begin
   end;
 end;
 
-function ParseListRemotes(const Output: AnsiString): TStringList;
+function ParseListRemotes(const Output: RawByteString): TStringList;
 var
   Lines: TStringList;
   I: Integer;
-  RemoteName: AnsiString;
+  RemoteName: RawByteString;
 begin
   Result := TStringList.Create;
   Lines := TStringList.Create;
@@ -134,11 +146,12 @@ begin
     for I := 0 to Lines.Count - 1 do
     begin
       RemoteName := Trim(Lines[I]);
-      // rclone listremotes outputs "remotename:" - remove the trailing colon
-      if (Length(RemoteName) > 0) and (RemoteName[Length(RemoteName)] = ':') then
-        RemoteName := Copy(RemoteName, 1, Length(RemoteName) - 1);
-      if RemoteName <> '' then
-        Result.Add(RemoteName);
+      // rclone listremotes outputs "remotename:" - anything without the
+      // trailing colon is not a remote (e.g. a stray log line)
+      if (Length(RemoteName) < 2) or (RemoteName[Length(RemoteName)] <> ':') then
+        Continue;
+      RemoteName := Copy(RemoteName, 1, Length(RemoteName) - 1);
+      Result.Add(RemoteName);
     end;
   finally
     Lines.Free;
