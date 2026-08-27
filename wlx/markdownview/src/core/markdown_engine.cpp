@@ -18,28 +18,6 @@ namespace MarkdownEngine {
 
 namespace {
 
-// ── Diagnostics ──────────────────────────────────────────────────────────
-// Logs to the project scratch dir (survives redeploys, unlike the deployed
-// config dir) so a live crash can be correlated with the last thing this
-// plugin did. Found via a debug build + GDB harness that the field crash was
-// a SIGSEGV inside pangomm (missing Pango::init(), fixed in
-// gtk3/latex_render_cairo.cpp) -- a hardware fault, not a thrown exception,
-// so it could never have been caught by a try/catch here. This logging is
-// the general-purpose safety net for whatever's next: the last line written
-// before a crash is the diagnosis.
-#define MV_LOG_PATH "/home/pplupo/repos/plugins/scratch/markdownview_debug.log"
-
-void mvLog(const char *fmt, ...) {
-    FILE *f = fopen(MV_LOG_PATH, "a");
-    if (!f) return;
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
-
 bool fileExists(const std::string &path) { struct stat st; return stat(path.c_str(), &st) == 0; }
 
 std::string readFileUtf8(const std::string &path) {
@@ -305,23 +283,18 @@ std::string parseMarkdownToHtml(const std::string &markdown) {
 // --- Fenced code block post-processing: mermaid/plantuml -> rendered image ---
 
 std::string renderDiagramImgTag(const std::string &lang, const std::string &code, bool darkMode) {
-    mvLog("[renderDiagramImgTag] ENTER lang='%s' code(%zu chars)", lang.c_str(), code.size());
     std::string svg;
     if (lang == "mermaid") {
         svg = DiagramRender::renderMermaidWeb(code, darkMode);
-        mvLog("[renderDiagramImgTag] renderMermaidWeb -> %zu bytes", svg.size());
         if (!svg.empty()) svg = DiagramRender::fixMermaidSvgText(svg, darkMode);
     } else { // plantuml / puml
         svg = DiagramRender::renderPlantUmlWeb(code, darkMode);
-        mvLog("[renderDiagramImgTag] renderPlantUmlWeb -> %zu bytes", svg.size());
         if (!svg.empty() && darkMode) svg = DiagramRender::fixPlantUmlSvgDark(svg);
     }
-    if (svg.empty()) { mvLog("[renderDiagramImgTag] empty svg, returning empty tag"); return {}; }
+    if (svg.empty()) return {};
 
     int w = 0, h = 0;
-    mvLog("[renderDiagramImgTag] calling svgToHighDpiPng...");
     std::vector<uint8_t> png = DiagramRender::svgToHighDpiPng(svg, 2.0f, darkMode, w, h);
-    mvLog("[renderDiagramImgTag] svgToHighDpiPng -> %zu bytes (w=%d h=%d)", png.size(), w, h);
     if (png.empty()) return {};
 
     std::string b64 = base64Encode(png);
@@ -402,10 +375,8 @@ std::string replaceDiagramBlocks(const std::string &htmlIn, bool darkMode) {
 // post-processed by the consumer. That's us.
 
 std::string renderMathTag(const std::string &tex, bool isDisplay, bool darkMode) {
-    mvLog("[renderMathTag] ENTER isDisplay=%d tex(%zu chars)='%.100s'", (int)isDisplay, tex.size(), tex.c_str());
     int w = 0, h = 0;
     std::vector<uint8_t> png = renderLatexToPng(tex, darkMode, w, h);
-    mvLog("[renderMathTag] renderLatexToPng returned %zu bytes (w=%d h=%d)", png.size(), w, h);
     if (png.empty()) {
         // Fallback: plain text, same shape as the original md4qt-based code's
         // non-LaTeX/parse-failure fallback. `tex` is the raw (unescaped)
@@ -845,17 +816,11 @@ std::string processFootnotes(const std::string &htmlIn) {
 }
 
 std::string renderMarkdown(const std::string &markdown, bool darkMode, const std::string &customCssPath) {
-    mvLog("[renderMarkdown] ENTER markdown.size()=%zu darkMode=%d", markdown.size(), (int)darkMode);
     std::string html = parseMarkdownToHtml(markdown);
-    mvLog("[renderMarkdown] parseMarkdownToHtml -> %zu bytes", html.size());
     html = processFootnotes(html);
-    mvLog("[renderMarkdown] processFootnotes -> %zu bytes", html.size());
     html = replaceDiagramBlocks(html, darkMode);
-    mvLog("[renderMarkdown] replaceDiagramBlocks -> %zu bytes", html.size());
     html = replaceMathTags(html, darkMode);
-    mvLog("[renderMarkdown] replaceMathTags -> %zu bytes", html.size());
     std::string result = postProcessHtml(html, darkMode, customCssPath);
-    mvLog("[renderMarkdown] EXIT postProcessHtml -> %zu bytes", result.size());
     return result;
 }
 
@@ -864,9 +829,7 @@ std::string renderMarkdown(const std::string &markdown, bool darkMode, const std
 void init() {
     static bool microtex_initialized = false;
     if (!microtex_initialized) {
-        mvLog("[init] calling tex::LaTeX::init(\"/usr/share/clatexmath\")...");
         tex::LaTeX::init("/usr/share/clatexmath");
-        mvLog("[init] tex::LaTeX::init done, RES_BASE='%s'", tex::RES_BASE.c_str());
         microtex_initialized = true;
     }
 }
@@ -880,12 +843,9 @@ std::string getLastAutoResolvedCssPath() {
 }
 
 std::string renderFileToHtml(const std::string &filePath, bool darkMode, const std::string &customCssPath) {
-    mvLog("\n==== renderFileToHtml('%s') ====", filePath.c_str());
     init();
     std::string content = readFileUtf8(filePath);
-    mvLog("[renderFileToHtml] read %zu bytes from file", content.size());
     std::string result = renderMarkdown(content, darkMode, customCssPath);
-    mvLog("[renderFileToHtml] EXIT OK, %zu bytes of HTML", result.size());
     return result;
 }
 

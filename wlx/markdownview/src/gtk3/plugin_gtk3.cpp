@@ -76,13 +76,6 @@ bool isSystemDark()
     if (!settings) return false;
     gboolean preferDark = FALSE;
     g_object_get(settings, "gtk-application-prefer-dark-theme", &preferDark, nullptr);
-    // TEMPORARY diagnostic: a standalone `gtk_init()` test process reported
-    // gtk-application-prefer-dark-theme=1 in this environment, but "System"
-    // mode reportedly still renders light inside the real dcgtk process --
-    // need to see what this actually reads to when called for real, since
-    // DC itself may set/override this property differently than a bare
-    // test binary would. Remove once resolved.
-    fprintf(stderr, "[markdownview] isSystemDark(): gtk-application-prefer-dark-theme=%d\n", preferDark);
     return preferDark;
 }
 
@@ -167,7 +160,6 @@ std::string g_configPath;
 
 bool resolveDarkMode()
 {
-    fprintf(stderr, "[markdownview] resolveDarkMode(): g_settings.mode=\"%s\"\n", g_settings.mode.c_str());
     if (g_settings.mode == "dark") return true;
     if (g_settings.mode == "light") return false;
     return isSystemDark();

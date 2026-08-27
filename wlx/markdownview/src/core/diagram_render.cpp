@@ -20,20 +20,6 @@ extern char **environ;
 
 namespace {
 
-// Separate translation unit from markdown_engine.cpp, so its own mvLog is
-// not visible here -- same log file, same purpose (see markdown_engine.cpp
-// for the full rationale).
-void mvLog(const char *fmt, ...) {
-    FILE *f = fopen("/home/pplupo/repos/plugins/scratch/markdownview_debug.log", "a");
-    if (!f) return;
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
-
 // std::stod() throws std::invalid_argument/std::out_of_range on
 // non-numeric or overflowing input, and every call site here feeds it
 // text captured by a regex group that's only constrained to "not a
@@ -623,12 +609,10 @@ std::vector<uint8_t> svgToHighDpiPng(const std::string &svgData, float scale, bo
     // needed the same kind of clamp for the same underlying reason
     // (librsvg/Cairo dimensions from renderer output, trusted unchecked).
     if (!std::isfinite(w) || !std::isfinite(h) || w <= 0 || h <= 0) {
-        mvLog("[svgToHighDpiPng] non-finite/degenerate size w=%.6f h=%.6f -- falling back to 800x600", w, h);
         w = 800; h = 600;
     }
     constexpr double kMaxDim = 8000.0; // generous; well beyond any real diagram, far below a crash-risk allocation
     if (w > kMaxDim || h > kMaxDim) {
-        mvLog("[svgToHighDpiPng] size w=%.2f h=%.2f exceeds cap, clamping", w, h);
         double capScale = kMaxDim / std::max(w, h);
         w *= capScale; h *= capScale;
     }
