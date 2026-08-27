@@ -194,12 +194,33 @@ public:
             return;
 
         bool activeDarkMode = resolveDarkMode();
-        std::string html = MarkdownEngine::renderFileToHtml(
-            m_filePath.toStdString(),
-            activeDarkMode,
-            g_themeFilePath.toStdString(),
-            g_zoomMultiplier
-        );
+        std::string html;
+        try {
+            // md4c parsing, MicroTeX LaTeX rendering, and diagram
+            // (mermaid/plantuml) rendering all run synchronously in here --
+            // any C++ exception thrown anywhere in that chain would unwind
+            // straight across this extern "C"-adjacent call into DC's
+            // Pascal caller, which is undefined behavior. Confirmed live:
+            // DC's own recovery from that manifests as silently falling
+            // back to the next WLX plugin registered for .md (kpartview
+            // here) on the NEXT open, not a visible crash -- exactly why
+            // markdownview_gtk3's ListLoad already wraps this same call the
+            // same way.
+            fprintf(stderr, "[markdownview_qt6] reloadContent(): g_zoomMultiplier=%.10f file=\"%s\"\n",
+                g_zoomMultiplier, m_filePath.toUtf8().constData());
+            html = MarkdownEngine::renderFileToHtml(
+                m_filePath.toStdString(),
+                activeDarkMode,
+                g_themeFilePath.toStdString(),
+                g_zoomMultiplier
+            );
+        } catch (const std::exception &e) {
+            setHtml(QStringLiteral("<p>markdownview: failed to render this file: %1</p>").arg(QString::fromUtf8(e.what())));
+            return;
+        } catch (...) {
+            setHtml(QStringLiteral("<p>markdownview: failed to render this file (unknown error).</p>"));
+            return;
+        }
         QString autoResolvedCss = QString::fromStdString(MarkdownEngine::getLastAutoResolvedCssPath());
         if (!autoResolvedCss.isEmpty() && autoResolvedCss != g_themeFilePath) {
             g_themeFilePath = autoResolvedCss;
@@ -316,6 +337,8 @@ public:
         g_zoomMultiplier *= (1.0 + 0.1 * m_zoomLevel);
         if (g_zoomMultiplier < 0.1) g_zoomMultiplier = 0.1;
         m_zoomLevel = 0; // the delta is now folded into g_zoomMultiplier; don't double-apply it
+        fprintf(stderr, "[markdownview_qt6] saveZoom(): g_configPath=\"%s\" new g_zoomMultiplier=%.10f\n",
+            g_configPath.toUtf8().constData(), g_zoomMultiplier);
         saveSettings();
         reloadContent();
     }
@@ -437,8 +460,13 @@ protected:
 
 extern "C" {
 
+// Function-try-block: reloadContent() (called from loadFile() below) is
+// itself exception-safe now, but widget construction/show() could still
+// throw in principle -- same defensive boundary markdownview_gtk3's
+// ListLoad already has, for the same reason (see reloadContent()'s comment
+// above).
 HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
-{
+try {
     if (!QApplication::instance())
         return nullptr;
 
@@ -453,6 +481,12 @@ HWND DCPCALL ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
     viewer->show();
 
     return (HWND)viewer;
+} catch (const std::exception &e) {
+    fprintf(stderr, "[markdownview_qt6] ListLoad EXCEPTION: %s\n", e.what());
+    return nullptr;
+} catch (...) {
+    fprintf(stderr, "[markdownview_qt6] ListLoad UNKNOWN EXCEPTION\n");
+    return nullptr;
 }
 
 void DCPCALL ListCloseWindow(HWND ListWin)
@@ -532,6 +566,17 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
         settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
     else
         g_zoomMultiplier = settings.value(PLUGNAME "/zoom_multiplier").toDouble();
+
+    // Temporary diagnostic while tracking down zoom_multiplier not
+    // surviving a reload -- remove once resolved. mode/theme_file_path use
+    // the identical read-from-ini pattern and are confirmed working, so
+    // this traces exactly where zoom_multiplier's value diverges, if it
+    // does, rather than continuing to guess from code review alone.
+    fprintf(stderr, "[markdownview_qt6] ListSetDefaultParams: g_configPath=\"%s\" contains(zoom_multiplier)=%d raw_value=\"%s\" g_zoomMultiplier=%.10f\n",
+        g_configPath.toUtf8().constData(),
+        (int)settings.contains(PLUGNAME "/zoom_multiplier"),
+        settings.value(PLUGNAME "/zoom_multiplier").toString().toUtf8().constData(),
+        g_zoomMultiplier);
 }
 
 } // extern "C"
