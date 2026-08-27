@@ -678,35 +678,93 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
 // hand-written-scanner approach as findNextCodeBlock() above, for the same
 // confirmed-live libstdc++ locale-facet crash reason.
 struct FootnoteDef { std::string label, contentHtml; };
-struct FootnoteDefMatch { size_t start, end; std::string label, content; };
+struct FootnoteDefMatch { size_t start, end; std::vector<FootnoteDef> defs; };
 
-// Finds the next `<p>[^label]: content</p>` footnote-definition paragraph
-// at/after `from`. A bare "[^" that isn't immediately followed by "]: " is
-// left alone -- it's just incidental text, not a definition.
+// True if `html[pos]` starts a "[^label]: " marker, and if so fills
+// `labelEnd`/`markerEnd` with the position just past the label's "]" and
+// just past the following ": ". A bare "[^" not immediately followed by
+// "]: " is just incidental text, not a footnote marker.
+bool matchFootnoteMarker(const std::string &html, size_t pos, size_t &labelEnd, size_t &markerEnd, std::string &label) {
+    if (html.compare(pos, 2, "[^") != 0) return false;
+    size_t labelStart = pos + 2;
+    size_t end = html.find(']', labelStart);
+    if (end == std::string::npos) return false;
+    std::string lbl = html.substr(labelStart, end - labelStart);
+    if (lbl.empty() || lbl.find('[') != std::string::npos || lbl.find(' ') != std::string::npos) return false;
+    size_t afterLabel = end + 1;
+    if (afterLabel + 1 >= html.size() || html[afterLabel] != ':' || html[afterLabel + 1] != ' ') return false;
+    labelEnd = end;
+    markerEnd = afterLabel + 2;
+    label = std::move(lbl);
+    return true;
+}
+
+// Splits one paragraph's inner text into one or more `[^label]: content`
+// definitions. Needed because CommonMark joins consecutive non-blank
+// source lines with no blank line between them into a SINGLE paragraph
+// (a soft line break becomes a plain space, not a new paragraph) -- an
+// extremely common way to write a References list, e.g.:
+//   [^1]: Some Source, ...
+//   [^2]: Another Source, ...
+// with no blank line separating the two collapses into one giant <p>
+// containing both definitions run together, not two separate <p>s. Each
+// definition here runs until the next "[^label]: " marker found in the
+// same paragraph, or the paragraph's end, whichever comes first.
+void splitFootnoteDefs(const std::string &inner, std::vector<FootnoteDef> &out) {
+    size_t labelEnd, markerEnd;
+    std::string label;
+    if (!matchFootnoteMarker(inner, 0, labelEnd, markerEnd, label)) return;
+    size_t contentStart = markerEnd;
+
+    while (true) {
+        size_t nextMarkerPos = std::string::npos;
+        size_t searchPos = contentStart;
+        std::string nextLabel;
+        size_t nLabelEnd, nMarkerEnd;
+        while (true) {
+            size_t candidate = inner.find("[^", searchPos);
+            if (candidate == std::string::npos) break;
+            if (matchFootnoteMarker(inner, candidate, nLabelEnd, nMarkerEnd, nextLabel)) {
+                nextMarkerPos = candidate;
+                break;
+            }
+            searchPos = candidate + 2;
+        }
+
+        size_t contentEnd = (nextMarkerPos == std::string::npos) ? inner.size() : nextMarkerPos;
+        std::string content = inner.substr(contentStart, contentEnd - contentStart);
+        // Trim the single trailing space CommonMark's soft-break-as-space
+        // rule leaves right before the next marker.
+        while (!content.empty() && content.back() == ' ') content.pop_back();
+        out.push_back({label, content});
+
+        if (nextMarkerPos == std::string::npos) break;
+        label = std::move(nextLabel);
+        contentStart = nMarkerEnd;
+    }
+}
+
+// Finds the next `<p>[^label]: ...</p>` footnote-definition paragraph
+// at/after `from` and splits it into however many definitions it actually
+// contains (see splitFootnoteDefs).
 bool findNextFootnoteDef(const std::string &html, size_t from, FootnoteDefMatch &out) {
     static const std::string openPrefix = "<p>[^";
     while (true) {
         size_t openPos = html.find(openPrefix, from);
         if (openPos == std::string::npos) return false;
-        size_t labelStart = openPos + openPrefix.size();
-        size_t labelEnd = html.find(']', labelStart);
-        if (labelEnd == std::string::npos) return false;
-        std::string label = html.substr(labelStart, labelEnd - labelStart);
-        if (label.empty() || label.find('[') != std::string::npos ||
-            label.find(' ') != std::string::npos) { from = labelEnd + 1; continue; }
-        size_t afterLabel = labelEnd + 1;
-        if (afterLabel + 1 >= html.size() || html[afterLabel] != ':' || html[afterLabel + 1] != ' ') {
-            from = labelEnd + 1; continue;
-        }
-        size_t contentStart = afterLabel + 2;
+        size_t innerStart = openPos + 3; // skip "<p>", leave the "[^..." for matchFootnoteMarker
+        size_t labelEnd, markerEnd;
+        std::string label;
+        if (!matchFootnoteMarker(html, innerStart, labelEnd, markerEnd, label)) { from = openPos + openPrefix.size(); continue; }
+
         static const std::string closeTag = "</p>";
-        size_t closePos = html.find(closeTag, contentStart);
+        size_t closePos = html.find(closeTag, markerEnd);
         if (closePos == std::string::npos) return false;
 
         out.start = openPos;
         out.end = closePos + closeTag.size();
-        out.label = std::move(label);
-        out.content = html.substr(contentStart, closePos - contentStart);
+        out.defs.clear();
+        splitFootnoteDefs(html.substr(innerStart, closePos - innerStart), out.defs);
         return true;
     }
 }
@@ -745,7 +803,7 @@ std::string processFootnotes(const std::string &htmlIn) {
     while (findNextFootnoteDef(htmlIn, searchFrom, m)) {
         body.append(htmlIn, lastEnd, m.start - lastEnd);
         if (!placedMarker) { body += kPlaceholder; placedMarker = true; }
-        defs.push_back({m.label, m.content});
+        for (auto &def : m.defs) defs.push_back(std::move(def));
         lastEnd = m.end;
         searchFrom = m.end;
     }
