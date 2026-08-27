@@ -19,6 +19,8 @@
 #include <QUrl>
 #include <QPrinter>
 #include <QPrintDialog>
+#include <QPainter>
+#include <QAbstractTextDocumentLayout>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QHBoxLayout>
@@ -61,6 +63,10 @@ static void saveSettings() {
     settings.setValue(PLUGNAME "/mode", g_mode);
     settings.setValue(PLUGNAME "/auto_reload", g_autoReloadEnabled);
     settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
+    // Explicit sync rather than relying solely on ~QSettings() to flush --
+    // no known bug requires this (QSettings' destructor already syncs),
+    // but it removes any doubt while diagnosing zoom persistence.
+    settings.sync();
 }
 
 class MarkdownViewerWidget : public QTextBrowser {
@@ -249,16 +255,40 @@ public:
         }
     }
 
-    // Prints via QTextDocument::print(), i.e. the SAME QTextDocument this
-    // widget already has on screen -- whatever theme/CSS reloadContent()
-    // most recently applied (dark or light, default or custom) is exactly
-    // what ends up on the page, with no separate print stylesheet involved.
+    // Prints the SAME QTextDocument this widget already has on screen --
+    // whatever theme/CSS reloadContent() most recently applied (dark or
+    // light, default or custom) is exactly what ends up on the page, with
+    // no separate print stylesheet involved. NOT via QTextDocument::print()
+    // directly, though: that call only paints the document's own laid-out
+    // content, never the physical page itself -- on the dark theme the
+    // printer's native white paper showed through as a border around the
+    // (still dark-colored) text. Paint each page's background first, then
+    // draw the document's content on top of it.
     void printDocument() {
         QPrinter printer;
         QPrintDialog dialog(&printer, this);
-        if (dialog.exec() == QDialog::Accepted) {
-            document()->print(&printer);
+        if (dialog.exec() != QDialog::Accepted) return;
+
+        QColor pageColor = resolveDarkMode() ? QColor("#0d1117") : QColor("#ffffff");
+
+        QTextDocument *doc = document()->clone();
+        QSizeF pageSize = printer.pageRect(QPrinter::DevicePixel).size();
+        doc->setPageSize(pageSize);
+
+        QPainter painter(&printer);
+        int pageCount = doc->pageCount();
+        for (int page = 0; page < pageCount; ++page) {
+            if (page > 0) printer.newPage();
+            painter.fillRect(QRectF(QPointF(0, 0), pageSize), pageColor);
+
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.clip = QRectF(0, page * pageSize.height(), pageSize.width(), pageSize.height());
+            painter.save();
+            painter.translate(0, -page * pageSize.height());
+            doc->documentLayout()->draw(&painter, ctx);
+            painter.restore();
         }
+        delete doc;
     }
 
     // Back to the CSS's own factory sizing -- clears BOTH the transient

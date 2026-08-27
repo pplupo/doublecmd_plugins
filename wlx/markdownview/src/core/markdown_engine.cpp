@@ -488,6 +488,15 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     line-height: 1.6;
     padding: 16px;
+    /* Browsers (WebKit included) omit background colors when printing by
+       default to save ink, unless a page explicitly opts back in -- without
+       this, printing the dark theme drops body's background-color entirely
+       and the physical page prints white behind the (still dark-colored)
+       text. Qt's QTextDocument print path doesn't understand this
+       property at all (harmless no-op there) and needs its own fix; see
+       MarkdownViewerWidget::printDocument in plugin_qt6.cpp. */
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
 }
 body.theme-light { color: #24292e; background-color: #ffffff; }
 body.theme-dark { color: #c9d1d9; background-color: #0d1117; }
