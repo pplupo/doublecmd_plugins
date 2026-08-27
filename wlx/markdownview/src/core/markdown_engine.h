@@ -33,18 +33,20 @@ std::string getLastAutoResolvedCssPath();
 /**
  * Parse a markdown file and render it to HTML string with inline LaTeX (MicroTeX)
  * images and embedded diagram SVGs/PNGs.
- * 
+ *
  * @param filePath Path to the Markdown file.
  * @param darkMode Whether to apply dark mode styling.
  * @param customCssPath Optional path to a custom CSS stylesheet.
+ * @param zoomMultiplier Persisted "Save Zoom" font-size multiplier (1.0 =
+ *        no change), distinct from a toolkit's own transient in-view zoom.
  * @return Formatted HTML string ready for display in QTextBrowser or WebKit.
  */
-std::string renderFileToHtml(const std::string& filePath, bool darkMode = false, const std::string& customCssPath = "");
+std::string renderFileToHtml(const std::string& filePath, bool darkMode = false, const std::string& customCssPath = "", double zoomMultiplier = 1.0);
 
 /**
  * Render raw markdown string to HTML.
  */
-std::string renderTextToHtml(const std::string& markdownText, bool darkMode = false, const std::string& customCssPath = "");
+std::string renderTextToHtml(const std::string& markdownText, bool darkMode = false, const std::string& customCssPath = "", double zoomMultiplier = 1.0);
 
 } // namespace MarkdownEngine
 

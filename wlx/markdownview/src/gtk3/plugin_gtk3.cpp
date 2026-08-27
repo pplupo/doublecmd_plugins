@@ -103,6 +103,13 @@ struct Settings {
     std::string mode = "system"; // "system", "dark", "light"
     bool autoReloadEnabled = true;
     std::string themeFilePath;
+    // Persisted "Save Zoom" font-size multiplier (1.0 = no change) --
+    // distinct from WebKit's own transient webkit_web_view_get/set_zoom_
+    // level(), which resets on reload/reopen. "Save Zoom" bakes the
+    // current transient zoom into this instead, via a body { font-size:
+    // N% } CSS rule (see markdown_engine.cpp's postProcessHtml), so it
+    // survives reloads.
+    double zoomMultiplier = 1.0;
 
     void loadOrInitDefaults(const std::string &iniPath, const std::string &pluginName)
     {
@@ -131,9 +138,15 @@ struct Settings {
             auto it = values.find(pluginName + "/" + key);
             return it == values.end() ? def : it->second;
         };
+        auto getDouble = [&](const std::string &key, double def) {
+            auto it = values.find(pluginName + "/" + key);
+            if (it == values.end()) return def;
+            try { return std::stod(it->second); } catch (...) { return def; }
+        };
         mode = getStr("mode", mode);
         autoReloadEnabled = getBool("auto_reload", autoReloadEnabled);
         themeFilePath = getStr("theme_file_path", themeFilePath);
+        zoomMultiplier = getDouble("zoom_multiplier", zoomMultiplier);
         save(iniPath, pluginName);
     }
 
@@ -145,6 +158,7 @@ struct Settings {
         f << "mode=" << mode << "\n";
         f << "auto_reload=" << (autoReloadEnabled ? "true" : "false") << "\n";
         f << "theme_file_path=" << themeFilePath << "\n";
+        f << "zoom_multiplier=" << zoomMultiplier << "\n";
     }
 };
 
@@ -231,7 +245,7 @@ void reloadContentNow(MarkdownState *st)
     }
     st->loadInFlight = true;
     bool activeDarkMode = resolveDarkMode();
-    std::string html = MarkdownEngine::renderFileToHtml(st->filePath, activeDarkMode, g_settings.themeFilePath);
+    std::string html = MarkdownEngine::renderFileToHtml(st->filePath, activeDarkMode, g_settings.themeFilePath, g_settings.zoomMultiplier);
     std::string autoResolvedCss = MarkdownEngine::getLastAutoResolvedCssPath();
     if (!autoResolvedCss.empty() && autoResolvedCss != g_settings.themeFilePath) {
         g_settings.themeFilePath = autoResolvedCss;
@@ -438,9 +452,32 @@ void onPrint(GtkMenuItem *, gpointer userData) {
     webkit_print_operation_run_dialog(op, nullptr);
     g_object_unref(op);
 }
+// Persists WebKit's current transient zoom level into
+// g_settings.zoomMultiplier, then clears the transient zoom back to 1.0
+// and reloads -- the visual size stays exactly the same, but it's now
+// baked into the CSS-driven font-size and survives a reload/reopen, unlike
+// webkit_web_view_set_zoom_level() alone.
+void onSaveZoom(GtkMenuItem *, gpointer userData) {
+    auto *st = static_cast<MarkdownState *>(userData);
+    gdouble zoom = webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(st->webView));
+    if (zoom == 1.0) return;
+    g_settings.zoomMultiplier *= zoom;
+    if (g_settings.zoomMultiplier < 0.1) g_settings.zoomMultiplier = 0.1;
+    webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(st->webView), 1.0);
+    saveSettingsNow();
+    reloadContent(st);
+}
+// Back to the CSS's own factory sizing -- clears BOTH the transient
+// in-view zoom and any persisted "Save Zoom" multiplier, unlike
+// onSaveZoom() which folds the transient zoom into the persisted one.
 void onResetZoom(GtkMenuItem *, gpointer userData) {
     auto *st = static_cast<MarkdownState *>(userData);
     webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(st->webView), 1.0);
+    if (g_settings.zoomMultiplier != 1.0) {
+        g_settings.zoomMultiplier = 1.0;
+        saveSettingsNow();
+        reloadContent(st);
+    }
 }
 void onReloadDocument(GtkMenuItem *, gpointer userData) { reloadContent(static_cast<MarkdownState *>(userData)); }
 void onToggleAutoReload(GtkCheckMenuItem *item, gpointer) {
@@ -476,6 +513,7 @@ gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, We
     }));
     addItem("Print...", G_CALLBACK(onPrint));
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+    addItem("Save Zoom", G_CALLBACK(onSaveZoom));
     addItem("Reset Zoom", G_CALLBACK(onResetZoom));
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
     addItem("Reload Document", G_CALLBACK(onReloadDocument));

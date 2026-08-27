@@ -36,6 +36,12 @@ static bool g_autoReloadEnabled = true;
 static QString g_mode = QStringLiteral("system"); // "system", "dark", "light"
 static QString g_themeFilePath;
 static QString g_configPath;
+// Persisted "Save Zoom" font-size multiplier (1.0 = no change) -- distinct
+// from m_zoomLevel below, which is QTextBrowser's own transient in-view
+// zoom that resets on reload/reopen. "Save Zoom" bakes the current
+// transient zoom into this instead, via a body { font-size: N% } CSS rule
+// (see markdown_engine.cpp's postProcessHtml), so it survives reloads.
+static double g_zoomMultiplier = 1.0;
 
 static bool isSystemDark() {
     QPalette pal = QGuiApplication::palette();
@@ -54,6 +60,7 @@ static void saveSettings() {
     settings.setValue(PLUGNAME "/theme_file_path", g_themeFilePath);
     settings.setValue(PLUGNAME "/mode", g_mode);
     settings.setValue(PLUGNAME "/auto_reload", g_autoReloadEnabled);
+    settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
 }
 
 class MarkdownViewerWidget : public QTextBrowser {
@@ -184,7 +191,8 @@ public:
         std::string html = MarkdownEngine::renderFileToHtml(
             m_filePath.toStdString(),
             activeDarkMode,
-            g_themeFilePath.toStdString()
+            g_themeFilePath.toStdString(),
+            g_zoomMultiplier
         );
         QString autoResolvedCss = QString::fromStdString(MarkdownEngine::getLastAutoResolvedCssPath());
         if (!autoResolvedCss.isEmpty() && autoResolvedCss != g_themeFilePath) {
@@ -253,10 +261,33 @@ public:
         }
     }
 
+    // Back to the CSS's own factory sizing -- clears BOTH the transient
+    // in-view zoom and any persisted "Save Zoom" multiplier, unlike
+    // saveZoom() which folds the transient zoom into the persisted one.
     void resetZoom() {
         if (m_zoomLevel > 0) zoomOut(m_zoomLevel);
         else if (m_zoomLevel < 0) zoomIn(-m_zoomLevel);
         m_zoomLevel = 0;
+        if (g_zoomMultiplier != 1.0) {
+            g_zoomMultiplier = 1.0;
+            saveSettings();
+            reloadContent();
+        }
+    }
+
+    // Persists the CURRENT transient zoom (each wheel notch = 10%) into
+    // g_zoomMultiplier, then clears the transient zoom back to neutral and
+    // reloads -- the visual size stays exactly the same, but it's now
+    // baked into the CSS-driven font-size and survives a reload/reopen,
+    // unlike the toolkit's own zoomIn/zoomOut. Reset Zoom (above) discards
+    // this back to the CSS's own factory sizing instead.
+    void saveZoom() {
+        if (m_zoomLevel == 0) return;
+        g_zoomMultiplier *= (1.0 + 0.1 * m_zoomLevel);
+        if (g_zoomMultiplier < 0.1) g_zoomMultiplier = 0.1;
+        m_zoomLevel = 0; // the delta is now folded into g_zoomMultiplier; don't double-apply it
+        saveSettings();
+        reloadContent();
     }
 
 protected:
@@ -313,8 +344,12 @@ protected:
 
         menu.addSeparator();
 
+        QAction* saveZoomAction = menu.addAction(tr("Save Zoom"));
+        saveZoomAction->setEnabled(m_zoomLevel != 0);
+        connect(saveZoomAction, &QAction::triggered, this, &MarkdownViewerWidget::saveZoom);
+
         QAction* resetZoomAction = menu.addAction(tr("Reset Zoom"));
-        resetZoomAction->setEnabled(m_zoomLevel != 0);
+        resetZoomAction->setEnabled(m_zoomLevel != 0 || g_zoomMultiplier != 1.0);
         connect(resetZoomAction, &QAction::triggered, this, &MarkdownViewerWidget::resetZoom);
 
         menu.addSeparator();
@@ -462,6 +497,11 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
         settings.setValue(PLUGNAME "/auto_reload", g_autoReloadEnabled);
     else
         g_autoReloadEnabled = settings.value(PLUGNAME "/auto_reload").toBool();
+
+    if (!settings.contains(PLUGNAME "/zoom_multiplier"))
+        settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
+    else
+        g_zoomMultiplier = settings.value(PLUGNAME "/zoom_multiplier").toDouble();
 }
 
 } // extern "C"
