@@ -415,7 +415,17 @@ std::string renderMathTag(const std::string &tex, bool isDisplay, bool darkMode)
                           : ("<span class=\"math inline\">$" + escaped + "$</span>");
     }
     std::string b64 = base64Encode(png);
-    std::string imgTag = "<img src=\"data:image/png;base64," + b64 + "\" />";
+    std::string imgTag = "<img src=\"data:image/png;base64," + b64 + "\"";
+    // Without explicit width/height, Qt6's QTextImageFormat has nothing
+    // to read a "natural size" from at all (confirmed live: it reads back
+    // 0x0), so MarkdownViewerWidget::scaleImages() skips it entirely --
+    // LaTeX formulas rendered without these attributes never scaled with
+    // the rest of the document's zoom. w/h here are already the PNG's own
+    // logical (post-oversampling) pixel size, same as renderDiagramImgTag
+    // above, so this doesn't change how large the formula renders, only
+    // makes that size explicit for the zoom feature to read.
+    if (w > 0 && h > 0) imgTag += " width=\"" + std::to_string(w) + "\" height=\"" + std::to_string(h) + "\"";
+    imgTag += " />";
     return isDisplay ? ("<p align=\"center\">" + imgTag + "</p>") : ("<span class=\"math inline\">" + imgTag + "</span>");
 }
 
