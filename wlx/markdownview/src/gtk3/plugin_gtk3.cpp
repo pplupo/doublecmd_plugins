@@ -245,7 +245,7 @@ void reloadContentNow(MarkdownState *st)
     }
     st->loadInFlight = true;
     bool activeDarkMode = resolveDarkMode();
-    std::string html = MarkdownEngine::renderFileToHtml(st->filePath, activeDarkMode, g_settings.themeFilePath, g_settings.zoomMultiplier);
+    std::string html = MarkdownEngine::renderFileToHtml(st->filePath, activeDarkMode, g_settings.themeFilePath);
     std::string autoResolvedCss = MarkdownEngine::getLastAutoResolvedCssPath();
     if (!autoResolvedCss.empty() && autoResolvedCss != g_settings.themeFilePath) {
         g_settings.themeFilePath = autoResolvedCss;
@@ -253,6 +253,12 @@ void reloadContentNow(MarkdownState *st)
     }
     std::string baseUri = "file://" + st->filePath.substr(0, st->filePath.find_last_of('/') + 1);
     webkit_web_view_load_html(WEBKIT_WEB_VIEW(st->webView), html.c_str(), baseUri.c_str());
+    // Persisted "Save Zoom" applied directly via WebKit's own zoom level,
+    // not baked into the HTML/CSS -- webkit_web_view_set_zoom_level() is
+    // exactly the same mechanism the transient scroll-zoom (onScroll,
+    // above) already uses, so this is just making that setting survive a
+    // reload/reopen instead of introducing a second, CSS-based path.
+    webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(st->webView), g_settings.zoomMultiplier);
 }
 
 void onLoadChanged(WebKitWebView *, WebKitLoadEvent loadEvent, gpointer userData)
@@ -454,9 +460,10 @@ void onPrint(GtkMenuItem *, gpointer userData) {
 }
 // Persists WebKit's current transient zoom level into
 // g_settings.zoomMultiplier, then clears the transient zoom back to 1.0
-// and reloads -- the visual size stays exactly the same, but it's now
-// baked into the CSS-driven font-size and survives a reload/reopen, unlike
-// webkit_web_view_set_zoom_level() alone.
+// and reloads -- the visual size stays exactly the same, but it's now in
+// g_settings.zoomMultiplier and survives a reload/reopen (see the
+// webkit_web_view_set_zoom_level() call at the end of reloadContentNow()),
+// unlike a transient webkit_web_view_set_zoom_level() call alone.
 void onSaveZoom(GtkMenuItem *, gpointer userData) {
     auto *st = static_cast<MarkdownState *>(userData);
     gdouble zoom = webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(st->webView));
@@ -467,9 +474,9 @@ void onSaveZoom(GtkMenuItem *, gpointer userData) {
     saveSettingsNow();
     reloadContent(st);
 }
-// Back to the CSS's own factory sizing -- clears BOTH the transient
-// in-view zoom and any persisted "Save Zoom" multiplier, unlike
-// onSaveZoom() which folds the transient zoom into the persisted one.
+// Back to the factory default size -- clears BOTH the transient in-view
+// zoom and any persisted "Save Zoom" multiplier, unlike onSaveZoom() which
+// folds the transient zoom into the persisted one.
 void onResetZoom(GtkMenuItem *, gpointer userData) {
     auto *st = static_cast<MarkdownState *>(userData);
     webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(st->webView), 1.0);

@@ -37,16 +37,22 @@ std::string getLastAutoResolvedCssPath();
  * @param filePath Path to the Markdown file.
  * @param darkMode Whether to apply dark mode styling.
  * @param customCssPath Optional path to a custom CSS stylesheet.
- * @param zoomMultiplier Persisted "Save Zoom" font-size multiplier (1.0 =
- *        no change), distinct from a toolkit's own transient in-view zoom.
  * @return Formatted HTML string ready for display in QTextBrowser or WebKit.
+ *
+ * "Save Zoom" is NOT handled here -- confirmed live that a CSS `body {
+ * font-size: N%; }` rule has zero effect on Qt's QTextDocument (measured
+ * identical rendered text width at 50%/100%/182%). Each toolkit applies its
+ * own persisted zoom afterwards via its own native zoom API instead
+ * (QTextBrowser::zoomIn/zoomOut on Qt6, webkit_web_view_set_zoom_level on
+ * GTK3) -- see reloadContent()/reloadContentNow() in the respective
+ * plugin_*.cpp.
  */
-std::string renderFileToHtml(const std::string& filePath, bool darkMode = false, const std::string& customCssPath = "", double zoomMultiplier = 1.0);
+std::string renderFileToHtml(const std::string& filePath, bool darkMode = false, const std::string& customCssPath = "");
 
 /**
  * Render raw markdown string to HTML.
  */
-std::string renderTextToHtml(const std::string& markdownText, bool darkMode = false, const std::string& customCssPath = "", double zoomMultiplier = 1.0);
+std::string renderTextToHtml(const std::string& markdownText, bool darkMode = false, const std::string& customCssPath = "");
 
 } // namespace MarkdownEngine
 

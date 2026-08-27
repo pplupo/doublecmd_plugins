@@ -160,10 +160,34 @@ private:
         setFocus();
     }
 
+    // Absolute font-size approach (not Qt's own relative zoomIn/zoomOut)
+    // so it's idempotent no matter how many times reloadContent() runs --
+    // no bookkeeping needed to "undo" a previous call before reapplying.
+    // Confirmed live that a CSS `body { font-size: N%; }` rule has zero
+    // effect on Qt's QTextDocument (measured identical rendered text width
+    // at 50%/100%/182%), so this widget's own font is the only thing that
+    // actually works here.
+    qreal m_baseFontPointSize = 0;
+
+    void applyZoom() {
+        if (m_baseFontPointSize <= 0) return;
+        double totalMultiplier = g_zoomMultiplier * (1.0 + 0.1 * m_zoomLevel);
+        QFont f = font();
+        f.setPointSizeF(m_baseFontPointSize * totalMultiplier);
+        setFont(f);
+        // setFont() alone does NOT retroactively rescale content already
+        // loaded via setHtml() -- confirmed live via idealWidth() staying
+        // identical before/after a setFont()-only call once content
+        // exists. QTextDocument::setDefaultFont() is what actually forces
+        // the relayout against the new base size.
+        if (document()) document()->setDefaultFont(f);
+    }
+
 public:
     MarkdownViewerWidget(QWidget* parent = nullptr) : QTextBrowser(parent) {
         setOpenExternalLinks(true);
         setOpenLinks(true);
+        m_baseFontPointSize = font().pointSizeF();
 
         m_debounceTimer.setSingleShot(true);
         m_debounceTimer.setInterval(200);
@@ -206,13 +230,10 @@ public:
             // here) on the NEXT open, not a visible crash -- exactly why
             // markdownview_gtk3's ListLoad already wraps this same call the
             // same way.
-            fprintf(stderr, "[markdownview_qt6] reloadContent(): g_zoomMultiplier=%.10f file=\"%s\"\n",
-                g_zoomMultiplier, m_filePath.toUtf8().constData());
             html = MarkdownEngine::renderFileToHtml(
                 m_filePath.toStdString(),
                 activeDarkMode,
-                g_themeFilePath.toStdString(),
-                g_zoomMultiplier
+                g_themeFilePath.toStdString()
             );
         } catch (const std::exception &e) {
             setHtml(QStringLiteral("<p>markdownview: failed to render this file: %1</p>").arg(QString::fromUtf8(e.what())));
@@ -261,6 +282,7 @@ public:
 
         setHtml(QString::fromStdString(html));
         document()->setBaseUrl(QUrl::fromLocalFile(m_filePath).adjusted(QUrl::RemoveFilename));
+        applyZoom();
 
         if (horizontalScrollBar()) horizontalScrollBar()->setValue(currentScrollX);
         if (verticalScrollBar()) verticalScrollBar()->setValue(currentScrollY);
@@ -312,35 +334,30 @@ public:
         delete doc;
     }
 
-    // Back to the CSS's own factory sizing -- clears BOTH the transient
+    // Back to the factory default size -- clears BOTH the transient
     // in-view zoom and any persisted "Save Zoom" multiplier, unlike
     // saveZoom() which folds the transient zoom into the persisted one.
     void resetZoom() {
-        if (m_zoomLevel > 0) zoomOut(m_zoomLevel);
-        else if (m_zoomLevel < 0) zoomIn(-m_zoomLevel);
         m_zoomLevel = 0;
-        if (g_zoomMultiplier != 1.0) {
-            g_zoomMultiplier = 1.0;
-            saveSettings();
-            reloadContent();
-        }
+        bool wasPersisted = (g_zoomMultiplier != 1.0);
+        g_zoomMultiplier = 1.0;
+        applyZoom();
+        if (wasPersisted) saveSettings();
     }
 
     // Persists the CURRENT transient zoom (each wheel notch = 10%) into
-    // g_zoomMultiplier, then clears the transient zoom back to neutral and
-    // reloads -- the visual size stays exactly the same, but it's now
-    // baked into the CSS-driven font-size and survives a reload/reopen,
-    // unlike the toolkit's own zoomIn/zoomOut. Reset Zoom (above) discards
-    // this back to the CSS's own factory sizing instead.
+    // g_zoomMultiplier, then clears the transient zoom back to neutral --
+    // the total effective zoom (persisted * transient) stays exactly the
+    // same, but it's now entirely in g_zoomMultiplier and survives a
+    // reload/reopen, unlike m_zoomLevel alone. Reset Zoom (above) discards
+    // this back to the factory default instead.
     void saveZoom() {
         if (m_zoomLevel == 0) return;
         g_zoomMultiplier *= (1.0 + 0.1 * m_zoomLevel);
         if (g_zoomMultiplier < 0.1) g_zoomMultiplier = 0.1;
         m_zoomLevel = 0; // the delta is now folded into g_zoomMultiplier; don't double-apply it
-        fprintf(stderr, "[markdownview_qt6] saveZoom(): g_configPath=\"%s\" new g_zoomMultiplier=%.10f\n",
-            g_configPath.toUtf8().constData(), g_zoomMultiplier);
+        applyZoom();
         saveSettings();
-        reloadContent();
     }
 
 protected:
@@ -366,11 +383,11 @@ protected:
     void wheelEvent(QWheelEvent* event) override {
         if (event->modifiers() & Qt::ControlModifier) {
             if (event->angleDelta().y() > 0) {
-                zoomIn(1);
                 m_zoomLevel++;
+                applyZoom();
             } else if (event->angleDelta().y() < 0) {
-                zoomOut(1);
                 m_zoomLevel--;
+                applyZoom();
             }
             event->accept();
         } else {
@@ -566,17 +583,6 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
         settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
     else
         g_zoomMultiplier = settings.value(PLUGNAME "/zoom_multiplier").toDouble();
-
-    // Temporary diagnostic while tracking down zoom_multiplier not
-    // surviving a reload -- remove once resolved. mode/theme_file_path use
-    // the identical read-from-ini pattern and are confirmed working, so
-    // this traces exactly where zoom_multiplier's value diverges, if it
-    // does, rather than continuing to guess from code review alone.
-    fprintf(stderr, "[markdownview_qt6] ListSetDefaultParams: g_configPath=\"%s\" contains(zoom_multiplier)=%d raw_value=\"%s\" g_zoomMultiplier=%.10f\n",
-        g_configPath.toUtf8().constData(),
-        (int)settings.contains(PLUGNAME "/zoom_multiplier"),
-        settings.value(PLUGNAME "/zoom_multiplier").toString().toUtf8().constData(),
-        g_zoomMultiplier);
 }
 
 } // extern "C"

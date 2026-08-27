@@ -577,7 +577,7 @@ ol.footnotes { font-size: 0.9em; }
 sup a { text-decoration: none; }
 )";
 
-std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std::string &customCssPath, double zoomMultiplier) {
+std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std::string &customCssPath) {
     std::string html = rawHtml;
 
     // The blockquote/pre text color used to be a hardcoded inline
@@ -674,23 +674,7 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
     // that share this exact rendering code. A plain class selector is
     // supported by both.
     std::string bodyClass = darkMode ? "theme-dark" : "theme-light";
-
-    // Persisted "Save Zoom" setting (as opposed to the transient in-view
-    // zoom the toolkit's own zoomIn/zoomOut provides, which resets on
-    // reload/reopen): a plain percentage on <body>'s font-size. Every other
-    // font-size in DEFAULT_CSS (and any well-behaved custom stylesheet) is
-    // expressed in em/% rather than a fixed px, so it scales proportionally
-    // for free -- appended as its own rule after cssStr so it wins on
-    // source order for that one property without needing !important or
-    // touching the loaded stylesheet's own body rule at all.
-    std::string zoomOverride;
-    if (zoomMultiplier != 1.0) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "body { font-size: %.0f%%; }", zoomMultiplier * 100.0);
-        zoomOverride = buf;
-    }
-
-    return "<!DOCTYPE html><html><head><style>" + cssStr + zoomOverride + "</style></head><body class=\"" + bodyClass + "\">" + html + "</body></html>";
+    return "<!DOCTYPE html><html><head><style>" + cssStr + "</style></head><body class=\"" + bodyClass + "\">" + html + "</body></html>";
 }
 
 // md4c has no concept of Pandoc/PHP-Markdown-Extra style footnotes: a
@@ -850,7 +834,7 @@ std::string processFootnotes(const std::string &htmlIn) {
     return body;
 }
 
-std::string renderMarkdown(const std::string &markdown, bool darkMode, const std::string &customCssPath, double zoomMultiplier) {
+std::string renderMarkdown(const std::string &markdown, bool darkMode, const std::string &customCssPath) {
     mvLog("[renderMarkdown] ENTER markdown.size()=%zu darkMode=%d", markdown.size(), (int)darkMode);
     std::string html = parseMarkdownToHtml(markdown);
     mvLog("[renderMarkdown] parseMarkdownToHtml -> %zu bytes", html.size());
@@ -860,7 +844,7 @@ std::string renderMarkdown(const std::string &markdown, bool darkMode, const std
     mvLog("[renderMarkdown] replaceDiagramBlocks -> %zu bytes", html.size());
     html = replaceMathTags(html, darkMode);
     mvLog("[renderMarkdown] replaceMathTags -> %zu bytes", html.size());
-    std::string result = postProcessHtml(html, darkMode, customCssPath, zoomMultiplier);
+    std::string result = postProcessHtml(html, darkMode, customCssPath);
     mvLog("[renderMarkdown] EXIT postProcessHtml -> %zu bytes", result.size());
     return result;
 }
@@ -885,19 +869,19 @@ std::string getLastAutoResolvedCssPath() {
     return g_lastAutoResolvedCssPath;
 }
 
-std::string renderFileToHtml(const std::string &filePath, bool darkMode, const std::string &customCssPath, double zoomMultiplier) {
+std::string renderFileToHtml(const std::string &filePath, bool darkMode, const std::string &customCssPath) {
     mvLog("\n==== renderFileToHtml('%s') ====", filePath.c_str());
     init();
     std::string content = readFileUtf8(filePath);
     mvLog("[renderFileToHtml] read %zu bytes from file", content.size());
-    std::string result = renderMarkdown(content, darkMode, customCssPath, zoomMultiplier);
+    std::string result = renderMarkdown(content, darkMode, customCssPath);
     mvLog("[renderFileToHtml] EXIT OK, %zu bytes of HTML", result.size());
     return result;
 }
 
-std::string renderTextToHtml(const std::string &markdownText, bool darkMode, const std::string &customCssPath, double zoomMultiplier) {
+std::string renderTextToHtml(const std::string &markdownText, bool darkMode, const std::string &customCssPath) {
     init();
-    return renderMarkdown(markdownText, darkMode, customCssPath, zoomMultiplier);
+    return renderMarkdown(markdownText, darkMode, customCssPath);
 }
 
 } // namespace MarkdownEngine
