@@ -92,7 +92,7 @@ target_compile_options(markdownview_core PUBLIC ${CAIRO_CFLAGS_OTHER} ${RSVG_CFL
 # Qt6 Lister Plugin Target
 # ---------------------------------------------------------------------
 if(ENABLE_QT6)
-    find_package(Qt6 6.2 COMPONENTS Core Gui Widgets)
+    find_package(Qt6 6.2 COMPONENTS Core Gui Widgets PrintSupport)
     if(Qt6_FOUND)
         add_library(markdownview_qt6 MODULE
             src/qt6/plugin_qt6.cpp
@@ -113,6 +113,7 @@ if(ENABLE_QT6)
             Qt6::Core
             Qt6::Gui
             Qt6::Widgets
+            Qt6::PrintSupport
         )
 
         # Statically link standard C++ runtime to prevent GLIBCXX version

@@ -17,6 +17,13 @@
 #include <QWheelEvent>
 #include <QVBoxLayout>
 #include <QUrl>
+#include <QPrinter>
+#include <QPrintDialog>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QResizeEvent>
 #include <dlfcn.h>
 #include <cmath>
 
@@ -55,6 +62,90 @@ private:
     QFileSystemWatcher m_watcher;
     QTimer m_debounceTimer;
     int m_zoomLevel = 0;
+
+    // In-document incremental search (Ctrl+F), matching kpartview's
+    // markdownpart backend -- this searches the loaded document's own
+    // text, not the same thing as Double Commander's own Ctrl+F (that's
+    // ListSearchText below, DC's own lister search UI driving find()
+    // directly). A small floating bar overlaid on the top-right corner,
+    // shown/hidden on demand, rather than restructuring this widget into a
+    // container+child layout -- keeps ListLoad's HWND contract (this
+    // widget itself) unchanged.
+    QWidget* m_findBar = nullptr;
+    QLineEdit* m_findEdit = nullptr;
+
+    void ensureFindBar() {
+        if (m_findBar) return;
+        m_findBar = new QWidget(this);
+        m_findBar->setAutoFillBackground(true);
+        m_findBar->setStyleSheet("QWidget { background-color: palette(window); border: 1px solid palette(mid); }");
+
+        m_findEdit = new QLineEdit(m_findBar);
+        m_findEdit->setPlaceholderText(tr("Find in document..."));
+        m_findEdit->setClearButtonEnabled(true);
+
+        QPushButton* prevBtn = new QPushButton(tr("Prev"), m_findBar);
+        QPushButton* nextBtn = new QPushButton(tr("Next"), m_findBar);
+        QPushButton* closeBtn = new QPushButton(tr("✕"), m_findBar);
+        closeBtn->setFixedWidth(24);
+
+        auto* layout = new QHBoxLayout(m_findBar);
+        layout->setContentsMargins(6, 4, 6, 4);
+        layout->addWidget(m_findEdit);
+        layout->addWidget(prevBtn);
+        layout->addWidget(nextBtn);
+        layout->addWidget(closeBtn);
+
+        connect(m_findEdit, &QLineEdit::textChanged, this, [this](const QString&) { findIncremental(false); });
+        connect(m_findEdit, &QLineEdit::returnPressed, this, [this]() { findIncremental(false); });
+        connect(nextBtn, &QPushButton::clicked, this, [this]() { findIncremental(false); });
+        connect(prevBtn, &QPushButton::clicked, this, [this]() { findIncremental(true); });
+        connect(closeBtn, &QPushButton::clicked, this, &MarkdownViewerWidget::hideFindBar);
+
+        m_findBar->hide();
+    }
+
+    void positionFindBar() {
+        if (!m_findBar) return;
+        int w = qMin(320, width() - 16);
+        m_findBar->setFixedWidth(w);
+        m_findBar->adjustSize();
+        m_findBar->move(width() - w - 8, 8);
+    }
+
+    void findIncremental(bool backward) {
+        if (!m_findEdit) return;
+        QString text = m_findEdit->text();
+        if (text.isEmpty()) return;
+
+        QTextDocument::FindFlags flags;
+        if (backward) flags |= QTextDocument::FindBackward;
+
+        if (find(text, flags)) return;
+
+        // Wrap around: jump the cursor to the start (forward search) or
+        // end (backward search) of the document and retry once, same
+        // "wraps instead of stopping at the edge" behavior as a normal
+        // incremental search bar.
+        QTextCursor cursor = textCursor();
+        cursor.movePosition(backward ? QTextCursor::End : QTextCursor::Start);
+        setTextCursor(cursor);
+        find(text, flags);
+    }
+
+    void showFindBar() {
+        ensureFindBar();
+        positionFindBar();
+        m_findBar->show();
+        m_findBar->raise();
+        m_findEdit->setFocus();
+        m_findEdit->selectAll();
+    }
+
+    void hideFindBar() {
+        if (m_findBar) m_findBar->hide();
+        setFocus();
+    }
 
 public:
     MarkdownViewerWidget(QWidget* parent = nullptr) : QTextBrowser(parent) {
@@ -150,7 +241,44 @@ public:
         }
     }
 
+    // Prints via QTextDocument::print(), i.e. the SAME QTextDocument this
+    // widget already has on screen -- whatever theme/CSS reloadContent()
+    // most recently applied (dark or light, default or custom) is exactly
+    // what ends up on the page, with no separate print stylesheet involved.
+    void printDocument() {
+        QPrinter printer;
+        QPrintDialog dialog(&printer, this);
+        if (dialog.exec() == QDialog::Accepted) {
+            document()->print(&printer);
+        }
+    }
+
+    void resetZoom() {
+        if (m_zoomLevel > 0) zoomOut(m_zoomLevel);
+        else if (m_zoomLevel < 0) zoomIn(-m_zoomLevel);
+        m_zoomLevel = 0;
+    }
+
 protected:
+    void resizeEvent(QResizeEvent* event) override {
+        QTextBrowser::resizeEvent(event);
+        positionFindBar();
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        if (event->matches(QKeySequence::Find)) {
+            showFindBar();
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Escape && m_findBar && m_findBar->isVisible()) {
+            hideFindBar();
+            event->accept();
+            return;
+        }
+        QTextBrowser::keyPressEvent(event);
+    }
+
     void wheelEvent(QWheelEvent* event) override {
         if (event->modifiers() & Qt::ControlModifier) {
             if (event->angleDelta().y() > 0) {
@@ -175,6 +303,19 @@ protected:
 
         QAction* selectAllAction = menu.addAction(tr("Select All"));
         connect(selectAllAction, &QAction::triggered, this, &MarkdownViewerWidget::selectAll);
+
+        QAction* findAction = menu.addAction(tr("Find in Document..."));
+        findAction->setShortcut(QKeySequence::Find);
+        connect(findAction, &QAction::triggered, this, &MarkdownViewerWidget::showFindBar);
+
+        QAction* printAction = menu.addAction(tr("Print..."));
+        connect(printAction, &QAction::triggered, this, &MarkdownViewerWidget::printDocument);
+
+        menu.addSeparator();
+
+        QAction* resetZoomAction = menu.addAction(tr("Reset Zoom"));
+        resetZoomAction->setEnabled(m_zoomLevel != 0);
+        connect(resetZoomAction, &QAction::triggered, this, &MarkdownViewerWidget::resetZoom);
 
         menu.addSeparator();
 

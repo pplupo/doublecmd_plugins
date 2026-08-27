@@ -11,6 +11,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <vector>
 #include <sys/stat.h>
 
 namespace MarkdownEngine {
@@ -495,11 +496,8 @@ h1, h2, h3, h4, h5, h6 {
     margin-bottom: 16px;
     font-weight: 600;
     line-height: 1.25;
+    color: #58a6ff;
 }
-body.theme-light h1, body.theme-light h2, body.theme-light h3,
-body.theme-light h4, body.theme-light h5, body.theme-light h6 { color: #1b1f23; }
-body.theme-dark h1, body.theme-dark h2, body.theme-dark h3,
-body.theme-dark h4, body.theme-dark h5, body.theme-dark h6 { color: #f0f6fc; }
 h1 { font-size: 2em; padding-bottom: .3em; }
 h2 { font-size: 1.5em; padding-bottom: .3em; }
 h3 { font-size: 1.25em; }
@@ -564,6 +562,10 @@ hr {
     background-color: #58a6ff;
     border: 0;
 }
+a { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+ol.footnotes { font-size: 0.9em; }
+sup a { text-decoration: none; }
 )";
 
 std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std::string &customCssPath) {
@@ -666,10 +668,111 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
     return "<!DOCTYPE html><html><head><style>" + cssStr + "</style></head><body class=\"" + bodyClass + "\">" + html + "</body></html>";
 }
 
+// md4c has no concept of Pandoc/PHP-Markdown-Extra style footnotes: a
+// `[^label]` inline reference plus a `[^label]: definition text` elsewhere
+// (usually grouped under the document's own "References" heading) are both
+// CommonMark-illegal syntax that md4c-html passes through completely
+// untouched as literal text -- e.g. a manually-numbered References section
+// written that way renders as broken raw "[^13]: Some Source, ..." text
+// instead of numbered, clickable citations. No std::regex here -- same
+// hand-written-scanner approach as findNextCodeBlock() above, for the same
+// confirmed-live libstdc++ locale-facet crash reason.
+struct FootnoteDef { std::string label, contentHtml; };
+struct FootnoteDefMatch { size_t start, end; std::string label, content; };
+
+// Finds the next `<p>[^label]: content</p>` footnote-definition paragraph
+// at/after `from`. A bare "[^" that isn't immediately followed by "]: " is
+// left alone -- it's just incidental text, not a definition.
+bool findNextFootnoteDef(const std::string &html, size_t from, FootnoteDefMatch &out) {
+    static const std::string openPrefix = "<p>[^";
+    while (true) {
+        size_t openPos = html.find(openPrefix, from);
+        if (openPos == std::string::npos) return false;
+        size_t labelStart = openPos + openPrefix.size();
+        size_t labelEnd = html.find(']', labelStart);
+        if (labelEnd == std::string::npos) return false;
+        std::string label = html.substr(labelStart, labelEnd - labelStart);
+        if (label.empty() || label.find('[') != std::string::npos ||
+            label.find(' ') != std::string::npos) { from = labelEnd + 1; continue; }
+        size_t afterLabel = labelEnd + 1;
+        if (afterLabel + 1 >= html.size() || html[afterLabel] != ':' || html[afterLabel + 1] != ' ') {
+            from = labelEnd + 1; continue;
+        }
+        size_t contentStart = afterLabel + 2;
+        static const std::string closeTag = "</p>";
+        size_t closePos = html.find(closeTag, contentStart);
+        if (closePos == std::string::npos) return false;
+
+        out.start = openPos;
+        out.end = closePos + closeTag.size();
+        out.label = std::move(label);
+        out.content = html.substr(contentStart, closePos - contentStart);
+        return true;
+    }
+}
+
+// Replaces every `[^label]` inline reference with a superscript anchor --
+// only for a label that has a matching definition, so incidental literal
+// "[^...]" text elsewhere in the document is never touched.
+std::string replaceFootnoteRefs(const std::string &htmlIn, const std::vector<FootnoteDef> &defs) {
+    std::string out = htmlIn;
+    for (const auto &def : defs) {
+        std::string token = "[^" + def.label + "]";
+        std::string replacement = "<sup><a href=\"#fn-" + def.label + "\" id=\"fnref-" +
+            def.label + "\">" + def.label + "</a></sup>";
+        size_t pos = 0;
+        while ((pos = out.find(token, pos)) != std::string::npos) {
+            out.replace(pos, token.size(), replacement);
+            pos += replacement.size();
+        }
+    }
+    return out;
+}
+
+// Strips every footnote-definition paragraph out of the document, converts
+// remaining inline [^label] references into superscript links, and drops a
+// generated numbered list of the definitions (each with a back-link to its
+// first reference) in where the first definition used to be -- matching
+// how kpartview's KDE-native markdownpart backend already renders the same
+// syntax. Returns the input unchanged if the document uses no footnotes.
+std::string processFootnotes(const std::string &htmlIn) {
+    static const std::string kPlaceholder = "\x01""FOOTNOTES_LIST\x01";
+    std::vector<FootnoteDef> defs;
+    std::string body;
+    size_t lastEnd = 0, searchFrom = 0;
+    bool placedMarker = false;
+    FootnoteDefMatch m;
+    while (findNextFootnoteDef(htmlIn, searchFrom, m)) {
+        body.append(htmlIn, lastEnd, m.start - lastEnd);
+        if (!placedMarker) { body += kPlaceholder; placedMarker = true; }
+        defs.push_back({m.label, m.content});
+        lastEnd = m.end;
+        searchFrom = m.end;
+    }
+    body.append(htmlIn, lastEnd, std::string::npos);
+
+    if (defs.empty()) return htmlIn;
+
+    body = replaceFootnoteRefs(body, defs);
+
+    std::string list = "<ol class=\"footnotes\">";
+    for (const auto &def : defs) {
+        list += "<li id=\"fn-" + def.label + "\">" + def.contentHtml +
+            " <a href=\"#fnref-" + def.label + "\">&#8617;</a></li>";
+    }
+    list += "</ol>";
+
+    size_t markerPos = body.find(kPlaceholder);
+    if (markerPos != std::string::npos) body.replace(markerPos, kPlaceholder.size(), list);
+    return body;
+}
+
 std::string renderMarkdown(const std::string &markdown, bool darkMode, const std::string &customCssPath) {
     mvLog("[renderMarkdown] ENTER markdown.size()=%zu darkMode=%d", markdown.size(), (int)darkMode);
     std::string html = parseMarkdownToHtml(markdown);
     mvLog("[renderMarkdown] parseMarkdownToHtml -> %zu bytes", html.size());
+    html = processFootnotes(html);
+    mvLog("[renderMarkdown] processFootnotes -> %zu bytes", html.size());
     html = replaceDiagramBlocks(html, darkMode);
     mvLog("[renderMarkdown] replaceDiagramBlocks -> %zu bytes", html.size());
     html = replaceMathTags(html, darkMode);

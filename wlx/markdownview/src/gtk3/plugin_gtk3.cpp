@@ -162,6 +162,12 @@ bool resolveDarkMode()
 struct MarkdownState {
     GtkWidget *root = nullptr;
     GtkWidget *webView = nullptr;
+    // In-document incremental search (Ctrl+F), matching kpartview's
+    // markdownpart backend and mirroring Qt6's find bar -- a small overlay
+    // on top of the webview, backed by WebKit's own find controller rather
+    // than reimplementing text search.
+    GtkWidget *findBar = nullptr;
+    GtkWidget *findEntry = nullptr;
     std::string filePath;
 
     GFileMonitor *monitor = nullptr;
@@ -329,6 +335,85 @@ gboolean onScroll(GtkWidget *widget, GdkEventScroll *event, gpointer)
     return TRUE;
 }
 
+// ── In-document find bar (Ctrl+F) ────────────────────────────────────
+// Backed by WebKit's own WebKitFindController rather than reimplementing
+// text search -- this searches the loaded document's own text, not the
+// same thing as Double Commander's own Ctrl+F (that's DC's lister search
+// UI driving ListSearchText below).
+void showFindBar(MarkdownState *st) {
+    gtk_widget_show(st->findBar);
+    gtk_widget_grab_focus(st->findEntry);
+    const gchar *text = gtk_entry_get_text(GTK_ENTRY(st->findEntry));
+    if (text && *text) {
+        gtk_editable_select_region(GTK_EDITABLE(st->findEntry), 0, -1);
+    }
+}
+void hideFindBar(MarkdownState *st) {
+    gtk_widget_hide(st->findBar);
+    webkit_find_controller_search_finish(webkit_web_view_get_find_controller(WEBKIT_WEB_VIEW(st->webView)));
+    gtk_widget_grab_focus(st->webView);
+}
+void doFind(MarkdownState *st, bool backward) {
+    const gchar *text = gtk_entry_get_text(GTK_ENTRY(st->findEntry));
+    if (!text || !*text) return;
+    WebKitFindController *fc = webkit_web_view_get_find_controller(WEBKIT_WEB_VIEW(st->webView));
+    guint32 options = WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE | WEBKIT_FIND_OPTIONS_WRAP_AROUND;
+    if (backward) options |= WEBKIT_FIND_OPTIONS_BACKWARDS;
+    webkit_find_controller_search(fc, text, options, G_MAXUINT);
+}
+gboolean onFindKeyPress(GtkWidget *, GdkEventKey *event, gpointer userData) {
+    auto *st = static_cast<MarkdownState *>(userData);
+    if (event->keyval == GDK_KEY_Escape) { hideFindBar(st); return TRUE; }
+    if (event->keyval == GDK_KEY_Return || event->keyval == GDK_KEY_KP_Enter) {
+        doFind(st, event->state & GDK_SHIFT_MASK);
+        return TRUE;
+    }
+    return FALSE;
+}
+gboolean onWebViewKeyPress(GtkWidget *, GdkEventKey *event, gpointer userData) {
+    auto *st = static_cast<MarkdownState *>(userData);
+    if ((event->state & GDK_CONTROL_MASK) && (event->keyval == GDK_KEY_f || event->keyval == GDK_KEY_F)) {
+        showFindBar(st);
+        return TRUE;
+    }
+    return FALSE;
+}
+GtkWidget *buildFindBar(MarkdownState *st) {
+    GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_halign(bar, GTK_ALIGN_END);
+    gtk_widget_set_valign(bar, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(bar, 8);
+    gtk_widget_set_margin_end(bar, 8);
+    gtk_style_context_add_class(gtk_widget_get_style_context(bar), "background");
+
+    st->findEntry = gtk_search_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(st->findEntry), "Find in document...");
+    gtk_widget_set_size_request(st->findEntry, 200, -1);
+    g_signal_connect(st->findEntry, "search-changed", G_CALLBACK(+[](GtkSearchEntry *, gpointer userData) {
+        doFind(static_cast<MarkdownState *>(userData), false);
+    }), st);
+    g_signal_connect(st->findEntry, "key-press-event", G_CALLBACK(onFindKeyPress), st);
+
+    GtkWidget *prevBtn = gtk_button_new_with_label("Prev");
+    GtkWidget *nextBtn = gtk_button_new_with_label("Next");
+    GtkWidget *closeBtn = gtk_button_new_with_label("✕");
+    g_signal_connect(prevBtn, "clicked", G_CALLBACK(+[](GtkButton *, gpointer userData) {
+        doFind(static_cast<MarkdownState *>(userData), true);
+    }), st);
+    g_signal_connect(nextBtn, "clicked", G_CALLBACK(+[](GtkButton *, gpointer userData) {
+        doFind(static_cast<MarkdownState *>(userData), false);
+    }), st);
+    g_signal_connect(closeBtn, "clicked", G_CALLBACK(+[](GtkButton *, gpointer userData) {
+        hideFindBar(static_cast<MarkdownState *>(userData));
+    }), st);
+
+    gtk_box_pack_start(GTK_BOX(bar), st->findEntry, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(bar), prevBtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bar), nextBtn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bar), closeBtn, FALSE, FALSE, 0);
+    return bar;
+}
+
 // ── Right-click context menu ─────────────────────────────────────────
 // Matches Qt6's MarkdownViewerWidget::contextMenuEvent item-for-item:
 // Copy Text, Select All, separator, Reload Document, Auto-Reload on Save
@@ -343,6 +428,19 @@ void onCopyText(GtkMenuItem *, gpointer userData) {
 void onSelectAll(GtkMenuItem *, gpointer userData) {
     auto *st = static_cast<MarkdownState *>(userData);
     webkit_web_view_execute_editing_command(WEBKIT_WEB_VIEW(st->webView), WEBKIT_EDITING_COMMAND_SELECT_ALL);
+}
+// Prints the page WebKit already has loaded -- i.e. whatever theme/CSS
+// reloadContent() most recently rendered into it (dark or light, default or
+// custom), same as the Qt6 side prints its already-rendered QTextDocument.
+void onPrint(GtkMenuItem *, gpointer userData) {
+    auto *st = static_cast<MarkdownState *>(userData);
+    WebKitPrintOperation *op = webkit_print_operation_new(WEBKIT_WEB_VIEW(st->webView));
+    webkit_print_operation_run_dialog(op, nullptr);
+    g_object_unref(op);
+}
+void onResetZoom(GtkMenuItem *, gpointer userData) {
+    auto *st = static_cast<MarkdownState *>(userData);
+    webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(st->webView), 1.0);
 }
 void onReloadDocument(GtkMenuItem *, gpointer userData) { reloadContent(static_cast<MarkdownState *>(userData)); }
 void onToggleAutoReload(GtkCheckMenuItem *item, gpointer) {
@@ -373,6 +471,12 @@ gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, We
 
     addItem("Copy Text", G_CALLBACK(onCopyText));
     addItem("Select All", G_CALLBACK(onSelectAll));
+    addItem("Find in Document...", G_CALLBACK(+[](GtkMenuItem *, gpointer userData) {
+        showFindBar(static_cast<MarkdownState *>(userData));
+    }));
+    addItem("Print...", G_CALLBACK(onPrint));
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+    addItem("Reset Zoom", G_CALLBACK(onResetZoom));
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
     addItem("Reload Document", G_CALLBACK(onReloadDocument));
 
@@ -478,13 +582,23 @@ try {
     g_signal_connect(st->webView, "scroll-event", G_CALLBACK(onScroll), st);
     g_signal_connect(st->webView, "context-menu", G_CALLBACK(onContextMenu), st);
     g_signal_connect(st->webView, "load-changed", G_CALLBACK(onLoadChanged), st);
+    g_signal_connect(st->webView, "key-press-event", G_CALLBACK(onWebViewKeyPress), st);
 
     ensureLargeStackLimit();
     reloadContent(st);
     startWatching(st);
 
-    gtk_container_add(GTK_CONTAINER(scrolledWin), st->webView);
+    // GtkOverlay lets the find bar float on top of the webview without
+    // restructuring the returned HWND -- scrolledWin (still the top-level
+    // widget DC gets back) -> overlay -> webView, with the find bar as the
+    // overlay's floating child.
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_container_add(GTK_CONTAINER(overlay), st->webView);
+    st->findBar = buildFindBar(st);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), st->findBar);
+    gtk_container_add(GTK_CONTAINER(scrolledWin), overlay);
     gtk_widget_show_all(scrolledWin);
+    gtk_widget_hide(st->findBar);
 
     g_signal_connect(scrolledWin, "destroy", G_CALLBACK(destroyState), st);
     g_object_set_data(G_OBJECT(scrolledWin), "__markdownview_state_ptr", st);
