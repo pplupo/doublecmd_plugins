@@ -26,6 +26,8 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QResizeEvent>
+#include <QTextBlock>
+#include <QTextImageFormat>
 #include <dlfcn.h>
 #include <cmath>
 
@@ -169,6 +171,58 @@ private:
     // actually works here.
     qreal m_baseFontPointSize = 0;
 
+    // Confirmed live that QTextBrowser::zoomIn()/zoomOut() (and, by
+    // extension, the font-scaling applyZoom() does above) never touch
+    // <img> sizing at all -- an image's width/height in QTextImageFormat
+    // has to be scaled explicitly. Captured once right after each
+    // setHtml() (see reloadContent()), before any zoom is applied, so
+    // repeated applyZoom() calls (every wheel notch) always scale from the
+    // true natural/unscaled size instead of compounding on top of an
+    // already-scaled one.
+    QVector<QSize> m_imageNaturalSizes;
+
+    void captureImageNaturalSizes() {
+        m_imageNaturalSizes.clear();
+        QTextDocument *doc = document();
+        if (!doc) return;
+        for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                QTextFragment frag = it.fragment();
+                if (!frag.isValid()) continue;
+                QTextCharFormat fmt = frag.charFormat();
+                if (fmt.isImageFormat()) {
+                    QTextImageFormat imgFmt = fmt.toImageFormat();
+                    m_imageNaturalSizes.append(QSize(qRound(imgFmt.width()), qRound(imgFmt.height())));
+                }
+            }
+        }
+    }
+
+    void scaleImages(double multiplier) {
+        if (m_imageNaturalSizes.isEmpty()) return;
+        QTextDocument *doc = document();
+        if (!doc) return;
+        QTextCursor cursor(doc);
+        int idx = 0;
+        for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                QTextFragment frag = it.fragment();
+                if (!frag.isValid()) continue;
+                QTextCharFormat fmt = frag.charFormat();
+                if (!fmt.isImageFormat()) continue;
+                if (idx >= m_imageNaturalSizes.size()) break;
+                QSize natural = m_imageNaturalSizes[idx++];
+                if (natural.width() <= 0 || natural.height() <= 0) continue; // no explicit size to scale from
+                QTextImageFormat imgFmt = fmt.toImageFormat();
+                imgFmt.setWidth(natural.width() * multiplier);
+                imgFmt.setHeight(natural.height() * multiplier);
+                cursor.setPosition(frag.position());
+                cursor.setPosition(frag.position() + frag.length(), QTextCursor::KeepAnchor);
+                cursor.setCharFormat(imgFmt);
+            }
+        }
+    }
+
     void applyZoom() {
         if (m_baseFontPointSize <= 0) return;
         double totalMultiplier = g_zoomMultiplier * (1.0 + 0.1 * m_zoomLevel);
@@ -181,6 +235,7 @@ private:
         // exists. QTextDocument::setDefaultFont() is what actually forces
         // the relayout against the new base size.
         if (document()) document()->setDefaultFont(f);
+        scaleImages(totalMultiplier);
     }
 
 public:
@@ -282,6 +337,7 @@ public:
 
         setHtml(QString::fromStdString(html));
         document()->setBaseUrl(QUrl::fromLocalFile(m_filePath).adjusted(QUrl::RemoveFilename));
+        captureImageNaturalSizes();
         applyZoom();
 
         if (horizontalScrollBar()) horizontalScrollBar()->setValue(currentScrollX);
