@@ -1095,6 +1095,14 @@ void EditorWidget::hostSetFocus(bool focus) {
         setFocus(Qt::OtherFocusReason);
         if (m_view) m_view->setFocus(Qt::OtherFocusReason);
     } else {
+        // Double Commander sends lc_focus(0) during directory refreshes
+        // (e.g. when Kate writes a swap file). If we still have native focus,
+        // it means the user is actively working in the editor and this is a
+        // spurious refresh, not a genuine focus loss.
+        QWidget *fw = QApplication::focusWidget();
+        if (fw && (fw == this || isAncestorOf(fw))) {
+            return;
+        }
         setActive(false);
     }
 }
