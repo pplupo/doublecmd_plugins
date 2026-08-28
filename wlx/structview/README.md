@@ -1,14 +1,17 @@
 # structview — Unified Structured Text Plugin
 
-A WLX plugin for [Double Commander](https://doublecmd.github.io/) that views and edits structured text files: **JSON**, **XML**, and **INI**.
+A WLX plugin for [Double Commander](https://doublecmd.github.io/) that views and edits structured text files: **JSON**, **XML**, **INI**, **CBOR**, **YAML**, and **TOML**.
 
 This plugin ships as **two independent native builds** — one for DC's **GTK3** build (`wlxbase_gtk`), one for its **Qt6** build (`wlxbase_wlqt`). Both share the same `structview_core` format-parsing engines (JSON/XML/INI), but a couple of features differ — see [Feature Differences](#feature-differences-gtk3-vs-qt6). Install whichever one matches your Double Commander build — they cannot be mixed.
 
 ## Features (both variants, unless noted below)
 
 - **JSON**: Flattens top-level arrays of objects into a grid. Columns = union of all keys. Nested values shown as compact JSON. Full roundtrip serialization preserving types.
+- **CBOR**: Binary JSON format parsed and mapped identically to the JSON grid view.
 - **XML**: Auto-detects repeating child elements as rows. Attributes shown as `@attr` columns. Non-tabular XML falls back to Name/Value layout.
 - **INI**: Section navigation list on the left, 2-column Key/Value grid on the right. Sections switch without losing edits.
+- **YAML**: Displays mappings and sequences, natively supporting nested tree building.
+- **TOML**: Supports parsing tables and arrays of tables into structured grids.
 - **Find** with scope filtering (All Cells, Current Column, Current Row) — read-only find, no replace (despite the panel being named "Find/Replace" internally, no format engine wires up a replace path on either toolkit).
 - **Full undo/redo** (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y)
 - **Save** (Ctrl+S) writes back to the original file
@@ -28,7 +31,7 @@ This plugin ships as **two independent native builds** — one for DC's **GTK3**
 | Open Externally shortcut | **`Ctrl+E`** — DC's GTK3 build treats `Ctrl+O` as a hardcoded hotkey that a plugin's key-snooper cannot preempt, so this variant deliberately uses a different binding | **`Ctrl+O`**                                                                     |
 | Encoding auto-detection  | **Not implemented** — files are read as-is, no non-UTF-8 encoding conversion                                                                                           | Detects file encoding via `EncodingUtils`/enca and auto-converts non-UTF-8 files |
 
-Everything else — JSON/XML/INI parsing and editing, Find, undo/redo, Save, Word wrap/grid lines — is implemented equivalently in both variants via the shared `structview_core` library.
+Everything else — JSON/CBOR/XML/INI/YAML/TOML parsing and editing, Find, undo/redo, Save, Word wrap/grid lines — is implemented equivalently in both variants via the shared `structview_core` library.
 
 ## Architecture
 
@@ -103,7 +106,7 @@ Output: `structview_qt6.wlx`
 Copy the `.wlx` file matching your Double Commander build (`structview_gtk3.wlx` or `structview_qt6.wlx`) to your Double Commander plugins directory and configure the detect string:
 
 ```
-EXT="JSON" | EXT="XML" | EXT="INI"
+EXT="JSON" | EXT="XML" | EXT="INI" | EXT="CBOR" | EXT="YAML" | EXT="TOML"
 ```
 
 ## Keyboard Shortcuts
@@ -121,5 +124,4 @@ EXT="JSON" | EXT="XML" | EXT="INI"
 
 ## Future
 
-- **CBOR** engine (stubbed in `structview_core` — architecture supports drop-in addition)
 - Additional structured text formats
