@@ -3,6 +3,8 @@
 #include <QKeyEvent>
 #include <QClipboard>
 #include <QGuiApplication>
+#include <QApplication>
+#include <QCoreApplication>
 #include <QPrinter>
 #include <QPrintDialog>
 #include <QMenu>
@@ -319,6 +321,20 @@ void ViewerWidget::keyPressEvent(QKeyEvent* event) {
             return;
         } else if (event->key() == Qt::Key_F) {
             showFindBar();
+            return;
+        } else if (event->key() == Qt::Key_Q) {
+            // DC's own hotkey manager (Ctrl+Q closes Quick View) never
+            // sees key events this widget handles locally -- it's a real
+            // embedded QWidget, but across a native-window boundary, so
+            // key events consumed here don't reach DC's top-level window.
+            // Repost it there explicitly, matching the pattern used by
+            // kpartview/logview for the same problem.
+            QWidget* target = QApplication::activeWindow();
+            if (!target) target = window();
+            if (target) {
+                QCoreApplication::postEvent(target, new QKeyEvent(QEvent::KeyPress, Qt::Key_Q, Qt::ControlModifier));
+                QCoreApplication::postEvent(target, new QKeyEvent(QEvent::KeyRelease, Qt::Key_Q, Qt::ControlModifier));
+            }
             return;
         }
     }

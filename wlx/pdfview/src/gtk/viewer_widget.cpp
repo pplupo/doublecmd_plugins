@@ -234,6 +234,10 @@ gboolean GtkViewerWidget::on_draw(GtkWidget* widget, cairo_t* cr, gpointer data)
 
 gboolean GtkViewerWidget::on_key_press(GtkWidget* widget, GdkEventKey* event, gpointer data) {
     GtkViewerWidget* self = static_cast<GtkViewerWidget*>(data);
+    // Ctrl+Q (close Quick View) is deliberately not handled here -- it
+    // falls through to `return FALSE` below so it propagates to DC's own
+    // window and its hotkey manager can act on it, same as mpv_wayland's
+    // GTK3 plugin does for the same key.
     if (event->state & GDK_CONTROL_MASK) {
         if (event->keyval == GDK_KEY_c || event->keyval == GDK_KEY_C) {
             self->copySelection();
