@@ -15,20 +15,22 @@
 namespace ChartRender {
 
 /// Renders a chart spec (raw JSON text, as captured from the fenced code
-/// block) to PNG bytes.
+/// block) to PNG bytes. Mirrors ~/repos/reports' charts.py's full spec
+/// shape: all 13 mark types, "layers" (several marks sharing one panel's
+/// axes, drawn in order), "panels" (a multi-panel figure, stacked
+/// vertically), and the cross-cutting log_x/log_y/ref_lines/ref_bands/
+/// annotations fields -- see charts.py's own module docstring for the
+/// full field-by-field spec, which this implementation follows.
 ///
-/// Supported spec["type"]: "line", "bar", "scatter" (unlike charts.py,
-/// "pie" is not supported). Common fields: title, xlabel, ylabel, figsize
-/// ([width, height] in inches). x is either all-numeric (a real numeric
-/// axis) or all-string (categorical positions with x as tick labels).
-/// Either a single unlabeled series via top-level y, or series: [{y,
-/// label, marker}, ...] for one or more labeled series sharing the same x.
-/// type:"bar" with multiple series draws grouped (side-by-side) bars by
-/// default; set stacked:true to stack them instead, or stacked:"percent"
-/// for a 100% stacked chart (each category rescaled to sum to 100, so
-/// every bar reaches the same height and shows each series' share) --
-/// all additions specific to this plugin, not part of charts.py's spec
-/// shape.
+/// Supported types: line, bar, barh, scatter, area, step, stem, errorbar,
+/// histogram, boxplot, violin, heatmap, pie. heatmap/pie have no shared
+/// x/y coordinate system (a pixel grid; a radial layout) and are only
+/// meaningful as a panel's sole layer -- see chart_render.cpp's top
+/// comment for the exact scoping.
+///
+/// type:"bar" additionally accepts stacked:"percent" (beyond charts.py's
+/// own plain stacked:true/false) for a 100% stacked chart -- a
+/// plugin-specific addition.
 ///
 /// Returns empty on any failure (malformed JSON, missing required fields,
 /// unsupported/missing type, empty data) -- same contract as
