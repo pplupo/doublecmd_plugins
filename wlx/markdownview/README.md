@@ -2,21 +2,74 @@
 
 A Lister (WLX) plugin for [Double Commander](https://doublecmd.sourceforge.io/) that provides rich, interactive previews of Markdown files (`.md`, `.markdown`, `.mdown`, `.mkd`).
 
-This plugin ships as **two independent native builds** — one for DC's **GTK3** build, one for its **Qt6** build. Both share the same Markdown/LaTeX/diagram rendering core (`src/core/`), the same CSS theming system, and the same context menu, but each links against its host toolkit directly and has some real behavioral differences (see [Feature Differences](#feature-differences-gtk3-vs-qt6) below). Install whichever one matches your Double Commander build — they cannot be mixed.
+This plugin ships as **two independent native builds** — one for DC's **GTK3** build, one for its **Qt6** build. Both share the same Markdown/LaTeX/diagram/chart rendering core (`src/core/`), the same CSS theming system, and the same context menu, but each links against its host toolkit directly and has some real behavioral differences (see [Feature Differences](#feature-differences-gtk3-vs-qt6) below). Install whichever one matches your Double Commander build — they cannot be mixed.
 
 ---
 
 ## Features & Capabilities (both variants)
 
 * **High-Fidelity Markdown Rendering**: Full support for CommonMark and GitHub-Flavored Markdown (tables, task lists, strikethrough, blockquotes, code blocks) powered by `md4c`.
-* **LaTeX Math Equations**: Renders inline (`$E=mc^2$`) and block (`$$\int_0^\infty f(x) dx$$`) mathematical equations locally using **MicroTeX**.
+* **LaTeX Math Equations**: Renders inline (`$E=mc^2$`) and block (`$$\int_0^\infty f(x) dx$$`) mathematical equations locally using **MicroTeX**, with a choice of **8 embedded OpenType math fonts** (see [Math Font Selection](#math-font-selection) below) — no system font installation required, and no network access.
+* **Chart Rendering (` ```chart ` blocks)**: Renders a JSON chart spec into a crisp embedded image, entirely locally via Cairo — no Python, no matplotlib, no network. Supports all **13 mark types** (line, bar, barh, scatter, area, step, stem, errorbar, histogram, boxplot, violin, heatmap, pie), layering multiple marks onto one panel, multi-panel figures, and log-scale/reference-line/reference-band/annotation overlays. See [Chart Rendering](#chart-rendering) below.
 * **Mermaid & PlantUML Diagrams**: Fetches and renders Mermaid and PlantUML diagrams into crisp high-DPI images, with a consistent accent color and automatic dark/light mode adaptation.
 * **Live Auto-Reload**: Watches opened files for changes and automatically re-renders the document when saved in an external editor.
-* **Theme Modes**: **System**, **Dark**, and **Light** rendering modes, switchable from the context menu.
+* **Theme Modes**: **System**, **Dark**, and **Light** rendering modes, switchable from the context menu. Chart/math-title text automatically matches the active CSS's own body/heading fonts.
 * **Interactive Navigation**:
-  * **Zooming**: `Ctrl` + Mouse Wheel to zoom in/out.
+  * **Zooming**: `Ctrl` + Mouse Wheel to zoom in/out, with a persistable "Save Zoom" level; LaTeX/diagram/chart images scale along with the surrounding text.
   * **Text Selection & Copy**: Native text selection with context menu and `Ctrl+C` copy support.
-* **Context Menu**: Copy Text, Select All, Reload Document, Auto-Reload on Save (toggle), Theme Mode (System/Dark/Light).
+  * **Ctrl+Q**: Closes Quick View even when the plugin has input focus.
+* **Context Menu**: Copy Text, Select All, Find in Document, Print, Save/Reset Zoom, Reload Document, Auto-Reload on Save (toggle), Theme Mode (System/Dark/Light), Math Font (Default + every available embedded/custom font).
+
+---
+
+## Math Font Selection
+
+LaTeX math is rendered locally by MicroTeX using real OpenType MATH-table fonts (not the old glyph-resource-pack approach). Eight fonts are embedded directly into the compiled `.wlx` binary and self-seeded on first use to:
+
+```path
+~/.config/doublecmd/markdownview_fonts/
+```
+
+Available fonts: **Latin Modern Math**, **IBM Plex Math**, **STIX Two Math**, **Libertinus Math**, **Fira Math**, **DejaVu Math TeX Gyre**, **TeX Gyre Pagella Math**, **Euler Math**. Pick one from the context menu's **Math Font** submenu — the choice persists to `markdownview.ini`'s `math_font` key and survives restarts.
+
+**Using your own font**: drop a matching `.otf`/`.clm1` pair into `markdownview_fonts/` (the `.clm1` is MicroTeX's own font-metrics format, generated from an `.otf` via its `otf2clm.py` conversion script) and it shows up in the Math Font menu automatically, no rebuild needed. A selector that fails to resolve to a valid font (missing file, wrong path, not a valid math font) silently falls back to the default font rather than failing the render.
+
+---
+
+## Chart Rendering
+
+A ` ```chart ` fenced code block contains a JSON spec describing one or more charts, rendered locally with Cairo. The spec shape mirrors the `reports` repo's own `charts.py` chart engine (matplotlib-backed there, native-Cairo here), so specs are portable between the two.
+
+**Simple example:**
+
+````markdown
+```chart
+{"type": "bar", "x": ["Q1", "Q2", "Q3", "Q4"], "y": [3, 7, 4, 9], "title": "Quarterly Sales"}
+```
+````
+
+**Supported `type` values**: `line`, `bar`, `barh`, `scatter`, `area`, `step`, `stem`, `errorbar`, `histogram`, `boxplot`, `violin`, `heatmap`, `pie`.
+
+**Common fields**: `title`, `xlabel`, `ylabel`, `figsize` (`[width, height]` in inches, default `[6, 4]`). `x` is either all-numeric (a real numeric axis) or all-string (categorical positions, used as tick labels). A single unlabeled series is `y: [...]`; multiple labeled series sharing the same `x` are `series: [{y, label, marker}, ...]` (adds a legend automatically).
+
+**`bar`-specific**: multiple series draw grouped (side-by-side) by default; `"stacked": true` stacks them, `"stacked": "percent"` makes a 100%-stacked chart (every bar the same height, showing each series' share) — the `"percent"` mode is a plugin-specific addition beyond `charts.py`'s own plain boolean.
+
+**Layering** — combine several mark types on one panel's shared axes:
+
+````markdown
+```chart
+{"layers": [
+  {"type": "barh", "bars": [{"y": 0, "width": 4, "left": 1}]},
+  {"type": "scatter", "points": [{"x": 1, "y": 0, "label": "Start"}, {"x": 5, "y": 0, "label": "End"}]}
+], "title": "Dumbbell"}
+```
+````
+
+**Multi-panel** — stack several panels vertically in one figure via top-level `"panels": [...]` (each element is its own single-type or `"layers"` panel spec), with `"shared_x": true|false` (default `true`, hides x tick labels on all but the last panel).
+
+**Cross-cutting fields** (any panel): `log_x`/`log_y` (bool), `ref_lines` (`[{axis, value, label, style: {color}}]`), `ref_bands` (`[{axis, low, high, label, style: {color}}]`), `annotations` (`[{x, y, text, xytext, ha, fontsize}]`).
+
+Malformed JSON or an unsupported type falls back to the block's plain text rather than breaking the render.
 
 ---
 
@@ -38,6 +91,13 @@ mode=system
 
 # Live auto-reload on file save: true | false (default: true)
 auto_reload=true
+
+# Persisted "Save Zoom" font-size multiplier (default: 1.0)
+zoom_multiplier=1.0
+
+# Selected LaTeX math font, as a .clm1 file path (see Math Font Selection
+# below) -- empty uses the default font (Latin Modern Math).
+math_font=
 ```
 
 ## CSS Styling & Customization
@@ -71,8 +131,9 @@ A single stylesheet covers both light and dark mode via `body.theme-light` / `bo
 ### Prerequisites (both variants)
 * CMake 3.16+
 * C++17 compiler (`g++` or `clang++`)
-* `clatexmath` font files (for MicroTeX LaTeX rendering, e.g. `/usr/share/clatexmath`)
-* `cairo`, `librsvg-2.0` (used by the shared toolkit-neutral core for diagram rasterization, regardless of which plugin target you build)
+* `cairo`, `librsvg-2.0` (used by the shared toolkit-neutral core for diagram rasterization and chart rendering, regardless of which plugin target you build)
+
+No system font files are required for LaTeX math rendering — MicroTeX (vendored from upstream's `openmath` branch, `3rdparty/MicroTeX/`) uses real OpenType MATH-table fonts, and all 8 supported fonts are embedded directly into the compiled binary (see [Math Font Selection](#math-font-selection)). The chart JSON spec is parsed with a vendored `nlohmann/json` single header (`3rdparty/nlohmann_json/`) — no separate install needed.
 
 ### GTK3 variant
 
