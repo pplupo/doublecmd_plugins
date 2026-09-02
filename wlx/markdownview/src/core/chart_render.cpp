@@ -84,14 +84,50 @@ std::vector<double> numArray(const json &arr) {
     return r;
 }
 
+// Shared per-axis category->position map for one panel. Any layer that
+// mentions the same category string -- whether it's the layer that
+// originally defined the axis (e.g. a barh's own category rows) or a
+// different layer referencing it by name (e.g. a scatter pin naming a
+// barh row it sits on) -- resolves to the SAME position. This is what
+// makes "layers" composites (charts.py's own dumbbell/timeline examples:
+// a thin barh connector plus scatter endpoints named by the same category)
+// actually line up; confirmed live that a real report's dumbbell/timeline
+// charts rendered with the scatter points and annotations entirely
+// missing before this existed, because nothing resolved a *string*
+// x/y value at all outside of the one layer that first declared the axis.
+struct CategoryRegistry {
+    std::vector<std::string> labels; // position -> label
+    std::map<std::string, int> indexOf;
+    int resolve(const std::string &s) {
+        auto it = indexOf.find(s);
+        if (it != indexOf.end()) return it->second;
+        int pos = (int)labels.size();
+        indexOf[s] = pos;
+        labels.push_back(s);
+        return pos;
+    }
+};
+
+// Resolves a single JSON scalar (number or string) against a category
+// registry -- used for individual point x/y (scatter "points",
+// annotations) where the value might reference a category a DIFFERENT
+// layer defined, not an array this layer owns. Returns false only for a
+// value that's neither (null, bool, object, array).
+bool resolveScalar(const json &v, CategoryRegistry &reg, double &out) {
+    if (v.is_number()) { out = v.get<double>(); return true; }
+    if (v.is_string()) { out = (double)reg.resolve(v.get<std::string>()); return true; }
+    return false;
+}
+
 // A JSON array of axis positions: either all-numeric (a real numeric axis)
-// or all-string (categorical positions 0..n-1, with the strings as labels).
+// or all-string (categorical positions resolved through the shared
+// registry, so every layer/point referencing the same label lands on the
+// same position).
 struct AxisPositions {
     std::vector<double> pos;
-    std::vector<std::string> labels;
     bool categorical = false;
 };
-AxisPositions parseAxisArray(const json &arr) {
+AxisPositions resolveAxisArray(const json &arr, CategoryRegistry &reg) {
     AxisPositions r;
     if (!arr.is_array() || arr.empty()) return r;
     bool allNumeric = true;
@@ -100,8 +136,10 @@ AxisPositions parseAxisArray(const json &arr) {
         for (const auto &v : arr) r.pos.push_back(v.get<double>());
     } else {
         r.categorical = true;
-        for (const auto &v : arr) r.labels.push_back(v.is_string() ? v.get<std::string>() : v.dump());
-        for (size_t i = 0; i < r.labels.size(); ++i) r.pos.push_back((double)i);
+        for (const auto &v : arr) {
+            std::string s = v.is_string() ? v.get<std::string>() : v.dump();
+            r.pos.push_back((double)reg.resolve(s));
+        }
     }
     return r;
 }
@@ -116,7 +154,14 @@ struct Layer {
 
 struct RefLine { std::string axis = "y"; double value = 0; std::string label; std::string colorHex; };
 struct RefBand { std::string axis = "y"; double low = 0, high = 0; std::string label; std::string colorHex; };
-struct Annotation { double x = 0, y = 0; std::string text; double dx = 0, dy = 10; std::string ha = "center"; double fontsize = 9; };
+// x/y kept as raw JSON (number or string) rather than resolved doubles --
+// resolving a string against the shared CategoryRegistry can only happen
+// once a panel's registries exist, at render time, not at parse time.
+// Parsing used to reject any annotation whose x/y wasn't already numeric,
+// which silently dropped every annotation naming a category (e.g. a
+// timeline's date pins labelled by the same row name as their barh) --
+// confirmed live against a real report spec.
+struct Annotation { json x, y; std::string text; double dx = 0, dy = 10; std::string ha = "center"; double fontsize = 9; };
 
 struct PanelSpec {
     std::vector<Layer> layers;
@@ -219,10 +264,10 @@ bool parsePanelSpec(const json &j, PanelSpec &out) {
     if (j.contains("annotations") && j["annotations"].is_array()) {
         for (const auto &an : j["annotations"]) {
             if (!an.is_object() || !an.contains("x") || !an.contains("y") || !an.contains("text") ||
-                !an["x"].is_number() || !an["y"].is_number()) continue;
+                !(an["x"].is_number() || an["x"].is_string()) || !(an["y"].is_number() || an["y"].is_string())) continue;
             Annotation a;
-            a.x = an["x"].get<double>();
-            a.y = an["y"].get<double>();
+            a.x = an["x"];
+            a.y = an["y"];
             a.text = an["text"].get<std::string>();
             if (an.contains("xytext") && an["xytext"].is_array() && an["xytext"].size() == 2 &&
                 an["xytext"][0].is_number() && an["xytext"][1].is_number()) {
@@ -285,9 +330,10 @@ bool parseTopSpec(const std::string &specJson, TopSpec &out) {
 struct AxisRange {
     double xmin = INFINITY, xmax = -INFINITY, ymin = INFINITY, ymax = -INFINITY;
     bool xCat = false;
-    std::map<int, std::string> xCatLabels; // absolute integer position -> label (bar: 0-based, boxplot/violin: 1-based)
+    std::map<int, std::string> xCatLabels; // absolute integer position -> label (synced from xReg, plus boxplot/violin's own 1-based positions)
     bool yCat = false;
-    std::map<int, std::string> yCatLabels; // barh only
+    std::map<int, std::string> yCatLabels; // synced from yReg (barh)
+    CategoryRegistry xReg, yReg; // shared across every layer in the panel -- see CategoryRegistry's comment
 };
 void extendX(AxisRange &r, double v) { if (std::isfinite(v)) { r.xmin = std::min(r.xmin, v); r.xmax = std::max(r.xmax, v); } }
 void extendY(AxisRange &r, double v) { if (std::isfinite(v)) { r.ymin = std::min(r.ymin, v); r.ymax = std::max(r.ymax, v); } }
@@ -295,8 +341,7 @@ void extendY(AxisRange &r, double v) { if (std::isfinite(v)) { r.ymin = std::min
 // line/area/step share this x + (y | series) shape.
 void extentXY(const json &L, AxisRange &r) {
     if (!L.contains("x")) return;
-    AxisPositions xa = parseAxisArray(L["x"]);
-    if (xa.categorical && !r.xCat) { r.xCat = true; for (size_t i = 0; i < xa.labels.size(); ++i) r.xCatLabels[(int)i] = xa.labels[i]; }
+    AxisPositions xa = resolveAxisArray(L["x"], r.xReg);
     for (double p : xa.pos) extendX(r, p);
     auto extY = [&](const json &yArr) { for (double v : numArray(yArr)) extendY(r, v); };
     if (L.contains("series") && L["series"].is_array()) {
@@ -309,35 +354,55 @@ void extentXY(const json &L, AxisRange &r) {
 void extentScatter(const json &L, AxisRange &r) {
     if (L.contains("points") && L["points"].is_array()) {
         for (const auto &p : L["points"]) {
-            if (p.is_object() && p.contains("x") && p["x"].is_number()) extendX(r, p["x"].get<double>());
-            if (p.is_object() && p.contains("y") && p["y"].is_number()) extendY(r, p["y"].get<double>());
+            if (!p.is_object()) continue;
+            double xv, yv;
+            if (p.contains("x") && resolveScalar(p["x"], r.xReg, xv)) extendX(r, xv);
+            if (p.contains("y") && resolveScalar(p["y"], r.yReg, yv)) extendY(r, yv);
         }
     } else {
         extentXY(L, r);
     }
 }
 
-void extentStem(const json &L, AxisRange &r) {
+void extentStem(const json &L, AxisRange &r, bool logY) {
     extentXY(L, r);
-    extendY(r, 0.0); // stem always draws from a 0 baseline
+    if (!logY) extendY(r, 0.0); // stem draws from a 0 baseline -- but 0 is never valid on a log axis
+}
+
+// yerr/xerr may be a flat array (symmetric, +/- the same amount each way)
+// or matplotlib's asymmetric convention: a [lower_array, upper_array] pair,
+// shape (2,N) -- distinguished by whether the array's own first element is
+// itself an array. A real report spec used the asymmetric form; the flat
+// numArray() read used here previously silently produced an empty error
+// list for it (each "element" was itself an array, never a number).
+struct AsymmetricErr { std::vector<double> lo, hi; };
+AsymmetricErr parseErr(const json &arr) {
+    AsymmetricErr e;
+    if (!arr.is_array() || arr.empty()) return e;
+    if (arr[0].is_array()) {
+        if (arr.size() >= 2) { e.lo = numArray(arr[0]); e.hi = numArray(arr[1]); }
+    } else {
+        e.lo = e.hi = numArray(arr);
+    }
+    return e;
 }
 
 void extentErrorbar(const json &L, AxisRange &r) {
     if (!L.contains("x") || !L.contains("y")) return;
     std::vector<double> xs = numArray(L["x"]), ys = numArray(L["y"]);
-    std::vector<double> yerr = L.contains("yerr") ? numArray(L["yerr"]) : std::vector<double>();
-    std::vector<double> xerr = L.contains("xerr") ? numArray(L["xerr"]) : std::vector<double>();
+    AsymmetricErr yerr = L.contains("yerr") ? parseErr(L["yerr"]) : AsymmetricErr{};
+    AsymmetricErr xerr = L.contains("xerr") ? parseErr(L["xerr"]) : AsymmetricErr{};
     for (size_t i = 0; i < xs.size() && i < ys.size(); ++i) {
-        double ye = i < yerr.size() ? yerr[i] : 0.0, xe = i < xerr.size() ? xerr[i] : 0.0;
-        extendX(r, xs[i] - xe); extendX(r, xs[i] + xe);
-        extendY(r, ys[i] - ye); extendY(r, ys[i] + ye);
+        double yeLo = i < yerr.lo.size() ? yerr.lo[i] : 0.0, yeHi = i < yerr.hi.size() ? yerr.hi[i] : 0.0;
+        double xeLo = i < xerr.lo.size() ? xerr.lo[i] : 0.0, xeHi = i < xerr.hi.size() ? xerr.hi[i] : 0.0;
+        extendX(r, xs[i] - xeLo); extendX(r, xs[i] + xeHi);
+        extendY(r, ys[i] - yeLo); extendY(r, ys[i] + yeHi);
     }
 }
 
-void extentBar(const json &L, AxisRange &r) {
+void extentBar(const json &L, AxisRange &r, bool logY) {
     if (!L.contains("x")) return;
-    AxisPositions xa = parseAxisArray(L["x"]);
-    if (xa.categorical && !r.xCat) { r.xCat = true; for (size_t i = 0; i < xa.labels.size(); ++i) r.xCatLabels[(int)i] = xa.labels[i]; }
+    AxisPositions xa = resolveAxisArray(L["x"], r.xReg);
     for (double p : xa.pos) extendX(r, p);
     size_t n = xa.pos.size();
 
@@ -355,25 +420,30 @@ void extentBar(const json &L, AxisRange &r) {
             extendY(r, pos); extendY(r, neg);
         }
     } else {
-        for (const auto &sy : seriesY) for (double v : sy) { extendY(r, v); extendY(r, 0.0); }
+        // A bar's own baseline (0) must be part of its extent so the bar
+        // itself is fully visible -- but only on a linear axis; 0 is
+        // never a valid position on a log axis. Forcing it in
+        // unconditionally silently disabled log_y entirely for any panel
+        // mixing a bar layer with a log-scale request: confirmed live, a
+        // log_y bar chart's y-axis fell back to linear with a nonsensical
+        // negative tick, because r.ymin (forced to <=0 here) failed
+        // logY's own "r.ymin > 0" precondition downstream.
+        for (const auto &sy : seriesY) for (double v : sy) { extendY(r, v); if (!logY) extendY(r, 0.0); }
     }
 }
 
 void extentBarh(const json &L, AxisRange &r) {
     if (L.contains("bars") && L["bars"].is_array()) {
-        std::vector<std::string> cats;
         for (const auto &b : L["bars"]) {
             if (!b.is_object()) continue;
             std::string cat = b.contains("y") ? (b["y"].is_string() ? b["y"].get<std::string>() : b["y"].dump()) : "";
-            if (std::find(cats.begin(), cats.end(), cat) == cats.end()) cats.push_back(cat);
+            int pos = r.yReg.resolve(cat);
             double width = b.value("width", 0.0), left = b.value("left", 0.0);
             extendX(r, left); extendX(r, left + width);
+            extendY(r, (double)pos);
         }
-        if (!r.yCat) { r.yCat = true; for (size_t i = 0; i < cats.size(); ++i) r.yCatLabels[(int)i] = cats[i]; }
-        for (size_t i = 0; i < cats.size(); ++i) extendY(r, (double)i);
     } else if (L.contains("x") && L.contains("y")) {
-        AxisPositions ya = parseAxisArray(L["y"]);
-        if (ya.categorical && !r.yCat) { r.yCat = true; for (size_t i = 0; i < ya.labels.size(); ++i) r.yCatLabels[(int)i] = ya.labels[i]; }
+        AxisPositions ya = resolveAxisArray(L["y"], r.yReg);
         for (double p : ya.pos) extendY(r, p);
         for (double v : numArray(L["x"])) { extendX(r, v); extendX(r, 0.0); }
     }
@@ -462,12 +532,12 @@ void extentViolin(const json &L, AxisRange &r) {
     }
 }
 
-void extentForType(const std::string &type, const json &L, AxisRange &r) {
+void extentForType(const std::string &type, const json &L, AxisRange &r, bool logY) {
     if (type == "line" || type == "area" || type == "step") extentXY(L, r);
     else if (type == "scatter") extentScatter(L, r);
-    else if (type == "stem") extentStem(L, r);
+    else if (type == "stem") extentStem(L, r, logY);
     else if (type == "errorbar") extentErrorbar(L, r);
-    else if (type == "bar") extentBar(L, r);
+    else if (type == "bar") extentBar(L, r, logY);
     else if (type == "barh") extentBarh(L, r);
     else if (type == "histogram") extentHistogram(L, r);
     else if (type == "boxplot") extentBoxplot(L, r);
@@ -485,6 +555,7 @@ struct PlotCtx {
     Rgb fg;
     int nextColor = 0;
     std::vector<std::pair<Rgb, std::string>> legend;
+    CategoryRegistry *xReg = nullptr, *yReg = nullptr; // same registries the extent pass used -- draw functions must resolve categorical values to identical positions
 
     double xToPx(double x) const {
         double xv = logX ? std::log10(std::max(x, 1e-300)) : x;
@@ -511,7 +582,7 @@ void setColor(cairo_t *cr, const Rgb &c, double alpha = 1.0) {
 void drawLine(PlotCtx &ctx, const json &L) {
     cairo_t *cr = ctx.cr;
     if (!L.contains("x")) return;
-    AxisPositions xa = parseAxisArray(L["x"]);
+    AxisPositions xa = resolveAxisArray(L["x"], *ctx.xReg);
     std::string marker = L.value("marker", std::string());
     auto drawOne = [&](const std::vector<double> &y, const std::string &label) {
         Rgb color = ctx.nextPaletteColor();
@@ -540,7 +611,7 @@ void drawLine(PlotCtx &ctx, const json &L) {
 void drawArea(PlotCtx &ctx, const json &L) {
     cairo_t *cr = ctx.cr;
     if (!L.contains("x")) return;
-    AxisPositions xa = parseAxisArray(L["x"]);
+    AxisPositions xa = resolveAxisArray(L["x"], *ctx.xReg);
     size_t n = xa.pos.size();
     bool stacked = L.value("stacked", false);
     std::vector<double> runningBase(n, 0.0);
@@ -587,7 +658,7 @@ void drawArea(PlotCtx &ctx, const json &L) {
 void drawStep(PlotCtx &ctx, const json &L) {
     cairo_t *cr = ctx.cr;
     if (!L.contains("x")) return;
-    AxisPositions xa = parseAxisArray(L["x"]);
+    AxisPositions xa = resolveAxisArray(L["x"], *ctx.xReg);
     std::string where = L.value("where", std::string("pre"));
     auto drawOne = [&](const std::vector<double> &y, const std::string &label) {
         Rgb color = ctx.nextPaletteColor();
@@ -625,7 +696,7 @@ void drawStep(PlotCtx &ctx, const json &L) {
 void drawStem(PlotCtx &ctx, const json &L) {
     cairo_t *cr = ctx.cr;
     if (!L.contains("x") || !L.contains("y")) return;
-    AxisPositions xa = parseAxisArray(L["x"]);
+    AxisPositions xa = resolveAxisArray(L["x"], *ctx.xReg);
     std::vector<double> y = numArray(L["y"]);
     Rgb color = ctx.nextPaletteColor();
     if (L.value("label", std::string()) != "") ctx.legend.push_back({color, L.value("label", std::string())});
@@ -646,8 +717,8 @@ void drawErrorbar(PlotCtx &ctx, const json &L) {
     cairo_t *cr = ctx.cr;
     if (!L.contains("x") || !L.contains("y")) return;
     std::vector<double> xs = numArray(L["x"]), ys = numArray(L["y"]);
-    std::vector<double> yerr = L.contains("yerr") ? numArray(L["yerr"]) : std::vector<double>();
-    std::vector<double> xerr = L.contains("xerr") ? numArray(L["xerr"]) : std::vector<double>();
+    AsymmetricErr yerr = L.contains("yerr") ? parseErr(L["yerr"]) : AsymmetricErr{};
+    AsymmetricErr xerr = L.contains("xerr") ? parseErr(L["xerr"]) : AsymmetricErr{};
     Rgb color = ctx.nextPaletteColor();
     std::string label = L.value("label", std::string());
     if (!label.empty()) ctx.legend.push_back({color, label});
@@ -656,14 +727,14 @@ void drawErrorbar(PlotCtx &ctx, const json &L) {
     double capsize = L.value("capsize", 3.0);
     for (size_t i = 0; i < xs.size() && i < ys.size(); ++i) {
         double px = ctx.xToPx(xs[i]), py = ctx.yToPx(ys[i]);
-        if (i < yerr.size()) {
-            double pyLo = ctx.yToPx(ys[i] - yerr[i]), pyHi = ctx.yToPx(ys[i] + yerr[i]);
+        if (i < yerr.lo.size() && i < yerr.hi.size()) {
+            double pyLo = ctx.yToPx(ys[i] - yerr.lo[i]), pyHi = ctx.yToPx(ys[i] + yerr.hi[i]);
             cairo_move_to(cr, px, pyLo); cairo_line_to(cr, px, pyHi); cairo_stroke(cr);
             cairo_move_to(cr, px - capsize, pyLo); cairo_line_to(cr, px + capsize, pyLo); cairo_stroke(cr);
             cairo_move_to(cr, px - capsize, pyHi); cairo_line_to(cr, px + capsize, pyHi); cairo_stroke(cr);
         }
-        if (i < xerr.size()) {
-            double pxLo = ctx.xToPx(xs[i] - xerr[i]), pxHi = ctx.xToPx(xs[i] + xerr[i]);
+        if (i < xerr.lo.size() && i < xerr.hi.size()) {
+            double pxLo = ctx.xToPx(xs[i] - xerr.lo[i]), pxHi = ctx.xToPx(xs[i] + xerr.hi[i]);
             cairo_move_to(cr, pxLo, py); cairo_line_to(cr, pxHi, py); cairo_stroke(cr);
             cairo_move_to(cr, pxLo, py - capsize); cairo_line_to(cr, pxLo, py + capsize); cairo_stroke(cr);
             cairo_move_to(cr, pxHi, py - capsize); cairo_line_to(cr, pxHi, py + capsize); cairo_stroke(cr);
@@ -676,7 +747,7 @@ void drawErrorbar(PlotCtx &ctx, const json &L) {
 void drawBar(PlotCtx &ctx, const json &L) {
     cairo_t *cr = ctx.cr;
     if (!L.contains("x")) return;
-    AxisPositions xa = parseAxisArray(L["x"]);
+    AxisPositions xa = resolveAxisArray(L["x"], *ctx.xReg);
     size_t n = xa.pos.size();
     if (n == 0) return;
 
@@ -722,7 +793,14 @@ void drawBar(PlotCtx &ctx, const json &L) {
             Rgb color = ctx.nextPaletteColor();
             if (!labels[si].empty()) ctx.legend.push_back({color, labels[si]});
             setColor(cr, color);
-            double baseY = ctx.yToPx(0.0);
+            // 0 is never a valid position on a log-scale axis -- yToPx(0.0)
+            // clamps it to log10(~0), a pixel position wildly outside the
+            // plot, and the bar's rectangle balloons down to it. Confirmed
+            // live: a log_y bar chart's bars overflowed the plot area
+            // entirely, painting over the x-axis tick labels below.
+            // matplotlib's own log-scale bars draw from the axis's own
+            // bottom edge instead, which is what ctx.ymin means here.
+            double baseY = ctx.logY ? ctx.yToPx(ctx.ymin) : ctx.yToPx(0.0);
             for (size_t i = 0; i < n && i < seriesY[si].size(); ++i) {
                 double cx = ctx.xToPx(xa.pos[i]);
                 double bx = cx - groupW / 2 + barW * si;
@@ -737,13 +815,29 @@ void drawBar(PlotCtx &ctx, const json &L) {
 void drawBarh(PlotCtx &ctx, const json &L) {
     cairo_t *cr = ctx.cr;
     if (L.contains("bars") && L["bars"].is_array()) {
+        // Category positions AND the total category count must both come
+        // from a complete pre-pass over every bar -- computing barH from
+        // cats.size() incrementally, INSIDE the same loop that grows cats
+        // as new categories are first seen, meant the first bar(s) were
+        // sized as if there were only 1-2 rows total (barH close to the
+        // full plot height) and only the last-processed category ended up
+        // correctly sized. Confirmed live: a 5-row Gantt-style chart
+        // rendered its first bar spanning nearly the entire plot height,
+        // overflowing off the canvas entirely.
         std::vector<std::string> cats;
         for (const auto &b : L["bars"]) {
             if (!b.is_object()) continue;
             std::string cat = b.contains("y") ? (b["y"].is_string() ? b["y"].get<std::string>() : b["y"].dump()) : "";
-            auto it = std::find(cats.begin(), cats.end(), cat);
-            int pos = it == cats.end() ? (int)cats.size() : (int)(it - cats.begin());
-            if (it == cats.end()) cats.push_back(cat);
+            if (std::find(cats.begin(), cats.end(), cat) == cats.end()) cats.push_back(cat);
+        }
+        for (const auto &b : L["bars"]) {
+            if (!b.is_object()) continue;
+            std::string cat = b.contains("y") ? (b["y"].is_string() ? b["y"].get<std::string>() : b["y"].dump()) : "";
+            // Position comes from the SHARED registry (same one the extent
+            // pass used), not a locally-rebuilt index -- so a scatter/
+            // annotation layer in the same panel naming this same category
+            // lands on the identical row, not just this layer's own count.
+            int pos = ctx.yReg->resolve(cat);
             double width = b.value("width", 0.0), left = b.value("left", 0.0), height = b.value("height", 0.8);
             Rgb color;
             std::string colorHex = b.value("color", std::string());
@@ -757,7 +851,7 @@ void drawBarh(PlotCtx &ctx, const json &L) {
             cairo_fill(cr);
         }
     } else if (L.contains("x") && L.contains("y")) {
-        AxisPositions ya = parseAxisArray(L["y"]);
+        AxisPositions ya = resolveAxisArray(L["y"], *ctx.yReg);
         std::vector<double> xs = numArray(L["x"]);
         Rgb color = ctx.nextPaletteColor();
         setColor(cr, color);
@@ -776,8 +870,18 @@ void drawScatter(PlotCtx &ctx, const json &L) {
     if (L.contains("points") && L["points"].is_array()) {
         for (const auto &p : L["points"]) {
             if (!p.is_object() || !p.contains("x") || !p.contains("y")) continue;
-            if (!p["x"].is_number() || !p["y"].is_number()) continue;
-            double px = ctx.xToPx(p["x"].get<double>()), py = ctx.yToPx(p["y"].get<double>());
+            // x/y resolved through the SHARED registries, not required to
+            // be numeric -- a point can name a category another layer in
+            // this panel defined (e.g. a dumbbell's scatter endpoints
+            // sitting on a barh's named rows) or, as a real report spec
+            // did, be a plain categorical scatter with no bar/barh layer
+            // at all. Requiring is_number() here previously dropped every
+            // such point silently: confirmed live, an entire scatter
+            // chart rendered as a blank axes box because every one of its
+            // points had a string x.
+            double pxVal, pyVal;
+            if (!resolveScalar(p["x"], *ctx.xReg, pxVal) || !resolveScalar(p["y"], *ctx.yReg, pyVal)) continue;
+            double px = ctx.xToPx(pxVal), py = ctx.yToPx(pyVal);
             double size = std::sqrt(std::max(1.0, p.value("size", 36.0))); // matplotlib's "size" is an area in pt^2
             bool filled = p.value("filled", true);
             Rgb color;
@@ -786,17 +890,30 @@ void drawScatter(PlotCtx &ctx, const json &L) {
             std::string label = p.value("label", std::string());
             if (!label.empty()) ctx.legend.push_back({color, label});
             cairo_arc(cr, px, py, size, 0, 2 * M_PI);
+            // An unfilled/"open" marker's outline used to always draw in
+            // the plain foreground text color, ignoring the point's own
+            // declared "color" entirely -- confirmed live against a real
+            // spec that explicitly set distinct colors per open marker
+            // (e.g. "#d95f02"), all rendering as identical plain black
+            // rings instead.
             if (filled) { setColor(cr, color); cairo_fill(cr); }
-            else { setColor(cr, ctx.fg); cairo_set_line_width(cr, 1.4); cairo_stroke(cr); }
+            else { setColor(cr, color); cairo_set_line_width(cr, 1.4); cairo_stroke(cr); }
             if (p.value("annotate", false)) {
+                // Prefer a dedicated "annotate_text" field over "label" --
+                // "label" is usually reused for the legend (one entry per
+                // verdict/category, not per point), so using it here left
+                // most points with no annotation at all and the few that
+                // had one showing the wrong text (the category name
+                // instead of a per-point value).
+                std::string annotateText = p.value("annotate_text", label);
                 cairo_set_font_size(cr, 8);
                 setColor(cr, ctx.fg);
                 cairo_move_to(cr, px + 4, py - 4);
-                cairo_show_text(cr, label.c_str());
+                cairo_show_text(cr, annotateText.c_str());
             }
         }
     } else if (L.contains("x")) {
-        AxisPositions xa = parseAxisArray(L["x"]);
+        AxisPositions xa = resolveAxisArray(L["x"], *ctx.xReg);
         auto drawOne = [&](const std::vector<double> &y, const std::string &label) {
             Rgb color = ctx.nextPaletteColor();
             if (!label.empty()) ctx.legend.push_back({color, label});
@@ -1142,41 +1259,39 @@ void renderPiePanel(cairo_t *cr, double x0, double y0, double x1, double y1, con
 
 void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y1, const PanelSpec &panel,
                            const Rgb &fg, const Rgb &gridColor, bool showXTickLabels, const char *bodyFont) {
-    double marginLeft = 55, marginRight = 20, marginTop = panel.title.empty() ? 10 : 30, marginBottom = showXTickLabels ? 30 : 10;
-    bool hasLegend = false; // determined after the draw pass, but layout needs to reserve space up front
-    // Cheap legend-presence check: any layer that could plausibly produce a label.
-    for (const auto &L : panel.layers) {
-        if (L.j.contains("label") && L.j["label"].is_string() && !L.j["label"].get<std::string>().empty()) hasLegend = true;
-        if (L.j.contains("series") && L.j["series"].is_array())
-            for (const auto &s : L.j["series"]) if (s.is_object() && s.value("label", std::string()) != "") hasLegend = true;
-        if (L.j.contains("bars") && L.j["bars"].is_array())
-            for (const auto &b : L.j["bars"]) if (b.is_object() && b.value("label", std::string()) != "") hasLegend = true;
-    }
-    if (hasLegend) marginTop += 20;
-    if (!panel.xlabel.empty() && showXTickLabels) marginBottom += 18;
-    if (!panel.ylabel.empty()) marginLeft += 15;
-
-    double px0 = x0 + marginLeft, py0 = y0 + marginTop, px1 = x1 - marginRight, py1 = y1 - marginBottom;
-    double pw = px1 - px0, ph = py1 - py0;
-    if (pw <= 10 || ph <= 10) return;
-
+    // Extent pass runs FIRST, before any margin is decided -- margins need
+    // to know the actual y-tick label text (categorical labels, or
+    // formatted numeric ticks) to size the left margin correctly, and
+    // that text isn't known until the axis range/scale is established.
+    // Confirmed live: a fixed left margin clipped categorical y-tick
+    // labels ("Shahed-136 / SAM interceptor" etc.) against the canvas
+    // edge whenever they didn't fit the old guess.
     AxisRange r;
-    for (const auto &L : panel.layers) extentForType(L.type, L.j, r);
+    for (const auto &L : panel.layers) extentForType(L.type, L.j, r, panel.logY);
     for (const auto &rl : panel.refLines) { if (rl.axis == "y") extendY(r, rl.value); else extendX(r, rl.value); }
     for (const auto &rb : panel.refBands) {
         if (rb.axis == "y") { extendY(r, rb.low); extendY(r, rb.high); }
         else { extendX(r, rb.low); extendX(r, rb.high); }
     }
+    for (const auto &a : panel.annotations) {
+        double xv, yv;
+        if (resolveScalar(a.x, r.xReg, xv)) extendX(r, xv);
+        if (resolveScalar(a.y, r.yReg, yv)) extendY(r, yv);
+    }
+    // Merge the shared registries' categories into xCatLabels/yCatLabels
+    // (additively -- boxplot/violin already populated their own 1-based
+    // entries directly into these same maps, via a completely separate
+    // per-panel numbering scheme that doesn't go through xReg/yReg).
+    if (!r.xReg.labels.empty()) { r.xCat = true; for (size_t i = 0; i < r.xReg.labels.size(); ++i) r.xCatLabels[(int)i] = r.xReg.labels[i]; }
+    if (!r.yReg.labels.empty()) { r.yCat = true; for (size_t i = 0; i < r.yReg.labels.size(); ++i) r.yCatLabels[(int)i] = r.yReg.labels[i]; }
+
     if (!std::isfinite(r.xmin) || !std::isfinite(r.xmax)) { r.xmin = 0; r.xmax = 1; }
     if (!std::isfinite(r.ymin) || !std::isfinite(r.ymax)) { r.ymin = 0; r.ymax = 1; }
     if (r.xmax == r.xmin) { r.xmax += 1; r.xmin -= 1; }
     if (r.ymax == r.ymin) { r.ymax += 1; r.ymin -= 1; }
 
-    PlotCtx ctx;
-    ctx.cr = cr; ctx.fg = fg;
-    ctx.plotX0 = px0; ctx.plotY0 = py0; ctx.plotX1 = px1; ctx.plotY1 = py1; ctx.plotW = pw; ctx.plotH = ph;
-    ctx.logX = panel.logX && r.xmin > 0;
-    ctx.logY = panel.logY && r.ymin > 0;
+    bool isLogX = panel.logX && r.xmin > 0;
+    bool isLogY = panel.logY && r.ymin > 0;
 
     // Same padding logic as the single-bar-chart case this generalizes:
     // categorical/bar-like axes need a full half-slot of margin (the
@@ -1191,22 +1306,72 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
     bool hasBarLikeLayer = false;
     for (const auto &L : panel.layers) if (L.type == "bar" || L.type == "boxplot" || L.type == "violin") hasBarLikeLayer = true;
 
-    if (ctx.logX) {
+    double finalXMin, finalXMax, finalYMin, finalYMax;
+    if (isLogX) {
         double lo = std::log10(r.xmin), hi = std::log10(r.xmax);
         double pad = (hi - lo) * 0.05;
-        ctx.xmin = std::pow(10.0, lo - pad); ctx.xmax = std::pow(10.0, hi + pad);
+        finalXMin = std::pow(10.0, lo - pad); finalXMax = std::pow(10.0, hi + pad);
     } else {
         double xPad = (r.xCat || hasBarLikeLayer) ? 0.6 : (r.xmax - r.xmin) * 0.03;
-        ctx.xmin = r.xmin - xPad; ctx.xmax = r.xmax + xPad;
+        finalXMin = r.xmin - xPad; finalXMax = r.xmax + xPad;
     }
-    if (ctx.logY) {
+    if (isLogY) {
         double lo = std::log10(r.ymin), hi = std::log10(r.ymax);
         double pad = (hi - lo) * 0.08;
-        ctx.ymin = std::pow(10.0, lo - pad); ctx.ymax = std::pow(10.0, hi + pad);
+        finalYMin = std::pow(10.0, lo - pad); finalYMax = std::pow(10.0, hi + pad);
     } else {
         double yPad = (r.yCat) ? 0.6 : (r.ymax - r.ymin) * 0.08;
-        ctx.ymin = r.ymin - yPad; ctx.ymax = r.ymax + yPad;
+        finalYMin = r.ymin - yPad; finalYMax = r.ymax + yPad;
     }
+
+    double marginLeft = 20, marginRight = 20, marginTop = panel.title.empty() ? 10 : 30, marginBottom = showXTickLabels ? 30 : 10;
+    bool hasLegend = false; // determined after the draw pass, but layout needs to reserve space up front
+    // Cheap legend-presence check: any layer that could plausibly produce a label.
+    for (const auto &L : panel.layers) {
+        if (L.j.contains("label") && L.j["label"].is_string() && !L.j["label"].get<std::string>().empty()) hasLegend = true;
+        if (L.j.contains("series") && L.j["series"].is_array())
+            for (const auto &s : L.j["series"]) if (s.is_object() && s.value("label", std::string()) != "") hasLegend = true;
+        if (L.j.contains("bars") && L.j["bars"].is_array())
+            for (const auto &b : L.j["bars"]) if (b.is_object() && b.value("label", std::string()) != "") hasLegend = true;
+    }
+    if (hasLegend) marginTop += 20;
+    if (!panel.xlabel.empty() && showXTickLabels) marginBottom += 18;
+    if (!panel.ylabel.empty()) marginLeft += 15;
+
+    // Measure the widest y-tick label text (categorical labels, or the
+    // formatted numeric ticks the gridline loop below will draw) to size
+    // marginLeft to what's actually needed, rather than a fixed guess.
+    cairo_select_font_face(cr, bodyFont, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 9.5);
+    double maxYLabelWidth = 0;
+    if (r.yCat) {
+        for (const auto &[pos, label] : r.yCatLabels) {
+            cairo_text_extents_t ext; cairo_text_extents(cr, label.c_str(), &ext);
+            maxYLabelWidth = std::max(maxYLabelWidth, ext.width);
+        }
+    } else {
+        constexpr int kYTicks = 5;
+        for (int i = 0; i <= kYTicks; ++i) {
+            double yVal = isLogY
+                ? std::pow(10.0, std::log10(finalYMin) + (std::log10(finalYMax) - std::log10(finalYMin)) * i / kYTicks)
+                : finalYMin + (finalYMax - finalYMin) * i / kYTicks;
+            std::string label = formatTick(yVal) + (panel.yIsPercent ? "%" : "");
+            cairo_text_extents_t ext; cairo_text_extents(cr, label.c_str(), &ext);
+            maxYLabelWidth = std::max(maxYLabelWidth, ext.width);
+        }
+    }
+    marginLeft += maxYLabelWidth;
+
+    double px0 = x0 + marginLeft, py0 = y0 + marginTop, px1 = x1 - marginRight, py1 = y1 - marginBottom;
+    double pw = px1 - px0, ph = py1 - py0;
+    if (pw <= 10 || ph <= 10) return;
+
+    PlotCtx ctx;
+    ctx.cr = cr; ctx.fg = fg;
+    ctx.plotX0 = px0; ctx.plotY0 = py0; ctx.plotX1 = px1; ctx.plotY1 = py1; ctx.plotW = pw; ctx.plotH = ph;
+    ctx.logX = isLogX; ctx.logY = isLogY;
+    ctx.xmin = finalXMin; ctx.xmax = finalXMax; ctx.ymin = finalYMin; ctx.ymax = finalYMax;
+    ctx.xReg = &r.xReg; ctx.yReg = &r.yReg;
 
     // --- gridlines + ticks ---
     setColor(cr, gridColor);
@@ -1239,6 +1404,19 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
         }
     }
     if (showXTickLabels) {
+        // The first/last tick sits exactly at xmin/xmax -- i.e. exactly at
+        // the plot's own left/right edge (px0/px1) -- so a wide label
+        // centered on it always extends past that edge by half its own
+        // width. marginRight is a small fixed 20px with no allowance for
+        // that overhang: confirmed live, a 7-character tick ("2026.60")
+        // at the rightmost position overflowed straight past the canvas's
+        // own physical edge, clipped mid-character. Clamp every label's
+        // horizontal position to stay fully inside [x0, x1] instead of
+        // trusting the centered position never overhangs.
+        auto clampedTextX = [&](double centerPx, double width, double xBearing) {
+            double tx = centerPx - (width / 2 + xBearing);
+            return std::max(x0 + 2, std::min(tx, x1 - width - 2));
+        };
         if (r.xCat) {
             size_t stride = std::max<size_t>(1, r.xCatLabels.size() / 12);
             size_t i = 0;
@@ -1247,7 +1425,7 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
                 double px = ctx.xToPx((double)pos);
                 cairo_text_extents_t ext; cairo_text_extents(cr, label.c_str(), &ext);
                 setColor(cr, fg);
-                cairo_move_to(cr, px - (ext.width / 2 + ext.x_bearing), py1 + ext.height + 8);
+                cairo_move_to(cr, clampedTextX(px, ext.width, ext.x_bearing), py1 + ext.height + 8);
                 cairo_show_text(cr, label.c_str());
             }
         } else {
@@ -1260,7 +1438,7 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
                 std::string label = formatTick(xVal);
                 cairo_text_extents_t ext; cairo_text_extents(cr, label.c_str(), &ext);
                 setColor(cr, fg);
-                cairo_move_to(cr, px - (ext.width / 2 + ext.x_bearing), py1 + ext.height + 8);
+                cairo_move_to(cr, clampedTextX(px, ext.width, ext.x_bearing), py1 + ext.height + 8);
                 cairo_show_text(cr, label.c_str());
             }
         }
@@ -1279,6 +1457,10 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
         if (rb.axis == "y") cairo_rectangle(cr, px0, ctx.yToPx(rb.high), pw, ctx.yToPx(rb.low) - ctx.yToPx(rb.high));
         else cairo_rectangle(cr, ctx.xToPx(rb.low), py0, ctx.xToPx(rb.high) - ctx.xToPx(rb.low), ph);
         cairo_fill(cr);
+        // ref_lines add themselves to the legend below; ref_bands never
+        // did, silently dropping labels like "Wheeled-resupply
+        // survivability threshold" -- confirmed live against a real spec.
+        if (!rb.label.empty()) ctx.legend.push_back({c, rb.label});
     }
 
     // --- layers ---
@@ -1299,14 +1481,33 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
     // --- annotations ---
     cairo_set_font_size(cr, 9);
     for (const auto &a : panel.annotations) {
+        double xv, yv;
+        if (!resolveScalar(a.x, r.xReg, xv) || !resolveScalar(a.y, r.yReg, yv)) continue;
         setColor(cr, fg);
-        double px = ctx.xToPx(a.x) + a.dx, py = ctx.yToPx(a.y) - a.dy;
-        cairo_text_extents_t ext; cairo_text_extents(cr, a.text.c_str(), &ext);
-        double tx = px;
-        if (a.ha == "center") tx -= ext.width / 2;
-        else if (a.ha == "right") tx -= ext.width;
-        cairo_move_to(cr, tx, py);
-        cairo_show_text(cr, a.text.c_str());
+        double px = ctx.xToPx(xv) + a.dx, py = ctx.yToPx(yv) - a.dy;
+        // cairo_show_text() has no concept of a newline -- a literal "\n"
+        // in the text (matplotlib/textwrap-style multi-line annotations,
+        // used throughout a real report spec, e.g. "Camp Atterbury\n61/61
+        // (Sep 2025)") rendered as a single-line tofu/missing-glyph box
+        // instead of two lines. Split and draw each line separately,
+        // stacked with a normal line-height gap.
+        std::vector<std::string> lines;
+        size_t start = 0;
+        while (true) {
+            size_t nl = a.text.find('\n', start);
+            lines.push_back(a.text.substr(start, nl == std::string::npos ? std::string::npos : nl - start));
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+        double lineHeight = a.fontsize + 3;
+        for (size_t li = 0; li < lines.size(); ++li) {
+            cairo_text_extents_t ext; cairo_text_extents(cr, lines[li].c_str(), &ext);
+            double tx = px;
+            if (a.ha == "center") tx -= ext.width / 2;
+            else if (a.ha == "right") tx -= ext.width;
+            cairo_move_to(cr, tx, py + li * lineHeight);
+            cairo_show_text(cr, lines[li].c_str());
+        }
     }
 
     // --- title / axis labels ---
