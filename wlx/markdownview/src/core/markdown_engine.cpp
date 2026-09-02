@@ -1,9 +1,10 @@
 #include "markdown_engine.h"
 #include "diagram_render.h"
 #include "latex_render.h"
+#include "chart_render.h"
+#include "embedded_fonts.h"
 
 #include <md4c-html.h>
-#include "latex.h"
 
 #include <cstdlib>
 #include <cstdio>
@@ -12,13 +13,61 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <set>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <map>
+#include <algorithm>
 
 namespace MarkdownEngine {
 
 namespace {
 
 bool fileExists(const std::string &path) { struct stat st; return stat(path.c_str(), &st) == 0; }
+
+// Maps a math font's .clm1 file path -- the identifier renderFileToHtml()/
+// renderTextToHtml()'s mathFontClmPath parameter takes, and what's
+// actually persisted in the ini -- to MicroTeX's own internal registered
+// name (LatexFontEntry::canonicalName, read from the font file itself; see
+// latex_render.h's comment on that field). A path is used as the
+// identifier rather than a display name specifically so a user can point
+// the ini straight at any .clm1/.otf pair of their own with zero
+// name-matching involved, and so "this path doesn't resolve to anything
+// loadable" collapses to exactly the same case as "no path given" (see
+// resolveMathFontCanonicalName() below) -- passing an unresolved name
+// straight to MicroTeX::parse() doesn't fail gracefully: confirmed live
+// via a debug build + gdb backtrace that it segfaults deep inside
+// env.upem() on a null font pointer instead of throwing or falling back.
+// Populated for the fonts known at init() time; resolveMathFontCanonicalName()
+// extends it lazily for any other path it's asked to resolve.
+std::map<std::string, std::string> g_clmPathToCanonical;
+
+// Resolves a persisted/ini clmPath selector to the canonical name
+// MicroTeX::parse() needs, loading the font on demand via addLatexFont()
+// if init() didn't already know about it (e.g. an ini path outside the
+// fonts dir). Always returns a name safe to pass to MicroTeX::parse() --
+// empty for "use the default font", covering both an empty selector and
+// any selector that fails to resolve to a real, valid math font.
+std::string resolveMathFontCanonicalName(const std::string &clmPathSelector) {
+    if (clmPathSelector.empty()) return "";
+    auto it = g_clmPathToCanonical.find(clmPathSelector);
+    if (it != g_clmPathToCanonical.end()) return it->second;
+
+    // Not seen before: try loading it now. Matching .otf is assumed to sit
+    // right next to the .clm1 under the same stem -- the same convention
+    // init()'s embedded/auto-discovered fonts already use.
+    std::string canonical;
+    static const std::string clmExt = ".clm1";
+    if (clmPathSelector.size() > clmExt.size() &&
+        clmPathSelector.compare(clmPathSelector.size() - clmExt.size(), clmExt.size(), clmExt) == 0) {
+        std::string otfPath = clmPathSelector.substr(0, clmPathSelector.size() - clmExt.size()) + ".otf";
+        if (fileExists(clmPathSelector) && fileExists(otfPath)) {
+            canonical = addLatexFont(clmPathSelector, otfPath);
+        }
+    }
+    g_clmPathToCanonical[clmPathSelector] = canonical; // cache the failure too -- avoids retrying a bad ini path on every render
+    return canonical;
+}
 
 std::string readFileUtf8(const std::string &path) {
     std::ifstream f(path, std::ios::binary);
@@ -282,7 +331,35 @@ std::string parseMarkdownToHtml(const std::string &markdown) {
 
 // --- Fenced code block post-processing: mermaid/plantuml -> rendered image ---
 
-std::string renderDiagramImgTag(const std::string &lang, const std::string &code, bool darkMode) {
+// Full definition + implementation is much further down (resolveChartCssFonts()),
+// alongside the rest of the CSS-handling code it depends on (DEFAULT_CSS,
+// resolveActiveCss(), etc.) -- forward-declared here since it's needed by
+// renderChartImgTag() below, which textually comes first.
+struct ChartCssFonts {
+    std::string bodyFamily;
+    std::string titleFamily;
+    bool titleBold = true;
+};
+ChartCssFonts resolveChartCssFonts(const std::string &customCssPath);
+
+// ```chart blocks (a JSON spec, same shape ~/repos/reports' charts.py
+// uses) render straight to PNG via Cairo -- no SVG intermediate, unlike
+// mermaid/plantuml below, so it's handled separately rather than folded
+// into the svg/rasterize pipeline the other two share.
+std::string renderChartImgTag(const std::string &code, bool darkMode, const std::string &customCssPath) {
+    int w = 0, h = 0;
+    ChartCssFonts fonts = resolveChartCssFonts(customCssPath);
+    std::vector<uint8_t> png = ChartRender::renderChartToPng(code, darkMode, fonts.bodyFamily, fonts.titleFamily, fonts.titleBold, w, h);
+    if (png.empty()) return {};
+    std::string b64 = base64Encode(png);
+    std::string tag = "<p align=\"center\">\n<img src=\"data:image/png;base64," + b64 + "\"";
+    if (w > 0 && h > 0) tag += " width=\"" + std::to_string(w) + "\" height=\"" + std::to_string(h) + "\"";
+    tag += " />\n</p>\n";
+    return tag;
+}
+
+std::string renderDiagramImgTag(const std::string &lang, const std::string &code, bool darkMode, const std::string &customCssPath) {
+    if (lang == "chart") return renderChartImgTag(code, darkMode, customCssPath);
     std::string svg;
     if (lang == "mermaid") {
         svg = DiagramRender::renderMermaidWeb(code, darkMode);
@@ -333,7 +410,7 @@ bool findNextCodeBlock(const std::string &html, size_t from, CodeBlockMatch &out
         // Must be immediately followed by `>` (matches the original
         // regex's literal `">` right after the captured language group).
         if (langEnd + 1 >= html.size() || html[langEnd + 1] != '>') { from = langEnd + 1; continue; }
-        if (lang != "mermaid" && lang != "plantuml" && lang != "puml") { from = langEnd + 1; continue; }
+        if (lang != "mermaid" && lang != "plantuml" && lang != "puml" && lang != "chart") { from = langEnd + 1; continue; }
 
         size_t codeStart = langEnd + 2;
         static const std::string closeTag = "</code></pre>";
@@ -351,14 +428,14 @@ bool findNextCodeBlock(const std::string &html, size_t from, CodeBlockMatch &out
     }
 }
 
-std::string replaceDiagramBlocks(const std::string &htmlIn, bool darkMode) {
+std::string replaceDiagramBlocks(const std::string &htmlIn, bool darkMode, const std::string &customCssPath) {
     std::string out;
     size_t lastEnd = 0;
     size_t searchFrom = 0;
     CodeBlockMatch m;
     while (findNextCodeBlock(htmlIn, searchFrom, m)) {
         std::string code = htmlUnescape(m.code);
-        std::string rendered = renderDiagramImgTag(m.lang, code, darkMode);
+        std::string rendered = renderDiagramImgTag(m.lang, code, darkMode, customCssPath);
         out.append(htmlIn, lastEnd, m.start - lastEnd);
         out += rendered.empty() ? htmlIn.substr(m.start, m.end - m.start) : rendered; // fall back to the plain code block on failure
         lastEnd = m.end;
@@ -374,9 +451,10 @@ std::string replaceDiagramBlocks(const std::string &htmlIn, bool darkMode) {
 // non-standard tag by design (HTML has no native math element), meant to be
 // post-processed by the consumer. That's us.
 
-std::string renderMathTag(const std::string &tex, bool isDisplay, bool darkMode) {
+std::string renderMathTag(const std::string &tex, bool isDisplay, bool darkMode, const std::string &mathFontClmPath) {
     int w = 0, h = 0;
-    std::vector<uint8_t> png = renderLatexToPng(tex, darkMode, w, h);
+    std::string resolvedFontName = resolveMathFontCanonicalName(mathFontClmPath);
+    std::vector<uint8_t> png = renderLatexToPng(tex, darkMode, resolvedFontName, w, h);
     if (png.empty()) {
         // Fallback: plain text, same shape as the original md4qt-based code's
         // non-LaTeX/parse-failure fallback. `tex` is the raw (unescaped)
@@ -441,14 +519,14 @@ bool findXEquationTag(const std::string &s, size_t from, size_t &matchStart, siz
     }
 }
 
-std::string replaceMathTags(const std::string &htmlIn, bool darkMode) {
+std::string replaceMathTags(const std::string &htmlIn, bool darkMode, const std::string &mathFontClmPath) {
     std::string out;
     size_t lastEnd = 0, searchFrom = 0;
     size_t ms, me; bool isDisplay; std::string rawTexEscaped;
     while (findXEquationTag(htmlIn, searchFrom, ms, me, isDisplay, rawTexEscaped)) {
         std::string rawTex = htmlUnescape(rawTexEscaped);
         out.append(htmlIn, lastEnd, ms - lastEnd);
-        out += renderMathTag(rawTex, isDisplay, darkMode);
+        out += renderMathTag(rawTex, isDisplay, darkMode, mathFontClmPath);
         lastEnd = me;
         searchFrom = me;
     }
@@ -558,6 +636,164 @@ ol.footnotes { font-size: 0.9em; }
 sup a { text-decoration: none; }
 )";
 
+// CSS lookup precedence: customCssPath (the ini's theme_file_path) ->
+// <dir of DefaultIniName>/markdownview.css -> ~/.config/markdownpart.css ->
+// built-in default (written out to <dir of DefaultIniName>/markdownview.css
+// if nothing was found anywhere, so there's always a real file to edit).
+// Extracted out of postProcessHtml (which still calls this) so
+// resolveChartCssFonts() below can read the SAME active stylesheet's
+// font-family before postProcessHtml ever runs -- chart rendering
+// (replaceDiagramBlocks) happens earlier in renderMarkdown() than CSS
+// resolution/embedding did, previously.
+std::string resolveActiveCss(const std::string &customCssPath) {
+    // Whenever customCssPath itself isn't what ends up being used (empty,
+    // stale, or nothing found at all), g_lastAutoResolvedCssPath records
+    // the file that WAS used so the caller can write it back into the ini's
+    // theme_file_path -- keeping the ini honest about what's actually
+    // rendering instead of silently drifting from it.
+    g_lastAutoResolvedCssPath.clear();
+
+    std::string cssStr, targetCssFile;
+    if (!customCssPath.empty() && fileExists(customCssPath)) {
+        targetCssFile = customCssPath;
+    }
+    std::string dirCss;
+    if (targetCssFile.empty()) {
+        dirCss = g_pluginConfigDir + "/markdownview.css";
+        std::string userPartCss = homeDir() + "/.config/markdownpart.css";
+        if (fileExists(dirCss)) {
+            targetCssFile = dirCss;
+            g_lastAutoResolvedCssPath = dirCss;
+        } else if (fileExists(userPartCss)) {
+            targetCssFile = userPartCss;
+            g_lastAutoResolvedCssPath = userPartCss;
+        }
+    }
+    if (!targetCssFile.empty()) cssStr = readFileUtf8(targetCssFile);
+    if (cssStr.empty()) {
+        cssStr = DEFAULT_CSS;
+        // Nothing on disk anywhere in the lookup chain -- seed a real,
+        // user-editable file at <dir of DefaultIniName>/markdownview.css
+        // instead of only ever using this in-memory constant, so there's
+        // always something to customize from. Written once; every
+        // subsequent render finds it via the normal fileExists() check
+        // above and this branch never runs again.
+        if (!dirCss.empty()) {
+            writeFileUtf8(dirCss, DEFAULT_CSS);
+            g_lastAutoResolvedCssPath = dirCss;
+        }
+    }
+    return cssStr;
+}
+
+std::string trim(const std::string &s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// --- Chart title/body font: mirror the active CSS's own fonts ---
+//
+// Cairo's "toy" text API (chart_render.cpp) takes one bare family name, not
+// a CSS-style comma-separated fallback stack -- so picking a usable name
+// out of a real stack like `-apple-system, BlinkMacSystemFont, "Segoe UI",
+// Roboto, Helvetica, Arial, sans-serif` (the shipped default theme's body
+// rule) means skipping the Apple/Windows-only aliases up front (never real
+// installed font names on Linux) and taking the first genuinely-named
+// entry after that -- "Roboto" here. Fontconfig substitutes silently if
+// the chosen name isn't actually installed (same graceful-degradation
+// behavior the plain "sans-serif" default already relied on), so this is
+// a best-effort match, not a guarantee of a pixel-identical font.
+std::string pickConcreteFontFamily(const std::string &rawFontFamilyValue) {
+    static const std::vector<std::string> kSkipAliases = {
+        "-apple-system", "blinkmacsystemfont", "segoe ui", "system-ui", "-webkit-system-font"
+    };
+    static const std::vector<std::string> kGenericKeywords = {
+        "sans-serif", "serif", "monospace", "cursive", "fantasy"
+    };
+    std::string firstGeneric;
+    size_t pos = 0;
+    while (pos < rawFontFamilyValue.size()) {
+        size_t comma = rawFontFamilyValue.find(',', pos);
+        std::string token = rawFontFamilyValue.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        pos = (comma == std::string::npos) ? rawFontFamilyValue.size() : comma + 1;
+        token = trim(token);
+        if (token.size() >= 2 && (token.front() == '"' || token.front() == '\'') && token.back() == token.front())
+            token = token.substr(1, token.size() - 2);
+        if (token.empty()) continue;
+        std::string lower = token;
+        for (char &c : lower) c = (char)std::tolower((unsigned char)c);
+        bool isSkipAlias = std::find(kSkipAliases.begin(), kSkipAliases.end(), lower) != kSkipAliases.end();
+        if (isSkipAlias) continue;
+        bool isGeneric = std::find(kGenericKeywords.begin(), kGenericKeywords.end(), lower) != kGenericKeywords.end();
+        if (isGeneric) { if (firstGeneric.empty()) firstGeneric = token; continue; }
+        return token; // first concrete (non-alias, non-generic) name found
+    }
+    return firstGeneric; // nothing concrete -- fall back to whatever generic keyword was present, or "" if none
+}
+
+bool isBoldCssWeight(const std::string &weightValue) {
+    std::string v = trim(weightValue);
+    for (char &c : v) c = (char)std::tolower((unsigned char)c);
+    if (v == "bold" || v == "bolder") return true;
+    try { return std::stoi(v) >= 600; } catch (...) { return false; }
+}
+
+// Finds the `{ ... }` block body for a CSS rule whose selector list
+// contains `token` as a whole word (e.g. "h1" matches "h1, h2, h3 { ... }"
+// but not "th1" or "phi1"). Hand-written rather than std::regex-based --
+// this file already avoids std::regex entirely (see findNextCodeBlock's
+// comment for why: a real, confirmed-live SIGSEGV in libstdc++'s regex
+// locale setup, not a style preference).
+std::string findCssRuleBlock(const std::string &css, const std::string &token) {
+    size_t searchFrom = 0;
+    while (true) {
+        size_t pos = css.find(token, searchFrom);
+        if (pos == std::string::npos) return "";
+        char before = (pos == 0) ? '\0' : css[pos - 1];
+        char after = (pos + token.size() < css.size()) ? css[pos + token.size()] : '\0';
+        bool beforeOk = before == '\0' || before == ',' || before == '{' || before == '}' || std::isspace((unsigned char)before);
+        bool afterOk = after == '\0' || after == ',' || after == '{' || std::isspace((unsigned char)after);
+        if (beforeOk && afterOk) {
+            size_t brace = css.find('{', pos);
+            if (brace == std::string::npos) return "";
+            size_t closeBrace = css.find('}', brace); // CSS rules don't nest -- first close is the match
+            if (closeBrace == std::string::npos) return "";
+            return css.substr(brace + 1, closeBrace - brace - 1);
+        }
+        searchFrom = pos + token.size();
+    }
+}
+
+std::string cssPropertyValue(const std::string &block, const std::string &prop) {
+    size_t p = block.find(prop);
+    if (p == std::string::npos) return "";
+    p = block.find(':', p + prop.size());
+    if (p == std::string::npos) return "";
+    ++p;
+    size_t end = block.find(';', p);
+    return trim(block.substr(p, (end == std::string::npos ? block.size() : end) - p));
+}
+
+// ChartCssFonts is forward-declared (with renderChartImgTag(), its first
+// caller) up near the top of this fenced-code-block-handling section.
+ChartCssFonts resolveChartCssFonts(const std::string &customCssPath) {
+    std::string css = resolveActiveCss(customCssPath);
+    std::string bodyRaw = cssPropertyValue(findCssRuleBlock(css, "body"), "font-family");
+    std::string headingBlock = findCssRuleBlock(css, "h1");
+    std::string headingRaw = cssPropertyValue(headingBlock, "font-family");
+    if (headingRaw.empty()) headingRaw = bodyRaw; // default theme's h1..h6 rule doesn't redefine font-family, only weight/size
+
+    ChartCssFonts fonts;
+    fonts.bodyFamily = pickConcreteFontFamily(bodyRaw);
+    fonts.titleFamily = pickConcreteFontFamily(headingRaw);
+    if (fonts.titleFamily.empty()) fonts.titleFamily = fonts.bodyFamily;
+    std::string weightRaw = cssPropertyValue(headingBlock, "font-weight");
+    fonts.titleBold = weightRaw.empty() ? true : isBoldCssWeight(weightRaw); // headings are almost always bold; default theme sets 600 explicitly
+    return fonts;
+}
+
 std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std::string &customCssPath) {
     std::string html = rawHtml;
 
@@ -597,52 +833,11 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
     replaceAll(html, "<hr />", hrReplacement);
     replaceAll(html, "<hr>", hrReplacement);
 
-    // CSS lookup precedence: customCssPath (the ini's theme_file_path) ->
-    // <dir of DefaultIniName>/markdownview.css -> ~/.config/markdownpart.css
-    // -> built-in default (written out to <dir of DefaultIniName>/markdownview.css
-    // if nothing was found anywhere, so there's always a real file to edit).
     // One file covers BOTH themes (see DEFAULT_CSS above) -- no more
     // "-dark"-suffixed sibling file lookup; the `body.theme-light`/
     // `body.theme-dark` class selector on <body> below does the
     // light/dark split within a single stylesheet.
-    //
-    // Whenever customCssPath itself isn't what ends up being used (empty,
-    // stale, or nothing found at all), g_lastAutoResolvedCssPath records
-    // the file that WAS used so the caller can write it back into the ini's
-    // theme_file_path -- keeping the ini honest about what's actually
-    // rendering instead of silently drifting from it.
-    g_lastAutoResolvedCssPath.clear();
-
-    std::string cssStr, targetCssFile;
-    if (!customCssPath.empty() && fileExists(customCssPath)) {
-        targetCssFile = customCssPath;
-    }
-    std::string dirCss;
-    if (targetCssFile.empty()) {
-        dirCss = g_pluginConfigDir + "/markdownview.css";
-        std::string userPartCss = homeDir() + "/.config/markdownpart.css";
-        if (fileExists(dirCss)) {
-            targetCssFile = dirCss;
-            g_lastAutoResolvedCssPath = dirCss;
-        } else if (fileExists(userPartCss)) {
-            targetCssFile = userPartCss;
-            g_lastAutoResolvedCssPath = userPartCss;
-        }
-    }
-    if (!targetCssFile.empty()) cssStr = readFileUtf8(targetCssFile);
-    if (cssStr.empty()) {
-        cssStr = DEFAULT_CSS;
-        // Nothing on disk anywhere in the lookup chain -- seed a real,
-        // user-editable file at <dir of DefaultIniName>/markdownview.css
-        // instead of only ever using this in-memory constant, so there's
-        // always something to customize from. Written once; every
-        // subsequent render finds it via the normal fileExists() check
-        // above and this branch never runs again.
-        if (!dirCss.empty()) {
-            writeFileUtf8(dirCss, DEFAULT_CSS);
-            g_lastAutoResolvedCssPath = dirCss;
-        }
-    }
+    std::string cssStr = resolveActiveCss(customCssPath);
 
     // <body> always carries a class naming the active mode, so a single
     // custom theme file can hold both a light and a dark ruleset (scoped
@@ -815,22 +1010,95 @@ std::string processFootnotes(const std::string &htmlIn) {
     return body;
 }
 
-std::string renderMarkdown(const std::string &markdown, bool darkMode, const std::string &customCssPath) {
+std::string renderMarkdown(const std::string &markdown, bool darkMode, const std::string &customCssPath, const std::string &mathFontClmPath) {
     std::string html = parseMarkdownToHtml(markdown);
     html = processFootnotes(html);
-    html = replaceDiagramBlocks(html, darkMode);
-    html = replaceMathTags(html, darkMode);
+    html = replaceDiagramBlocks(html, darkMode, customCssPath);
+    html = replaceMathTags(html, darkMode, mathFontClmPath);
     std::string result = postProcessHtml(html, darkMode, customCssPath);
     return result;
 }
 
+// Sanitizes a font display name ("IBM Plex Math") into a filesystem-safe
+// stem ("IBM_Plex_Math") for the .otf/.clm files self-seeded under it.
+std::string sanitizeFontFileStem(const std::string &name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) out += (c == ' ') ? '_' : c;
+    return out;
+}
+
+std::string mathFontsDir() {
+    return homeDir() + "/.config/doublecmd/markdownview_fonts";
+}
+
 } // namespace
 
+// Vendored MicroTeX is upstream's "openmath" branch (github.com/
+// NanoMichael/MicroTeX/tree/openmath), NOT master -- confirmed live that
+// master has zero code reading a .clm file at all (only a leftover,
+// unwired otf2clm.py conversion script), despite a 2021 discussion
+// announcing this exact feature ("uni-math": arbitrary OpenType math
+// fonts via a one-time otf2clm conversion). The real implementation only
+// ever landed on this separate, still-actively-maintained
+// (last commit Aug 2024) branch. Confirmed working end-to-end before
+// adopting it: built platform/qt and platform/cairo cleanly against this
+// project's real toolchain, then test-rendered a real formula through
+// each of the 8 embedded fonts below and visually verified every one.
 void init() {
     static bool microtex_initialized = false;
-    if (!microtex_initialized) {
-        tex::LaTeX::init("/usr/share/clatexmath");
-        microtex_initialized = true;
+    if (microtex_initialized) return;
+    microtex_initialized = true;
+
+    std::string fontsDir = mathFontsDir();
+    std::vector<LatexFontEntry> fonts;
+    std::set<std::string> knownStems;
+
+    // Embedded fonts: self-seed each to disk once (MicroTeX's FontSrcFile
+    // needs a real .otf file path -- see latex_render_qt.cpp/
+    // latex_render_cairo.cpp), same idea as markdownview.css seeding
+    // itself into the config dir. Written once; every subsequent init()
+    // in a later process just finds the existing files via fileExists().
+    for (const auto &font : MarkdownEngine::embeddedFonts()) {
+        std::string stem = sanitizeFontFileStem(font.name);
+        std::string otfPath = fontsDir + "/" + stem + ".otf";
+        std::string clmPath = fontsDir + "/" + stem + ".clm1";
+        if (!fileExists(otfPath)) {
+            writeFileUtf8(otfPath, std::string(reinterpret_cast<const char *>(font.otfData), font.otfSize));
+        }
+        if (!fileExists(clmPath)) {
+            writeFileUtf8(clmPath, std::string(reinterpret_cast<const char *>(font.clmData), font.clmSize));
+        }
+        fonts.push_back({font.name, otfPath, clmPath});
+        knownStems.insert(stem);
+    }
+
+    // Auto-discovery: any *.otf with a same-stem *.clm1 dropped into the
+    // fonts dir by hand (or pointed at via a symlink) that isn't one of
+    // the embedded fonts above shows up as a selectable font too, no ini
+    // editing or rebuild needed.
+    DIR *dir = opendir(fontsDir.c_str());
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string name(entry->d_name);
+            static const std::string ext = ".otf";
+            if (name.size() <= ext.size() || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)
+                continue;
+            std::string stem = name.substr(0, name.size() - ext.size());
+            if (knownStems.count(stem)) continue;
+            std::string otfPath = fontsDir + "/" + name;
+            std::string clmPath = fontsDir + "/" + stem + ".clm1";
+            if (!fileExists(clmPath)) continue; // needs both halves
+            fonts.push_back({stem, otfPath, clmPath});
+            knownStems.insert(stem);
+        }
+        closedir(dir);
+    }
+
+    initLatexFonts(fonts);
+    for (const auto &f : fonts) {
+        if (!f.canonicalName.empty()) g_clmPathToCanonical[f.clmPath] = f.canonicalName;
     }
 }
 
@@ -842,16 +1110,50 @@ std::string getLastAutoResolvedCssPath() {
     return g_lastAutoResolvedCssPath;
 }
 
-std::string renderFileToHtml(const std::string &filePath, bool darkMode, const std::string &customCssPath) {
+std::vector<MathFontInfo> availableMathFonts() {
+    std::vector<MathFontInfo> fonts;
+    std::string fontsDir = mathFontsDir();
+    // Auto-discovery below matches by sanitized filename STEM (what the
+    // embedded fonts were actually self-seeded to disk as, e.g.
+    // "IBM_Plex_Math.otf"), not by display name -- otherwise every
+    // embedded font's own seeded files look like a brand new discovered
+    // font and each one is listed twice.
+    std::set<std::string> knownStems;
+    for (const auto &font : MarkdownEngine::embeddedFonts()) {
+        std::string stem = sanitizeFontFileStem(font.name);
+        fonts.push_back({font.name, fontsDir + "/" + stem + ".clm1"});
+        knownStems.insert(stem);
+    }
+    DIR *dir = opendir(fontsDir.c_str());
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            std::string name(entry->d_name);
+            static const std::string ext = ".otf";
+            if (name.size() <= ext.size() || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)
+                continue;
+            std::string stem = name.substr(0, name.size() - ext.size());
+            if (knownStems.count(stem)) continue;
+            std::string clmPath = fontsDir + "/" + stem + ".clm1";
+            if (!fileExists(clmPath)) continue;
+            fonts.push_back({stem, clmPath});
+            knownStems.insert(stem);
+        }
+        closedir(dir);
+    }
+    return fonts;
+}
+
+std::string renderFileToHtml(const std::string &filePath, bool darkMode, const std::string &customCssPath, const std::string &mathFontClmPath) {
     init();
     std::string content = readFileUtf8(filePath);
-    std::string result = renderMarkdown(content, darkMode, customCssPath);
+    std::string result = renderMarkdown(content, darkMode, customCssPath, mathFontClmPath);
     return result;
 }
 
-std::string renderTextToHtml(const std::string &markdownText, bool darkMode, const std::string &customCssPath) {
+std::string renderTextToHtml(const std::string &markdownText, bool darkMode, const std::string &customCssPath, const std::string &mathFontClmPath) {
     init();
-    return renderMarkdown(markdownText, darkMode, customCssPath);
+    return renderMarkdown(markdownText, darkMode, customCssPath, mathFontClmPath);
 }
 
 } // namespace MarkdownEngine
