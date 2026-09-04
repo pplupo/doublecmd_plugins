@@ -14,6 +14,21 @@
 /// LaTeX rendering does.
 namespace ChartRender {
 
+/// Which backend renderChartToPng() below uses. "Auto" (the default) tries
+/// Matplot++/gnuplot first and falls back to the native Cairo renderer per
+/// chart on any failure or unsupported feature -- unchanged from this
+/// plugin's original soft-dependency behavior. "CairoOnly" skips the
+/// Matplot++ attempt entirely (e.g. for a user who prefers the lighter,
+/// dependency-free renderer even where Matplot++ would work). "Off" skips
+/// chart rendering altogether -- renderChartToPng() returns empty
+/// unconditionally, so the caller's existing empty-result fallback leaves
+/// the fenced ```chart block showing as plain text.
+enum class RendererMode { Auto, CairoOnly, Off };
+
+/// Set once (e.g. from the plugin's ini-backed settings) before any
+/// renderChartToPng() call; persists across calls until changed again.
+void setRendererMode(RendererMode mode);
+
 /// Renders a chart spec (raw JSON text, as captured from the fenced code
 /// block) to PNG bytes. Mirrors ~/repos/reports' charts.py's full spec
 /// shape: all 13 mark types, "layers" (several marks sharing one panel's

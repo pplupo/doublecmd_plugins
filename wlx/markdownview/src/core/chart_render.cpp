@@ -1,4 +1,7 @@
 #include "chart_render.h"
+#include <cstdio>
+#include "chart_spec.h"
+#include "chart_render_matplotpp.h"
 
 #include "../../3rdparty/nlohmann_json/json.hpp"
 
@@ -32,20 +35,41 @@
 namespace {
 
 using nlohmann::json;
+// Spec model (Layer, PanelSpec, TopSpec, RefLine/RefBand/Annotation,
+// numArray, parseTopSpec) lives in chart_spec.h/.cpp now -- shared
+// verbatim with chart_render_matplotpp.cpp's renderer, since parsing the
+// spec is identical between the two; only how a parsed PanelSpec becomes
+// pixels differs.
+using namespace ChartSpec;
 
 struct Rgb { double r, g, b; };
+Rgb hexRgb(unsigned int hex) { return {((hex >> 16) & 0xFF) / 255.0, ((hex >> 8) & 0xFF) / 255.0, (hex & 0xFF) / 255.0}; }
 
-// A short prefix of matplotlib's default "tab10" color cycle -- enough for
-// any realistic number of series in a report chart, cycled if exceeded.
-const Rgb kPalette[] = {
-    {0x1f / 255.0, 0x77 / 255.0, 0xb4 / 255.0},
-    {0xff / 255.0, 0x7f / 255.0, 0x0e / 255.0},
-    {0x2c / 255.0, 0xa0 / 255.0, 0x2c / 255.0},
-    {0xd6 / 255.0, 0x27 / 255.0, 0x28 / 255.0},
-    {0x94 / 255.0, 0x67 / 255.0, 0xbd / 255.0},
-    {0x8c / 255.0, 0x56 / 255.0, 0x4b / 255.0},
+// Design tokens ported from ~/repos/reports/charts.py's own _apply_theme()
+// (the matplotlib renderer these reports were originally designed for) --
+// an off-white "surface" instead of pure white, muted warm-gray ink instead
+// of flat black, and a soft desaturated 8-color categorical palette instead
+// of matplotlib's harsher default "tab10". Chosen once at the top of
+// renderChartCairoToPng() (see g_activePalette) based on darkMode, rather
+// than threading a bool through every one of nextPaletteColor()'s ~15 call
+// sites -- single-threaded, one chart rendered at a time, so a
+// render-scoped global is safe here the same way ChartRender's own
+// g_rendererMode already is.
+const Rgb kPaletteLight[] = {
+    hexRgb(0x2a78d6), hexRgb(0xeb6834), hexRgb(0x1baf7a), hexRgb(0xeda100),
+    hexRgb(0xe87ba4), hexRgb(0x008300), hexRgb(0x4a3aa7), hexRgb(0xe34948),
 };
-constexpr int kPaletteSize = sizeof(kPalette) / sizeof(kPalette[0]);
+// Same 8 hues, lightened/softened for a dark surface -- charts.py has no
+// dark variant of its own (the reports it feeds are print/PDF, light-only),
+// so this is this plugin's own equivalent: same hue identity per slot, but
+// bright enough to read on a near-black background the way the light
+// palette reads on off-white.
+const Rgb kPaletteDark[] = {
+    hexRgb(0x5b9ee8), hexRgb(0xf0885c), hexRgb(0x3ecb96), hexRgb(0xf0b840),
+    hexRgb(0xee9ac0), hexRgb(0x5abf5a), hexRgb(0x7d6bd0), hexRgb(0xea6f6e),
+};
+const Rgb *g_activePalette = kPaletteLight;
+int g_activePaletteSize = (int)(sizeof(kPaletteLight) / sizeof(kPaletteLight[0]));
 
 cairo_status_t writeToString(void *closure, const unsigned char *data, unsigned int length) {
     static_cast<std::string *>(closure)->append(reinterpret_cast<const char *>(data), length);
@@ -66,7 +90,78 @@ std::string formatTick(double v) {
     return ss.str();
 }
 
+// See chart_render_matplotpp.cpp's niceNum/niceLinearTicks/logDecadeTicks
+// for the full writeup -- identical algorithm (Heckbert's "nice number",
+// Graphics Gems 1990), needed here for the same reason: this renderer's
+// tick loops used to just divide [finalXMin, finalXMax] into kXTicks/
+// kYTicks EQUAL steps (a plain lerp, not a real locator), giving the same
+// non-round tick labels the Matplot++ path did before this fix.
+double niceNum(double range, bool round) {
+    if (!(range > 0)) return 1.0;
+    double exponent = std::floor(std::log10(range));
+    double fraction = range / std::pow(10.0, exponent);
+    double niceFraction;
+    if (round) {
+        if (fraction < 1.5) niceFraction = 1;
+        else if (fraction < 3) niceFraction = 2;
+        else if (fraction < 7) niceFraction = 5;
+        else niceFraction = 10;
+    } else {
+        if (fraction <= 1) niceFraction = 1;
+        else if (fraction <= 2) niceFraction = 2;
+        else if (fraction <= 5) niceFraction = 5;
+        else niceFraction = 10;
+    }
+    return niceFraction * std::pow(10.0, exponent);
+}
+
+std::vector<double> niceLinearTicks(double lo, double hi, int targetTicks = 6) {
+    std::vector<double> out;
+    if (!(hi > lo)) { out.push_back(lo); return out; }
+    double range = niceNum(hi - lo, false);
+    double step = niceNum(range / std::max(1, targetTicks - 1), true);
+    if (!(step > 0)) { out.push_back(lo); out.push_back(hi); return out; }
+    double niceMin = std::floor(lo / step) * step;
+    double niceMax = std::ceil(hi / step) * step;
+    for (double v = niceMin; v <= niceMax + step * 0.5; v += step) out.push_back(v);
+    return out;
+}
+
+// One tick per decade -- label text is plain "10^n" here (Cairo has no
+// gnuplot-style enhanced-text superscript markup to hand this off to), so
+// callers draw it with actual Unicode superscript digits instead; see
+// superscriptDecadeLabel below.
+std::vector<double> logDecadeTicks(double lo, double hi) {
+    std::vector<double> out;
+    if (!(lo > 0) || !(hi > lo)) { out.push_back(std::max(lo, 1e-300)); out.push_back(hi); return out; }
+    int loDecade = (int)std::floor(std::log10(lo));
+    int hiDecade = (int)std::ceil(std::log10(hi));
+    for (int d = loDecade; d <= hiDecade; ++d) out.push_back(std::pow(10.0, d));
+    return out;
+}
+
+std::string superscriptDecadeLabel(double tickValue) {
+    static const char *kSupDigits[10] = {"⁰", "¹", "²", "³", "⁴",
+                                          "⁵", "⁶", "⁷", "⁸", "⁹"};
+    int exponent = (int)std::lround(std::log10(tickValue));
+    std::string digits = std::to_string(std::abs(exponent));
+    std::string sup;
+    if (exponent < 0) sup += "⁻"; // superscript minus
+    for (char c : digits) sup += kSupDigits[c - '0'];
+    return "10" + sup;
+}
+
+// See chart_render_matplotpp.cpp's parseNamedColor for the full writeup --
+// identical fix, Rgb (no alpha) here instead of Rgba.
+bool parseNamedColor(const std::string &s, Rgb &out) {
+    if (s == "black") { out = {0, 0, 0}; return true; }
+    if (s == "white") { out = {1, 1, 1}; return true; }
+    if (s == "gray" || s == "grey") { out = {0.5, 0.5, 0.5}; return true; }
+    return false;
+}
+
 bool parseHexColor(const std::string &s, Rgb &out) {
+    if (parseNamedColor(s, out)) return true;
     if (s.size() != 7 || s[0] != '#') return false;
     try {
         out = {std::stoi(s.substr(1, 2), nullptr, 16) / 255.0,
@@ -76,12 +171,6 @@ bool parseHexColor(const std::string &s, Rgb &out) {
     } catch (const std::exception &) {
         return false;
     }
-}
-
-std::vector<double> numArray(const json &arr) {
-    std::vector<double> r;
-    if (arr.is_array()) for (const auto &v : arr) if (v.is_number()) r.push_back(v.get<double>());
-    return r;
 }
 
 // Shared per-axis category->position map for one panel. Any layer that
@@ -142,185 +231,6 @@ AxisPositions resolveAxisArray(const json &arr, CategoryRegistry &reg) {
         }
     }
     return r;
-}
-
-// --- Spec model: one Layer per mark, grouped into panels, grouped into
-// the whole figure ("panels" top-level layout). ------------------------
-
-struct Layer {
-    json j;
-    std::string type;
-};
-
-struct RefLine { std::string axis = "y"; double value = 0; std::string label; std::string colorHex; };
-struct RefBand { std::string axis = "y"; double low = 0, high = 0; std::string label; std::string colorHex; };
-// x/y kept as raw JSON (number or string) rather than resolved doubles --
-// resolving a string against the shared CategoryRegistry can only happen
-// once a panel's registries exist, at render time, not at parse time.
-// Parsing used to reject any annotation whose x/y wasn't already numeric,
-// which silently dropped every annotation naming a category (e.g. a
-// timeline's date pins labelled by the same row name as their barh) --
-// confirmed live against a real report spec.
-struct Annotation { json x, y; std::string text; double dx = 0, dy = 10; std::string ha = "center"; double fontsize = 9; };
-
-struct PanelSpec {
-    std::vector<Layer> layers;
-    std::string title, xlabel, ylabel;
-    bool logX = false, logY = false;
-    bool yIsPercent = false; // any layer was stacked:"percent" -- y ticks get a "%" suffix
-    std::vector<RefLine> refLines;
-    std::vector<RefBand> refBands;
-    std::vector<Annotation> annotations;
-};
-
-struct TopSpec {
-    std::vector<PanelSpec> panels;
-    bool sharedX = true;
-    std::string title;
-    double figW = 6.0, figH = 4.0; // inches, same field/units as charts.py's spec["figsize"]
-};
-
-const std::set<std::string> kKnownTypes = {
-    "line", "bar", "barh", "scatter", "area", "step", "stem", "errorbar",
-    "histogram", "boxplot", "violin", "heatmap", "pie"
-};
-
-// stacked:"percent" (a plugin-specific addition beyond charts.py's own bar
-// spec, which only has a bool) rescales each category's series to sum to
-// 100 -- done once here, in place on the layer's own JSON, so extent/draw
-// functions never need to know percent vs plain stacking, only the
-// resulting bool "stacked". Returns true if this layer was percent-mode
-// (so the caller can set the panel's yIsPercent flag for the "%" y-tick
-// suffix).
-bool preprocessBarLayerPercent(json &L) {
-    if (!L.contains("stacked") || !L["stacked"].is_string() || L["stacked"].get<std::string>() != "percent")
-        return false;
-    L["stacked"] = true;
-    if (!L.contains("series") || !L["series"].is_array() || L["series"].size() < 2) return false;
-    size_t n = L.contains("x") && L["x"].is_array() ? L["x"].size() : 0;
-    for (size_t i = 0; i < n; ++i) {
-        double total = 0;
-        for (auto &s : L["series"])
-            if (s.is_object() && s.contains("y") && s["y"].is_array() && i < s["y"].size() && s["y"][i].is_number())
-                total += s["y"][i].get<double>();
-        if (total > 0) {
-            for (auto &s : L["series"])
-                if (s.is_object() && s.contains("y") && s["y"].is_array() && i < s["y"].size() && s["y"][i].is_number())
-                    s["y"][i] = s["y"][i].get<double>() / total * 100.0;
-        }
-    }
-    return true;
-}
-
-bool parsePanelSpec(const json &j, PanelSpec &out) {
-    if (!j.is_object()) return false;
-    out.title = j.value("title", std::string());
-    out.xlabel = j.value("xlabel", std::string());
-    out.ylabel = j.value("ylabel", std::string());
-    out.logX = j.value("log_x", false);
-    out.logY = j.value("log_y", false);
-
-    auto addLayer = [&](json lj) -> bool {
-        if (!lj.is_object()) return false;
-        std::string t = lj.value("type", std::string("line"));
-        if (!kKnownTypes.count(t)) return false;
-        if (t == "bar" && preprocessBarLayerPercent(lj)) out.yIsPercent = true;
-        out.layers.push_back({std::move(lj), t});
-        return true;
-    };
-
-    if (j.contains("layers") && j["layers"].is_array() && !j["layers"].empty()) {
-        for (const auto &lj : j["layers"]) if (!addLayer(lj)) return false;
-    } else {
-        if (!addLayer(j)) return false;
-    }
-
-    if (j.contains("ref_lines") && j["ref_lines"].is_array()) {
-        for (const auto &rl : j["ref_lines"]) {
-            if (!rl.is_object() || !rl.contains("value") || !rl["value"].is_number()) continue;
-            RefLine r;
-            r.axis = rl.value("axis", std::string("y"));
-            r.value = rl["value"].get<double>();
-            r.label = rl.value("label", std::string());
-            if (rl.contains("style") && rl["style"].is_object() && rl["style"].value("color", json()).is_string())
-                r.colorHex = rl["style"]["color"].get<std::string>();
-            out.refLines.push_back(r);
-        }
-    }
-    if (j.contains("ref_bands") && j["ref_bands"].is_array()) {
-        for (const auto &rb : j["ref_bands"]) {
-            if (!rb.is_object() || !rb.contains("low") || !rb.contains("high") ||
-                !rb["low"].is_number() || !rb["high"].is_number()) continue;
-            RefBand r;
-            r.axis = rb.value("axis", std::string("y"));
-            r.low = rb["low"].get<double>();
-            r.high = rb["high"].get<double>();
-            r.label = rb.value("label", std::string());
-            if (rb.contains("style") && rb["style"].is_object() && rb["style"].value("color", json()).is_string())
-                r.colorHex = rb["style"]["color"].get<std::string>();
-            out.refBands.push_back(r);
-        }
-    }
-    if (j.contains("annotations") && j["annotations"].is_array()) {
-        for (const auto &an : j["annotations"]) {
-            if (!an.is_object() || !an.contains("x") || !an.contains("y") || !an.contains("text") ||
-                !(an["x"].is_number() || an["x"].is_string()) || !(an["y"].is_number() || an["y"].is_string())) continue;
-            Annotation a;
-            a.x = an["x"];
-            a.y = an["y"];
-            a.text = an["text"].get<std::string>();
-            if (an.contains("xytext") && an["xytext"].is_array() && an["xytext"].size() == 2 &&
-                an["xytext"][0].is_number() && an["xytext"][1].is_number()) {
-                a.dx = an["xytext"][0].get<double>();
-                a.dy = an["xytext"][1].get<double>();
-            }
-            a.ha = an.value("ha", std::string("center"));
-            a.fontsize = an.value("fontsize", 9.0);
-            out.annotations.push_back(a);
-        }
-    }
-    return true;
-}
-
-bool parseTopSpec(const std::string &specJson, TopSpec &out) {
-    json j;
-    try {
-        j = json::parse(specJson);
-    } catch (const std::exception &) {
-        return false;
-    }
-    if (!j.is_object()) return false;
-
-    bool hasFigsize = j.contains("figsize") && j["figsize"].is_array() && j["figsize"].size() == 2 &&
-                       j["figsize"][0].is_number() && j["figsize"][1].is_number();
-    if (hasFigsize) {
-        out.figW = j["figsize"][0].get<double>();
-        out.figH = j["figsize"][1].get<double>();
-    }
-
-    if (j.contains("panels") && j["panels"].is_array() && !j["panels"].empty()) {
-        // "title" is only a separate figure-level suptitle in the
-        // multi-panel case (matches charts.py's own `if panels:
-        // fig.suptitle(...)`) -- for a single-panel spec, the same "title"
-        // field belongs to the panel alone (parsePanelSpec reads it below,
-        // via the shared `j`). Reading it here unconditionally duplicated
-        // it: confirmed live, a single-panel spec rendered its title twice
-        // (once as this figure suptitle, once as the panel's own ax title).
-        out.title = j.value("title", std::string());
-        out.sharedX = j.value("shared_x", true);
-        for (const auto &pj : j["panels"]) {
-            PanelSpec ps;
-            if (!parsePanelSpec(pj, ps)) return false;
-            out.panels.push_back(std::move(ps));
-        }
-        // charts.py's own multi-panel default: figsize=(6, 3.5 * n).
-        if (!hasFigsize) out.figH = 3.5 * out.panels.size();
-    } else {
-        PanelSpec ps;
-        if (!parsePanelSpec(j, ps)) return false;
-        out.panels.push_back(std::move(ps));
-    }
-    return !out.panels.empty();
 }
 
 // --- Axis extent accumulation: each layer's extent function extends this
@@ -556,6 +466,13 @@ struct PlotCtx {
     int nextColor = 0;
     std::vector<std::pair<Rgb, std::string>> legend;
     CategoryRegistry *xReg = nullptr, *yReg = nullptr; // same registries the extent pass used -- draw functions must resolve categorical values to identical positions
+    // charts.py's "group_colors" map (see its own _resolve_color docstring):
+    // one map for the WHOLE render_chart() call -- every panel, every
+    // layer -- not per-panel like xReg/yReg above, so a "group" name means
+    // the same color everywhere in the figure. Owned by the top-level
+    // render function (renderChartCairoToPng), pointed to here so every
+    // draw function reached via PlotCtx can resolve/claim a slot.
+    std::map<std::string, Rgb> *groupColors = nullptr;
 
     double xToPx(double x) const {
         double xv = logX ? std::log10(std::max(x, 1e-300)) : x;
@@ -569,12 +486,37 @@ struct PlotCtx {
         double hi = logY ? std::log10(std::max(ymax, 1e-300)) : ymax;
         return plotY1 - (hi > lo ? (yv - lo) / (hi - lo) : 0.5) * plotH;
     }
-    Rgb nextPaletteColor() { return kPalette[(nextColor++) % kPaletteSize]; }
+    Rgb nextPaletteColor() { return g_activePalette[(nextColor++) % g_activePaletteSize]; }
 };
 
 void setColor(cairo_t *cr, const Rgb &c, double alpha = 1.0) {
     if (alpha >= 1.0) cairo_set_source_rgb(cr, c.r, c.g, c.b);
     else cairo_set_source_rgba(cr, c.r, c.g, c.b, alpha);
+}
+
+// Mirrors charts.py's _resolve_color(item, group_colors) exactly: an
+// explicit "color" hex always wins; otherwise "group" reuses that group's
+// already-assigned palette slot (claiming the next unused one, by
+// group_colors' OWN size, on first use) so every bar/point sharing a group
+// name -- anywhere in the figure, any layer, any panel -- renders in the
+// same color without the spec ever naming a hex. Neither given falls back
+// to the plain per-draw-call palette cursor (ctx.nextPaletteColor()) --
+// fine for a single vectorized draw, not safe across repeated per-point
+// loops (see charts.py's own docstring), which is exactly why "group"
+// exists for those.
+Rgb resolveItemColor(const json &item, PlotCtx &ctx) {
+    std::string colorHex = item.value("color", std::string());
+    Rgb color;
+    if (!colorHex.empty() && parseHexColor(colorHex, color)) return color;
+    if (item.contains("group") && item["group"].is_string() && ctx.groupColors) {
+        std::string group = item["group"].get<std::string>();
+        auto it = ctx.groupColors->find(group);
+        if (it != ctx.groupColors->end()) return it->second;
+        Rgb c = g_activePalette[ctx.groupColors->size() % g_activePaletteSize];
+        ctx.groupColors->emplace(group, c);
+        return c;
+    }
+    return ctx.nextPaletteColor();
 }
 
 // --- Per-type draw functions ---------------------------------------------
@@ -616,21 +558,23 @@ void drawArea(PlotCtx &ctx, const json &L) {
     bool stacked = L.value("stacked", false);
     std::vector<double> runningBase(n, 0.0);
 
-    auto fillOne = [&](const std::vector<double> &y, double baseline, double alpha, const std::string &label, bool useRunningBase) {
+    // baseline is per-point (matplotlib's fill_between(x, y1, y2) shape),
+    // not a single scalar floor -- accept either a plain number (broadcast
+    // to every point) or an array (one value per point, e.g. a shaded
+    // range whose lower edge also varies over x).
+    auto fillOne = [&](const std::vector<double> &y, const std::vector<double> &baseline, double alpha, const std::string &label, bool useRunningBase) {
         Rgb color = ctx.nextPaletteColor();
         if (!label.empty()) ctx.legend.push_back({color, label});
         setColor(cr, color, alpha);
         bool any = false;
         for (size_t i = 0; i < n && i < y.size(); ++i) {
             double top = y[i] + (useRunningBase ? runningBase[i] : 0.0);
-            double base = useRunningBase ? runningBase[i] : baseline;
             double pxTop = ctx.xToPx(xa.pos[i]), pyTop = ctx.yToPx(top);
             if (!any) { cairo_move_to(cr, pxTop, pyTop); any = true; } else cairo_line_to(cr, pxTop, pyTop);
-            (void)base;
         }
         for (size_t ii = n; ii-- > 0;) {
             if (ii >= y.size()) continue;
-            double base = useRunningBase ? runningBase[ii] : baseline;
+            double base = useRunningBase ? runningBase[ii] : (ii < baseline.size() ? baseline[ii] : 0.0);
             cairo_line_to(cr, ctx.xToPx(xa.pos[ii]), ctx.yToPx(base));
         }
         cairo_close_path(cr);
@@ -649,9 +593,14 @@ void drawArea(PlotCtx &ctx, const json &L) {
 
     if (L.contains("series") && L["series"].is_array()) {
         for (const auto &s : L["series"]) if (s.is_object() && s.contains("y"))
-            fillOne(numArray(s["y"]), 0.0, s.value("alpha", 0.4), s.value("label", std::string()), stacked);
+            fillOne(numArray(s["y"]), std::vector<double>(n, 0.0), s.value("alpha", 0.4), s.value("label", std::string()), stacked);
     } else if (L.contains("y")) {
-        fillOne(numArray(L["y"]), L.value("baseline", 0.0), L.value("alpha", 0.4), L.value("label", std::string()), false);
+        std::vector<double> baseline(n, 0.0);
+        if (L.contains("baseline")) {
+            if (L["baseline"].is_array()) baseline = numArray(L["baseline"]);
+            else if (L["baseline"].is_number()) baseline.assign(n, L["baseline"].get<double>());
+        }
+        fillOne(numArray(L["y"]), baseline, L.value("alpha", 0.4), L.value("label", std::string()), false);
     }
 }
 
@@ -839,9 +788,7 @@ void drawBarh(PlotCtx &ctx, const json &L) {
             // lands on the identical row, not just this layer's own count.
             int pos = ctx.yReg->resolve(cat);
             double width = b.value("width", 0.0), left = b.value("left", 0.0), height = b.value("height", 0.8);
-            Rgb color;
-            std::string colorHex = b.value("color", std::string());
-            if (colorHex.empty() || !parseHexColor(colorHex, color)) color = ctx.nextPaletteColor();
+            Rgb color = resolveItemColor(b, ctx);
             std::string label = b.value("label", std::string());
             if (!label.empty()) ctx.legend.push_back({color, label});
             setColor(cr, color);
@@ -884,9 +831,7 @@ void drawScatter(PlotCtx &ctx, const json &L) {
             double px = ctx.xToPx(pxVal), py = ctx.yToPx(pyVal);
             double size = std::sqrt(std::max(1.0, p.value("size", 36.0))); // matplotlib's "size" is an area in pt^2
             bool filled = p.value("filled", true);
-            Rgb color;
-            std::string colorHex = p.value("color", std::string());
-            if (colorHex.empty() || !parseHexColor(colorHex, color)) color = ctx.nextPaletteColor();
+            Rgb color = resolveItemColor(p, ctx);
             std::string label = p.value("label", std::string());
             if (!label.empty()) ctx.legend.push_back({color, label});
             cairo_arc(cr, px, py, size, 0, 2 * M_PI);
@@ -1234,7 +1179,7 @@ void renderPiePanel(cairo_t *cr, double x0, double y0, double x1, double y1, con
     for (size_t i = 0; i < values.size(); ++i) {
         double frac = values[i] / total;
         double sweep = frac * 2 * M_PI;
-        Rgb color = kPalette[i % kPaletteSize];
+        Rgb color = g_activePalette[i % g_activePaletteSize];
         setColor(cr, color);
         cairo_move_to(cr, cx + innerRadius * std::cos(angle), cy + innerRadius * std::sin(angle));
         cairo_arc(cr, cx, cy, radius, angle, angle + sweep);
@@ -1258,7 +1203,9 @@ void renderPiePanel(cairo_t *cr, double x0, double y0, double x1, double y1, con
 // --- Cartesian panel: shared axis system for all other types -------------
 
 void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y1, const PanelSpec &panel,
-                           const Rgb &fg, const Rgb &gridColor, bool showXTickLabels, const char *bodyFont) {
+                           const Rgb &fg, const Rgb &gridColor, const Rgb &headingColor, bool showXTickLabels, const char *bodyFont,
+                           const char *titleFont, bool titleBold,
+                           std::map<std::string, Rgb> &groupColors) {
     // Extent pass runs FIRST, before any margin is decided -- margins need
     // to know the actual y-tick label text (categorical labels, or
     // formatted numeric ticks) to size the left margin correctly, and
@@ -1278,6 +1225,27 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
         if (resolveScalar(a.x, r.xReg, xv)) extendX(r, xv);
         if (resolveScalar(a.y, r.yReg, yv)) extendY(r, yv);
     }
+    // charts.py's _render_barh defaults invert_yaxis=true (the first-listed
+    // row draws at the TOP) -- unported here until now, so a barh-based
+    // chart (a dumbbell, a Gantt timeline) rendered its rows bottom-up,
+    // backwards from every real report spec, none of which set
+    // invert_yaxis explicitly since they all rely on that default.
+    // Confirmed live against the report documents' actual dumbbell/timeline
+    // charts. Reversing the registry's own label order (then rebuilding
+    // indexOf from the reversed order) means every later resolve() call --
+    // from a scatter pin or annotation naming the same category, not just
+    // the barh layer that first defined it -- picks up the flipped
+    // position automatically, with no separate flag to thread through the
+    // draw pass.
+    bool wantsInvertY = false;
+    for (const auto &L : panel.layers)
+        if (L.type == "barh" && L.j.value("invert_yaxis", true)) wantsInvertY = true;
+    if (wantsInvertY && !r.yReg.labels.empty()) {
+        std::reverse(r.yReg.labels.begin(), r.yReg.labels.end());
+        r.yReg.indexOf.clear();
+        for (size_t i = 0; i < r.yReg.labels.size(); ++i) r.yReg.indexOf[r.yReg.labels[i]] = (int)i;
+    }
+
     // Merge the shared registries' categories into xCatLabels/yCatLabels
     // (additively -- boxplot/violin already populated their own 1-based
     // entries directly into these same maps, via a completely separate
@@ -1324,6 +1292,16 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
         finalYMin = r.ymin - yPad; finalYMax = r.ymax + yPad;
     }
 
+    // Computed once, shared by the margin-measurement pass below and the
+    // actual gridline/label draw pass further down -- see niceLinearTicks/
+    // logDecadeTicks' comment for why these replace the old "just divide
+    // into N equal steps" loops. Only meaningful for a non-categorical
+    // axis; r.xCat/r.yCat charts use their own category label list
+    // instead and never consult these.
+    std::vector<double> yTicks = isLogY ? logDecadeTicks(finalYMin, finalYMax) : niceLinearTicks(finalYMin, finalYMax, 5 + 1);
+    std::vector<double> xTicks = isLogX ? logDecadeTicks(finalXMin, finalXMax) : niceLinearTicks(finalXMin, finalXMax, 6 + 1);
+    auto tickLabel = [](double v, bool isLog) { return isLog ? superscriptDecadeLabel(v) : formatTick(v); };
+
     double marginLeft = 20, marginRight = 20, marginTop = panel.title.empty() ? 10 : 30, marginBottom = showXTickLabels ? 30 : 10;
     bool hasLegend = false; // determined after the draw pass, but layout needs to reserve space up front
     // Cheap legend-presence check: any layer that could plausibly produce a label.
@@ -1350,12 +1328,8 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
             maxYLabelWidth = std::max(maxYLabelWidth, ext.width);
         }
     } else {
-        constexpr int kYTicks = 5;
-        for (int i = 0; i <= kYTicks; ++i) {
-            double yVal = isLogY
-                ? std::pow(10.0, std::log10(finalYMin) + (std::log10(finalYMax) - std::log10(finalYMin)) * i / kYTicks)
-                : finalYMin + (finalYMax - finalYMin) * i / kYTicks;
-            std::string label = formatTick(yVal) + (panel.yIsPercent ? "%" : "");
+        for (double yVal : yTicks) {
+            std::string label = tickLabel(yVal, isLogY) + (panel.yIsPercent ? "%" : "");
             cairo_text_extents_t ext; cairo_text_extents(cr, label.c_str(), &ext);
             maxYLabelWidth = std::max(maxYLabelWidth, ext.width);
         }
@@ -1372,6 +1346,7 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
     ctx.logX = isLogX; ctx.logY = isLogY;
     ctx.xmin = finalXMin; ctx.xmax = finalXMax; ctx.ymin = finalYMin; ctx.ymax = finalYMax;
     ctx.xReg = &r.xReg; ctx.yReg = &r.yReg;
+    ctx.groupColors = &groupColors;
 
     // --- gridlines + ticks ---
     setColor(cr, gridColor);
@@ -1388,14 +1363,10 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
             setColor(cr, gridColor);
         }
     } else {
-        constexpr int kYTicks = 5;
-        for (int i = 0; i <= kYTicks; ++i) {
-            double yVal = ctx.logY
-                ? std::pow(10.0, std::log10(ctx.ymin) + (std::log10(ctx.ymax) - std::log10(ctx.ymin)) * i / kYTicks)
-                : ctx.ymin + (ctx.ymax - ctx.ymin) * i / kYTicks;
+        for (double yVal : yTicks) {
             double py = ctx.yToPx(yVal);
             cairo_move_to(cr, px0, py); cairo_line_to(cr, px1, py); cairo_stroke(cr);
-            std::string label = formatTick(yVal) + (panel.yIsPercent ? "%" : "");
+            std::string label = tickLabel(yVal, isLogY) + (panel.yIsPercent ? "%" : "");
             cairo_text_extents_t ext; cairo_text_extents(cr, label.c_str(), &ext);
             setColor(cr, fg);
             cairo_move_to(cr, px0 - ext.width - ext.x_bearing - 8, py - (ext.height / 2 + ext.y_bearing));
@@ -1429,13 +1400,9 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
                 cairo_show_text(cr, label.c_str());
             }
         } else {
-            constexpr int kXTicks = 6;
-            for (int i = 0; i <= kXTicks; ++i) {
-                double xVal = ctx.logX
-                    ? std::pow(10.0, std::log10(ctx.xmin) + (std::log10(ctx.xmax) - std::log10(ctx.xmin)) * i / kXTicks)
-                    : ctx.xmin + (ctx.xmax - ctx.xmin) * i / kXTicks;
+            for (double xVal : xTicks) {
                 double px = ctx.xToPx(xVal);
-                std::string label = formatTick(xVal);
+                std::string label = tickLabel(xVal, isLogX);
                 cairo_text_extents_t ext; cairo_text_extents(cr, label.c_str(), &ext);
                 setColor(cr, fg);
                 cairo_move_to(cr, clampedTextX(px, ext.width, ext.x_bearing), py1 + ext.height + 8);
@@ -1464,7 +1431,18 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
     }
 
     // --- layers ---
+    // Clipped to the plot rectangle: nothing here computes its own axis
+    // limits before drawing (they come from a separate extent pass), so
+    // geometry that legitimately extends past those limits -- e.g. an
+    // area fill whose baseline dips below the y-axis minimum -- would
+    // otherwise bleed straight through the axis frame into the margin.
+    // Confirmed live on a widening-band area chart: an unclipped triangle
+    // of fill color appeared below the x-axis line.
+    cairo_save(cr);
+    cairo_rectangle(cr, px0, py0, pw, ph);
+    cairo_clip(cr);
     for (const auto &L : panel.layers) drawForType(ctx, L.type, L.j);
+    cairo_restore(cr);
 
     // --- ref_lines (drawn over the marks, like matplotlib's axhline/axvline) ---
     cairo_set_line_width(cr, 1.2);
@@ -1511,13 +1489,22 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
     }
 
     // --- title / axis labels ---
-    setColor(cr, fg);
     if (!panel.title.empty()) {
+        // Previously just inherited whatever font_face was last selected
+        // (bodyFont, from the tick-label loop above) -- unlike the
+        // single top-level document title (drawn separately, see
+        // renderChartCairoToPng), a per-panel title never actually
+        // switched to titleFont/titleBold. Confirmed by reading: no
+        // cairo_select_font_face call existed between the tick-label loop
+        // and this text draw.
+        setColor(cr, headingColor);
+        cairo_select_font_face(cr, titleFont, CAIRO_FONT_SLANT_NORMAL, titleBold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
         cairo_set_font_size(cr, 12);
         cairo_text_extents_t ext; cairo_text_extents(cr, panel.title.c_str(), &ext);
         cairo_move_to(cr, px0 + pw / 2 - (ext.width / 2 + ext.x_bearing), y0 + 16);
         cairo_show_text(cr, panel.title.c_str());
     }
+    setColor(cr, fg);
     cairo_select_font_face(cr, bodyFont, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 10);
     if (!panel.xlabel.empty() && showXTickLabels) {
@@ -1554,19 +1541,20 @@ void renderCartesianPanel(cairo_t *cr, double x0, double y0, double x1, double y
     }
 }
 
-} // namespace
-
-namespace ChartRender {
-
-std::vector<uint8_t> renderChartToPng(const std::string &specJson, bool darkMode,
-                                       const std::string &bodyFontFamily, const std::string &titleFontFamily, bool titleBold,
-                                       int &logicalWidth, int &logicalHeight)
+// The native-Cairo renderer -- always available (no external process, no
+// network, no Python), and the fallback whenever the preferred Matplot++/
+// gnuplot path (chart_render_matplotpp.cpp) isn't usable. Takes an
+// already-parsed TopSpec so the dispatcher below only has to parse once.
+std::vector<uint8_t> renderChartCairoToPng(const TopSpec &top, bool darkMode,
+                                            const std::string &bodyFontFamily, const std::string &titleFontFamily, bool titleBold,
+                                            int &logicalWidth, int &logicalHeight)
 {
     const char *bodyFont = bodyFontFamily.empty() ? "sans-serif" : bodyFontFamily.c_str();
     const char *titleFont = titleFontFamily.empty() ? bodyFont : titleFontFamily.c_str();
 
-    TopSpec top;
-    if (!parseTopSpec(specJson, top)) return {};
+    // charts.py's group_colors: one map for this whole render call, shared
+    // across every panel below (see PlotCtx::groupColors/resolveItemColor).
+    std::map<std::string, Rgb> groupColors;
 
     constexpr double kPxPerInch = 100.0;
     int w = std::max(200, (int)std::lround(top.figW * kPxPerInch));
@@ -1589,9 +1577,22 @@ std::vector<uint8_t> renderChartToPng(const std::string &specJson, bool darkMode
 
     // Same dark/light background pair used for every other rendered-image
     // type in the document (LaTeX math, diagrams), for visual consistency.
-    Rgb bg = darkMode ? Rgb{0x0d / 255.0, 0x11 / 255.0, 0x17 / 255.0} : Rgb{0xFA / 255.0, 0xFA / 255.0, 0xFA / 255.0};
-    Rgb fg = darkMode ? Rgb{0xf0 / 255.0, 0xf6 / 255.0, 0xfc / 255.0} : Rgb{0x1a / 255.0, 0x1a / 255.0, 0x1a / 255.0};
-    Rgb gridColor = darkMode ? Rgb{0x30 / 255.0, 0x36 / 255.0, 0x3d / 255.0} : Rgb{0xdd / 255.0, 0xdd / 255.0, 0xdd / 255.0};
+    // charts.py tokens again: SURFACE/INK_SECONDARY(as axis+body ink)/
+    // GRIDLINE for light; this plugin's own equivalents (soft near-black,
+    // soft off-white ink, barely-there gridline) for dark, matching the
+    // rest of the document's existing dark theme (markdown_engine.cpp's
+    // body.theme-dark: #0d1117/#c9d1d9) rather than inventing a clashing
+    // one.
+    Rgb bg = darkMode ? hexRgb(0x14171c) : hexRgb(0xfcfcfb);
+    Rgb fg = darkMode ? hexRgb(0xc9d1d9) : hexRgb(0x52514e);
+    Rgb gridColor = darkMode ? hexRgb(0x262a30) : hexRgb(0xe1e0d9);
+    // charts.py's HEADING_COLOR (#1a2b3c, the report template's own heading
+    // navy) for the title only -- body/axis text stays on the more muted
+    // `fg` above, so a chart's title reads distinctly, matching the
+    // document's own heading vs body-text contrast.
+    Rgb headingColor = darkMode ? hexRgb(0xdbe4f0) : hexRgb(0x1a2b3c);
+    g_activePalette = darkMode ? kPaletteDark : kPaletteLight;
+    g_activePaletteSize = darkMode ? (int)(sizeof(kPaletteDark) / sizeof(kPaletteDark[0])) : (int)(sizeof(kPaletteLight) / sizeof(kPaletteLight[0]));
 
     cairo_set_source_rgb(cr, bg.r, bg.g, bg.b);
     cairo_paint(cr);
@@ -1602,7 +1603,7 @@ std::vector<uint8_t> renderChartToPng(const std::string &specJson, bool darkMode
         cairo_select_font_face(cr, titleFont, CAIRO_FONT_SLANT_NORMAL, titleBold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
         cairo_set_font_size(cr, 15);
         cairo_text_extents_t ext; cairo_text_extents(cr, top.title.c_str(), &ext);
-        setColor(cr, fg);
+        setColor(cr, headingColor);
         cairo_move_to(cr, w / 2.0 - (ext.width / 2 + ext.x_bearing), 24);
         cairo_show_text(cr, top.title.c_str());
         cairo_select_font_face(cr, bodyFont, CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
@@ -1633,9 +1634,12 @@ std::vector<uint8_t> renderChartToPng(const std::string &specJson, bool darkMode
             }
             double px0 = leftMargin, py0 = y0 + (panel.title.empty() ? 10 : 30), px1 = w - 15, py1 = y1 - 40;
             if (!panel.title.empty()) {
+                // Same gap as renderCartesianPanel's panel.title fix: never
+                // switched away from whatever font_face was last active.
+                cairo_select_font_face(cr, titleFont, CAIRO_FONT_SLANT_NORMAL, titleBold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
                 cairo_set_font_size(cr, 12);
                 cairo_text_extents_t ext; cairo_text_extents(cr, panel.title.c_str(), &ext);
-                setColor(cr, fg);
+                setColor(cr, headingColor);
                 cairo_move_to(cr, w / 2.0 - ext.width / 2, y0 + 16);
                 cairo_show_text(cr, panel.title.c_str());
             }
@@ -1643,15 +1647,16 @@ std::vector<uint8_t> renderChartToPng(const std::string &specJson, bool darkMode
         } else if (solePie) {
             double px0 = 15, py0 = y0 + (panel.title.empty() ? 10 : 30), px1 = w - 15, py1 = y1 - 15;
             if (!panel.title.empty()) {
+                cairo_select_font_face(cr, titleFont, CAIRO_FONT_SLANT_NORMAL, titleBold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
                 cairo_set_font_size(cr, 12);
                 cairo_text_extents_t ext; cairo_text_extents(cr, panel.title.c_str(), &ext);
-                setColor(cr, fg);
+                setColor(cr, headingColor);
                 cairo_move_to(cr, w / 2.0 - ext.width / 2, y0 + 16);
                 cairo_show_text(cr, panel.title.c_str());
             }
             renderPiePanel(cr, px0, py0, px1, py1, panel.layers[0].j, fg);
         } else {
-            renderCartesianPanel(cr, 0, y0, (double)w, y1, panel, fg, gridColor, showXTickLabels, bodyFont);
+            renderCartesianPanel(cr, 0, y0, (double)w, y1, panel, fg, gridColor, headingColor, showXTickLabels, bodyFont, titleFont, titleBold, groupColors);
         }
     }
 
@@ -1662,6 +1667,42 @@ std::vector<uint8_t> renderChartToPng(const std::string &specJson, bool darkMode
     cairo_surface_destroy(surface);
 
     return std::vector<uint8_t>(pngBytes.begin(), pngBytes.end());
+}
+
+} // namespace
+
+namespace ChartRender {
+
+static RendererMode g_rendererMode = RendererMode::Auto;
+
+void setRendererMode(RendererMode mode) { g_rendererMode = mode; }
+
+std::vector<uint8_t> renderChartToPng(const std::string &specJson, bool darkMode,
+                                       const std::string &bodyFontFamily, const std::string &titleFontFamily, bool titleBold,
+                                       int &logicalWidth, int &logicalHeight)
+{
+    if (g_rendererMode == RendererMode::Off) return {};
+
+    ChartSpec::TopSpec top;
+    if (!ChartSpec::parseTopSpec(specJson, top)) return {};
+
+    // Matplot++/gnuplot is the preferred renderer -- real matplotlib-like
+    // fidelity (proper tick locators, KDE violin plots, exact colormaps,
+    // etc.) that our own hand-rolled Cairo drawing can only approximate.
+    // It's a soft dependency: MatplotPP::isAvailable() self-seeds the
+    // vendored gnuplot binary on first call and reports whether that (or a
+    // system gnuplot) actually works, and renderChartMatplotPng() itself
+    // can still fail on a per-chart basis (an unexpected gnuplot error,
+    // timeout, etc.) -- either way, falling through to the Cairo renderer
+    // below means chart rendering never hard-fails just because gnuplot
+    // wasn't available or hiccuped on one chart.
+    if (g_rendererMode != RendererMode::CairoOnly && MatplotPP::isAvailable()) {
+        std::vector<uint8_t> png = MatplotPP::renderChartMatplotPng(
+            top, darkMode, bodyFontFamily, titleFontFamily, titleBold, logicalWidth, logicalHeight);
+        if (!png.empty()) return png;
+    }
+
+    return renderChartCairoToPng(top, darkMode, bodyFontFamily, titleFontFamily, titleBold, logicalWidth, logicalHeight);
 }
 
 } // namespace ChartRender

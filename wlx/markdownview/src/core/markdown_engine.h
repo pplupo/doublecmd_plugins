@@ -47,6 +47,26 @@ std::vector<MathFontInfo> availableMathFonts();
 void setPluginConfigDir(const std::string &dir);
 
 /**
+ * Enable/disable rendering for one diagram kind -- "mermaid", "plantuml",
+ * or "latex". All default to enabled. Disabled means exactly what a
+ * render failure already means for that kind: mermaid/plantuml fenced
+ * blocks show as plain text (the raw code block); LaTeX math shows as
+ * plain, unrendered text. Unrecognized kind names are a no-op. Call
+ * before any render* call below; persists until changed again.
+ */
+void setDiagramEnabled(const std::string &kind, bool enabled);
+
+/**
+ * Which backend renders ```chart blocks -- "auto" (default: Matplot++
+ * when available, falling back to the native Cairo renderer), "cairo"
+ * (always the native Cairo renderer), or "off" (chart blocks show as
+ * plain text, same as any other render failure). Unrecognized values
+ * fall back to "auto". Call before any render* call below; persists
+ * until changed again.
+ */
+void setChartRendererMode(const std::string &mode);
+
+/**
  * After a render call, returns the CSS file path the engine auto-resolved
  * to when customCssPath was empty or didn't point at an existing file
  * (i.e. it fell through to markdownview.css or ~/.config/markdownpart.css,

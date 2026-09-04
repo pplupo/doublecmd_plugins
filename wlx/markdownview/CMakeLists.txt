@@ -16,6 +16,14 @@ option(ENABLE_GTK3 "Build the GTK3 markdownview plugin" ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CAIRO REQUIRED cairo)
 pkg_check_modules(RSVG REQUIRED librsvg-2.0)
+# Matplot++'s CImg dependency (source/3rd_party/cimg) does its own image
+# I/O for formats none of our chart specs ever produce or consume -- these
+# are only here because CImg unconditionally references them, not because
+# markdownview needs image loading of any kind.
+find_package(ZLIB REQUIRED)
+find_package(JPEG REQUIRED)
+find_package(PNG REQUIRED)
+find_package(TIFF REQUIRED)
 
 include(FetchContent)
 
@@ -64,6 +72,17 @@ foreach(_pair
     list(APPEND EMBEDDED_FONT_SOURCES "${_generated_cpp}")
 endforeach()
 
+# Same embedding mechanism, one more binary: a minimal (2D-only, no X11/Qt/
+# wxWidgets/Lua terminals) prebuilt gnuplot, self-seeded to
+# ~/.config/doublecmd/markdownview_gnuplot/ on first chart render that needs
+# it (see chart_render.cpp) -- Matplot++'s only real rendering backend is
+# gnuplot itself (even its "pngcairo" terminal is gnuplot driving Cairo, not
+# a library call), and depending on the user's system already having
+# gnuplot installed would make chart fidelity vary by machine. See
+# 3rdparty/gnuplot/README.md for exactly how this binary was built.
+embed_binary_resource("${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/gnuplot/gnuplot-linux-x86_64" "gnuplot_binary" _gnuplot_generated_cpp)
+list(APPEND EMBEDDED_FONT_SOURCES "${_gnuplot_generated_cpp}")
+
 # md4c: a plain-C, toolkit-agnostic CommonMark/GFM parser (replaces md4qt,
 # which forced Qt6::Core on both plugin targets via its QString-typed AST
 # and turned out to need Qt 6.5+ APIs this project doesn't otherwise
@@ -104,6 +123,22 @@ set(CAIRO ON CACHE BOOL "" FORCE)
 set(QT ON CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/MicroTeX)
 
+# Matplot++ ("matplot" target below): the preferred chart-rendering path
+# when the self-seeded vendored gnuplot binary (embedded above) is usable
+# at runtime -- falls back to this plugin's own native Cairo chart renderer
+# otherwise (see chart_render.cpp's dispatch). Trimmed to what a 2D-only
+# report chart actually needs: no examples/tests/installer/package targets,
+# no OpenCV (only used by CImg for extra image codecs we never touch), no
+# high-resolution world map data (geoplot() is never called by any of our
+# 13 mark types).
+set(MATPLOTPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MATPLOTPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MATPLOTPP_BUILD_INSTALLER OFF CACHE BOOL "" FORCE)
+set(MATPLOTPP_BUILD_PACKAGE OFF CACHE BOOL "" FORCE)
+set(MATPLOTPP_WITH_OPENCV OFF CACHE BOOL "" FORCE)
+set(MATPLOTPP_BUILD_HIGH_RESOLUTION_WORLD_MAP OFF CACHE BOOL "" FORCE)
+add_subdirectory(3rdparty/matplotplusplus)
+
 # Core Markdown Rendering Library (Static Library) -- toolkit-neutral:
 # md4c (parsing), librsvg+Cairo (SVG rasterization for Mermaid/PlantUML, and
 # direct chart drawing for ```chart blocks -- see chart_render.cpp), a curl
@@ -114,7 +149,9 @@ add_subdirectory(3rdparty/MicroTeX)
 add_library(markdownview_core STATIC
     src/core/markdown_engine.cpp
     src/core/diagram_render.cpp
+    src/core/chart_spec.cpp
     src/core/chart_render.cpp
+    src/core/chart_render_matplotpp.cpp
     src/core/embedded_fonts.cpp
     ${EMBEDDED_FONT_SOURCES}
 )
@@ -134,8 +171,13 @@ target_include_directories(markdownview_core PUBLIC
 target_link_libraries(markdownview_core PUBLIC
     md4c-html
     microtex
+    matplot
     ${CAIRO_LIBRARIES}
     ${RSVG_LIBRARIES}
+    ZLIB::ZLIB
+    JPEG::JPEG
+    PNG::PNG
+    TIFF::TIFF
 )
 target_link_directories(markdownview_core PUBLIC ${CAIRO_LIBRARY_DIRS} ${RSVG_LIBRARY_DIRS})
 target_compile_options(markdownview_core PUBLIC ${CAIRO_CFLAGS_OTHER} ${RSVG_CFLAGS_OTHER})

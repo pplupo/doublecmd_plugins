@@ -43,7 +43,7 @@ target_link_libraries(doc_core PRIVATE ${STATIC_LIBS})
 # 2. Build Qt WLX Plugin
 find_package(Qt6 COMPONENTS Widgets PrintSupport REQUIRED)
 add_library(pdfview_qt SHARED src/qt/wlx_qt.cpp src/qt/viewer_widget.cpp)
-set_target_properties(pdfview_qt PROPERTIES PREFIX "" SUFFIX ".wlx")
+set_target_properties(pdfview_qt PROPERTIES PREFIX "" SUFFIX ".wlx" OUTPUT_NAME "pdfview_qt6")
 target_include_directories(pdfview_qt PRIVATE src/qt)
 target_link_libraries(pdfview_qt PRIVATE doc_core Qt6::Widgets Qt6::PrintSupport)
 
@@ -51,7 +51,7 @@ target_link_libraries(pdfview_qt PRIVATE doc_core Qt6::Widgets Qt6::PrintSupport
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
 add_library(pdfview_gtk SHARED src/gtk/wlx_gtk.cpp src/gtk/viewer_widget.cpp)
-set_target_properties(pdfview_gtk PROPERTIES PREFIX "" SUFFIX ".wlx")
+set_target_properties(pdfview_gtk PROPERTIES PREFIX "" SUFFIX ".wlx" OUTPUT_NAME "pdfview_gtk3")
 target_include_directories(pdfview_gtk PRIVATE src/gtk ${GTK3_INCLUDE_DIRS})
 target_link_options(pdfview_gtk PRIVATE ${GTK3_LDFLAGS})
 target_link_libraries(pdfview_gtk PRIVATE doc_core ${GTK3_LIBRARIES})

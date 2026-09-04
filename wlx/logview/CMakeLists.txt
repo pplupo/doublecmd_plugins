@@ -79,7 +79,7 @@ if(ENABLE_QT6)
     set_target_properties(logviewer PROPERTIES
         PREFIX ""
         SUFFIX ".wlx"
-        OUTPUT_NAME "logviewer"
+        OUTPUT_NAME "logview_qt6"
     )
 
     target_link_libraries(logviewer PRIVATE
@@ -129,7 +129,7 @@ if(ENABLE_GTK3)
         # mechanism outright.
         set_target_properties(logviewer_gtk3 PROPERTIES
             PREFIX ""
-            OUTPUT_NAME "logviewer_gtk3"
+            OUTPUT_NAME "logview_gtk3"
             SUFFIX ".wlx"
         )
     else()

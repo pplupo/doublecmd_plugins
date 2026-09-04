@@ -41,7 +41,7 @@ if(ENABLE_QT6)
     )
     set_target_properties(mpv_wayland_qt6 PROPERTIES
         PREFIX ""
-        OUTPUT_NAME "mpv_wayland_qt6"
+        OUTPUT_NAME "mpvview_qt6"
         SUFFIX ".wlx"
         AUTOMOC ON
     )
@@ -62,7 +62,7 @@ if(ENABLE_GTK3)
         target_link_options(mpv_wayland_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
         set_target_properties(mpv_wayland_gtk3 PROPERTIES
             PREFIX ""
-            OUTPUT_NAME "mpv_wayland_gtk3"
+            OUTPUT_NAME "mpvview_gtk3"
             SUFFIX ".wlx"
         )
     else()

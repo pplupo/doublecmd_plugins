@@ -110,6 +110,14 @@ struct Settings {
     // path, not display name; see markdown_engine.cpp's
     // resolveMathFontCanonicalName().
     std::string mathFontClmPath;
+    // "auto" (Matplot++ preferred, Cairo fallback), "cairo" (Cairo only),
+    // or "off" (```chart blocks show as plain text) -- see
+    // MarkdownEngine::setChartRendererMode(). Defaults to "cairo": see
+    // the matching comment on plugin_qt6.cpp's g_chartRenderer for why.
+    std::string chartRenderer = "cairo";
+    bool mermaidEnabled = true;
+    bool plantUmlEnabled = true;
+    bool latexEnabled = true;
 
     void loadOrInitDefaults(const std::string &iniPath, const std::string &pluginName)
     {
@@ -148,6 +156,10 @@ struct Settings {
         themeFilePath = getStr("theme_file_path", themeFilePath);
         zoomMultiplier = getDouble("zoom_multiplier", zoomMultiplier);
         mathFontClmPath = getStr("math_font", mathFontClmPath);
+        chartRenderer = getStr("chart_renderer", chartRenderer);
+        mermaidEnabled = getBool("enable_mermaid", mermaidEnabled);
+        plantUmlEnabled = getBool("enable_plantuml", plantUmlEnabled);
+        latexEnabled = getBool("enable_latex", latexEnabled);
         save(iniPath, pluginName);
     }
 
@@ -161,11 +173,28 @@ struct Settings {
         f << "theme_file_path=" << themeFilePath << "\n";
         f << "zoom_multiplier=" << zoomMultiplier << "\n";
         f << "math_font=" << mathFontClmPath << "\n";
+        f << "chart_renderer=" << chartRenderer << "\n";
+        f << "enable_mermaid=" << (mermaidEnabled ? "true" : "false") << "\n";
+        f << "enable_plantuml=" << (plantUmlEnabled ? "true" : "false") << "\n";
+        f << "enable_latex=" << (latexEnabled ? "true" : "false") << "\n";
     }
 };
 
 Settings g_settings;
 std::string g_configPath;
+
+// Pushes g_settings' renderer-related fields into MarkdownEngine's own
+// process-global state (see MarkdownEngine::setChartRendererMode/
+// setDiagramEnabled) -- unlike g_settings.mathFontClmPath, these aren't
+// per-render-call parameters, so they need an explicit push after every
+// ini load and every menu toggle, before the next reloadContent().
+void applyEngineRenderSettings()
+{
+    MarkdownEngine::setChartRendererMode(g_settings.chartRenderer);
+    MarkdownEngine::setDiagramEnabled("mermaid", g_settings.mermaidEnabled);
+    MarkdownEngine::setDiagramEnabled("plantuml", g_settings.plantUmlEnabled);
+    MarkdownEngine::setDiagramEnabled("latex", g_settings.latexEnabled);
+}
 
 bool resolveDarkMode()
 {
@@ -517,6 +546,27 @@ void onSetMathFont(GtkMenuItem *item, gpointer userData) {
     saveSettingsNow();
     reloadContent(static_cast<MarkdownState *>(userData));
 }
+void onSetChartRendererAuto(GtkMenuItem *, gpointer userData) {
+    g_settings.chartRenderer = "auto"; applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
+void onSetChartRendererCairo(GtkMenuItem *, gpointer userData) {
+    g_settings.chartRenderer = "cairo"; applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
+void onSetChartRendererOff(GtkMenuItem *, gpointer userData) {
+    g_settings.chartRenderer = "off"; applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
+void onToggleMermaid(GtkCheckMenuItem *item, gpointer userData) {
+    g_settings.mermaidEnabled = gtk_check_menu_item_get_active(item);
+    applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
+void onTogglePlantUml(GtkCheckMenuItem *item, gpointer userData) {
+    g_settings.plantUmlEnabled = gtk_check_menu_item_get_active(item);
+    applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
+void onToggleLatex(GtkCheckMenuItem *item, gpointer userData) {
+    g_settings.latexEnabled = gtk_check_menu_item_get_active(item);
+    applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
 
 gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, WebKitHitTestResult *, gpointer userData)
 {
@@ -530,7 +580,7 @@ gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, We
         return item;
     };
 
-    addItem("Copy Text", G_CALLBACK(onCopyText));
+    addItem("Copy", G_CALLBACK(onCopyText));
     addItem("Select All", G_CALLBACK(onSelectAll));
     addItem("Find in Document...", G_CALLBACK(+[](GtkMenuItem *, gpointer userData) {
         showFindBar(static_cast<MarkdownState *>(userData));
@@ -618,6 +668,45 @@ gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, We
     GtkWidget *fontItem = gtk_menu_item_new_with_label("Math Font");
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(fontItem), fontSub);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), fontItem);
+
+    // Chart Renderer submenu: same "build unconnected, set all active
+    // states, THEN connect handlers" ordering as Theme Mode above.
+    GtkWidget *chartSub = gtk_menu_new();
+    GSList *chartGroup = nullptr;
+    GtkWidget *cAuto = gtk_radio_menu_item_new_with_label(chartGroup, "Matplot++ (preferred)");
+    chartGroup = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(cAuto));
+    gtk_menu_shell_append(GTK_MENU_SHELL(chartSub), cAuto);
+    GtkWidget *cCairo = gtk_radio_menu_item_new_with_label(chartGroup, "Cairo Only");
+    chartGroup = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(cCairo));
+    gtk_menu_shell_append(GTK_MENU_SHELL(chartSub), cCairo);
+    GtkWidget *cOff = gtk_radio_menu_item_new_with_label(chartGroup, "Disabled");
+    gtk_menu_shell_append(GTK_MENU_SHELL(chartSub), cOff);
+
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(cAuto), g_settings.chartRenderer == "auto");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(cCairo), g_settings.chartRenderer == "cairo");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(cOff), g_settings.chartRenderer == "off");
+
+    g_signal_connect(cAuto, "activate", G_CALLBACK(onSetChartRendererAuto), st);
+    g_signal_connect(cCairo, "activate", G_CALLBACK(onSetChartRendererCairo), st);
+    g_signal_connect(cOff, "activate", G_CALLBACK(onSetChartRendererOff), st);
+    GtkWidget *chartItem = gtk_menu_item_new_with_label("Chart Renderer");
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(chartItem), chartSub);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), chartItem);
+
+    GtkWidget *mermaidItem = gtk_check_menu_item_new_with_label("Render Mermaid Diagrams");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(mermaidItem), g_settings.mermaidEnabled);
+    g_signal_connect(mermaidItem, "toggled", G_CALLBACK(onToggleMermaid), st);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), mermaidItem);
+
+    GtkWidget *plantUmlItem = gtk_check_menu_item_new_with_label("Render PlantUML Diagrams");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(plantUmlItem), g_settings.plantUmlEnabled);
+    g_signal_connect(plantUmlItem, "toggled", G_CALLBACK(onTogglePlantUml), st);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), plantUmlItem);
+
+    GtkWidget *latexItem = gtk_check_menu_item_new_with_label("Render LaTeX Math");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(latexItem), g_settings.latexEnabled);
+    g_signal_connect(latexItem, "toggled", G_CALLBACK(onToggleLatex), st);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), latexItem);
 
     gtk_widget_show_all(menu);
     // Passing NULL here (instead of the WebKit-supplied `event`) as a
@@ -751,6 +840,7 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct *dps)
     g_configPath = dir + "/markdownview.ini";
     g_settings.loadOrInitDefaults(g_configPath, PLUGNAME);
     MarkdownEngine::setPluginConfigDir(dir);
+    applyEngineRenderSettings();
 }
 
 } // extern "C"

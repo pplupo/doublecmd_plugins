@@ -55,6 +55,31 @@ static double g_zoomMultiplier = 1.0;
 // font name frequently isn't the same string we'd show in a menu; see
 // markdown_engine.cpp's resolveMathFontCanonicalName().
 static QString g_mathFontClmPath;
+// "auto" (Matplot++ preferred, Cairo fallback), "cairo" (Cairo only), or
+// "off" (```chart blocks show as plain text) -- see MarkdownEngine::
+// setChartRendererMode(). Defaults to "cairo": Matplot++/gnuplot's
+// automatic layout has real, confirmed-live shortcomings this plugin
+// can't fully work around (no margin control for long category labels,
+// no annotation-collision avoidance, a heavier default ref_band border
+// than intended) -- Cairo's fully hand-controlled layout reads cleaner
+// for these report charts. Matplot++ stays selectable from the menu for
+// anyone who wants its more accurate tick locators/statistics anyway.
+static QString g_chartRenderer = QStringLiteral("cairo");
+static bool g_mermaidEnabled = true;
+static bool g_plantUmlEnabled = true;
+static bool g_latexEnabled = true;
+
+// Pushes the current g_chartRenderer/g_*Enabled globals into the engine's
+// own process-global state (see MarkdownEngine::setChartRendererMode/
+// setDiagramEnabled) -- these aren't per-render-call parameters like
+// g_mathFontClmPath, so they need an explicit push after every ini load
+// and every menu toggle, before the next reloadContent().
+static void applyEngineRenderSettings() {
+    MarkdownEngine::setChartRendererMode(g_chartRenderer.toStdString());
+    MarkdownEngine::setDiagramEnabled("mermaid", g_mermaidEnabled);
+    MarkdownEngine::setDiagramEnabled("plantuml", g_plantUmlEnabled);
+    MarkdownEngine::setDiagramEnabled("latex", g_latexEnabled);
+}
 
 static bool isSystemDark() {
     QPalette pal = QGuiApplication::palette();
@@ -75,6 +100,10 @@ static void saveSettings() {
     settings.setValue(PLUGNAME "/auto_reload", g_autoReloadEnabled);
     settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
     settings.setValue(PLUGNAME "/math_font", g_mathFontClmPath);
+    settings.setValue(PLUGNAME "/chart_renderer", g_chartRenderer);
+    settings.setValue(PLUGNAME "/enable_mermaid", g_mermaidEnabled);
+    settings.setValue(PLUGNAME "/enable_plantuml", g_plantUmlEnabled);
+    settings.setValue(PLUGNAME "/enable_latex", g_latexEnabled);
     // Explicit sync rather than relying solely on ~QSettings() to flush --
     // no known bug requires this (QSettings' destructor already syncs),
     // but it removes any doubt while diagnosing zoom persistence.
@@ -483,7 +512,7 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) override {
         QMenu menu(this);
 
-        QAction* copyAction = menu.addAction(tr("Copy Text"));
+        QAction* copyAction = menu.addAction(tr("Copy"));
         copyAction->setEnabled(textCursor().hasSelection());
         connect(copyAction, &QAction::triggered, this, &MarkdownViewerWidget::copySelection);
 
@@ -589,6 +618,46 @@ protected:
                 reloadContent();
             });
         }
+
+        QMenu* chartMenu = menu.addMenu(tr("Chart Renderer"));
+        QActionGroup* chartGroup = new QActionGroup(chartMenu);
+        chartGroup->setExclusive(true);
+        auto addChartModeAction = [&](const QString &label, const QString &mode) {
+            QAction* a = chartMenu->addAction(label);
+            a->setCheckable(true);
+            a->setChecked(g_chartRenderer == mode);
+            chartGroup->addAction(a);
+            connect(a, &QAction::triggered, this, [this, mode]() {
+                g_chartRenderer = mode;
+                saveSettings();
+                applyEngineRenderSettings();
+                reloadContent();
+            });
+        };
+        addChartModeAction(tr("Matplot++ (preferred)"), QStringLiteral("auto"));
+        addChartModeAction(tr("Cairo Only"), QStringLiteral("cairo"));
+        addChartModeAction(tr("Disabled"), QStringLiteral("off"));
+
+        auto addDiagramToggle = [&](const QString &label, bool &flag) {
+            QAction* a = menu.addAction(label);
+            a->setCheckable(true);
+            a->setChecked(flag);
+            // Captures a pointer, not a reference to the `flag` parameter
+            // itself -- that parameter is a local binding that would be
+            // dangling by the time this lambda actually fires (Qt's
+            // QAction::triggered is asynchronous, long after
+            // addDiagramToggle() returns).
+            bool *flagPtr = &flag;
+            connect(a, &QAction::triggered, this, [this, flagPtr](bool checked) {
+                *flagPtr = checked;
+                saveSettings();
+                applyEngineRenderSettings();
+                reloadContent();
+            });
+        };
+        addDiagramToggle(tr("Render Mermaid Diagrams"), g_mermaidEnabled);
+        addDiagramToggle(tr("Render PlantUML Diagrams"), g_plantUmlEnabled);
+        addDiagramToggle(tr("Render LaTeX Math"), g_latexEnabled);
 
         menu.exec(event->globalPos());
     }
@@ -707,6 +776,28 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
         settings.setValue(PLUGNAME "/math_font", g_mathFontClmPath);
     else
         g_mathFontClmPath = settings.value(PLUGNAME "/math_font").toString();
+
+    if (!settings.contains(PLUGNAME "/chart_renderer"))
+        settings.setValue(PLUGNAME "/chart_renderer", g_chartRenderer);
+    else
+        g_chartRenderer = settings.value(PLUGNAME "/chart_renderer").toString().toLower();
+
+    if (!settings.contains(PLUGNAME "/enable_mermaid"))
+        settings.setValue(PLUGNAME "/enable_mermaid", g_mermaidEnabled);
+    else
+        g_mermaidEnabled = settings.value(PLUGNAME "/enable_mermaid").toBool();
+
+    if (!settings.contains(PLUGNAME "/enable_plantuml"))
+        settings.setValue(PLUGNAME "/enable_plantuml", g_plantUmlEnabled);
+    else
+        g_plantUmlEnabled = settings.value(PLUGNAME "/enable_plantuml").toBool();
+
+    if (!settings.contains(PLUGNAME "/enable_latex"))
+        settings.setValue(PLUGNAME "/enable_latex", g_latexEnabled);
+    else
+        g_latexEnabled = settings.value(PLUGNAME "/enable_latex").toBool();
+
+    applyEngineRenderSettings();
 }
 
 } // extern "C"

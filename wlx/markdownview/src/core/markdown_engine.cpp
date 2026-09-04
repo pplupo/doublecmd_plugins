@@ -117,6 +117,14 @@ std::string g_pluginConfigDir;
 // callers can persist the actual file in use back into their ini.
 std::string g_lastAutoResolvedCssPath;
 
+// Per-diagram-kind enable flags, set via MarkdownEngine::setDiagramEnabled()
+// (called once at startup from the plugin's ini-backed settings, and again
+// whenever the user flips one from the context menu). Default-on, matching
+// this plugin's original always-render behavior.
+bool g_mermaidEnabled = true;
+bool g_plantUmlEnabled = true;
+bool g_latexEnabled = true;
+
 std::string htmlUnescape(const std::string &s) {
     std::string out;
     out.reserve(s.size());
@@ -331,16 +339,16 @@ std::string parseMarkdownToHtml(const std::string &markdown) {
 
 // --- Fenced code block post-processing: mermaid/plantuml -> rendered image ---
 
-// Full definition + implementation is much further down (resolveChartCssFonts()),
-// alongside the rest of the CSS-handling code it depends on (DEFAULT_CSS,
-// resolveActiveCss(), etc.) -- forward-declared here since it's needed by
-// renderChartImgTag() below, which textually comes first.
+// Full definition (resolveChartFonts()) is much further down, alongside
+// the CSS-handling code area it used to depend on -- forward-declared here
+// since it's needed by renderChartImgTag() below, which textually comes
+// first.
 struct ChartCssFonts {
     std::string bodyFamily;
     std::string titleFamily;
     bool titleBold = true;
 };
-ChartCssFonts resolveChartCssFonts(const std::string &customCssPath);
+ChartCssFonts resolveChartFonts();
 
 // ```chart blocks (a JSON spec, same shape ~/repos/reports' charts.py
 // uses) render straight to PNG via Cairo -- no SVG intermediate, unlike
@@ -348,7 +356,8 @@ ChartCssFonts resolveChartCssFonts(const std::string &customCssPath);
 // into the svg/rasterize pipeline the other two share.
 std::string renderChartImgTag(const std::string &code, bool darkMode, const std::string &customCssPath) {
     int w = 0, h = 0;
-    ChartCssFonts fonts = resolveChartCssFonts(customCssPath);
+    (void)customCssPath; // chart fonts are fixed (see resolveChartFonts), not derived from the document's own CSS
+    ChartCssFonts fonts = resolveChartFonts();
     std::vector<uint8_t> png = ChartRender::renderChartToPng(code, darkMode, fonts.bodyFamily, fonts.titleFamily, fonts.titleBold, w, h);
     if (png.empty()) return {};
     std::string b64 = base64Encode(png);
@@ -362,9 +371,11 @@ std::string renderDiagramImgTag(const std::string &lang, const std::string &code
     if (lang == "chart") return renderChartImgTag(code, darkMode, customCssPath);
     std::string svg;
     if (lang == "mermaid") {
+        if (!g_mermaidEnabled) return {}; // caller's empty-result contract leaves the fenced block as plain text
         svg = DiagramRender::renderMermaidWeb(code, darkMode);
         if (!svg.empty()) svg = DiagramRender::fixMermaidSvgText(svg, darkMode);
     } else { // plantuml / puml
+        if (!g_plantUmlEnabled) return {};
         svg = DiagramRender::renderPlantUmlWeb(code, darkMode);
         if (!svg.empty() && darkMode) svg = DiagramRender::fixPlantUmlSvgDark(svg);
     }
@@ -453,8 +464,11 @@ std::string replaceDiagramBlocks(const std::string &htmlIn, bool darkMode, const
 
 std::string renderMathTag(const std::string &tex, bool isDisplay, bool darkMode, const std::string &mathFontClmPath) {
     int w = 0, h = 0;
-    std::string resolvedFontName = resolveMathFontCanonicalName(mathFontClmPath);
-    std::vector<uint8_t> png = renderLatexToPng(tex, darkMode, resolvedFontName, w, h);
+    std::vector<uint8_t> png;
+    if (g_latexEnabled) {
+        std::string resolvedFontName = resolveMathFontCanonicalName(mathFontClmPath);
+        png = renderLatexToPng(tex, darkMode, resolvedFontName, w, h);
+    }
     if (png.empty()) {
         // Fallback: plain text, same shape as the original md4qt-based code's
         // non-LaTeX/parse-failure fallback. `tex` is the raw (unescaped)
@@ -686,111 +700,25 @@ std::string resolveActiveCss(const std::string &customCssPath) {
     return cssStr;
 }
 
-std::string trim(const std::string &s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
-}
-
-// --- Chart title/body font: mirror the active CSS's own fonts ---
+// --- Chart title/body font: fixed, matching ~/repos/reports/charts.py ---
 //
-// Cairo's "toy" text API (chart_render.cpp) takes one bare family name, not
-// a CSS-style comma-separated fallback stack -- so picking a usable name
-// out of a real stack like `-apple-system, BlinkMacSystemFont, "Segoe UI",
-// Roboto, Helvetica, Arial, sans-serif` (the shipped default theme's body
-// rule) means skipping the Apple/Windows-only aliases up front (never real
-// installed font names on Linux) and taking the first genuinely-named
-// entry after that -- "Roboto" here. Fontconfig substitutes silently if
-// the chosen name isn't actually installed (same graceful-degradation
-// behavior the plain "sans-serif" default already relied on), so this is
-// a best-effort match, not a guarantee of a pixel-identical font.
-std::string pickConcreteFontFamily(const std::string &rawFontFamilyValue) {
-    static const std::vector<std::string> kSkipAliases = {
-        "-apple-system", "blinkmacsystemfont", "segoe ui", "system-ui", "-webkit-system-font"
-    };
-    static const std::vector<std::string> kGenericKeywords = {
-        "sans-serif", "serif", "monospace", "cursive", "fantasy"
-    };
-    std::string firstGeneric;
-    size_t pos = 0;
-    while (pos < rawFontFamilyValue.size()) {
-        size_t comma = rawFontFamilyValue.find(',', pos);
-        std::string token = rawFontFamilyValue.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        pos = (comma == std::string::npos) ? rawFontFamilyValue.size() : comma + 1;
-        token = trim(token);
-        if (token.size() >= 2 && (token.front() == '"' || token.front() == '\'') && token.back() == token.front())
-            token = token.substr(1, token.size() - 2);
-        if (token.empty()) continue;
-        std::string lower = token;
-        for (char &c : lower) c = (char)std::tolower((unsigned char)c);
-        bool isSkipAlias = std::find(kSkipAliases.begin(), kSkipAliases.end(), lower) != kSkipAliases.end();
-        if (isSkipAlias) continue;
-        bool isGeneric = std::find(kGenericKeywords.begin(), kGenericKeywords.end(), lower) != kGenericKeywords.end();
-        if (isGeneric) { if (firstGeneric.empty()) firstGeneric = token; continue; }
-        return token; // first concrete (non-alias, non-generic) name found
-    }
-    return firstGeneric; // nothing concrete -- fall back to whatever generic keyword was present, or "" if none
-}
-
-bool isBoldCssWeight(const std::string &weightValue) {
-    std::string v = trim(weightValue);
-    for (char &c : v) c = (char)std::tolower((unsigned char)c);
-    if (v == "bold" || v == "bolder") return true;
-    try { return std::stoi(v) >= 600; } catch (...) { return false; }
-}
-
-// Finds the `{ ... }` block body for a CSS rule whose selector list
-// contains `token` as a whole word (e.g. "h1" matches "h1, h2, h3 { ... }"
-// but not "th1" or "phi1"). Hand-written rather than std::regex-based --
-// this file already avoids std::regex entirely (see findNextCodeBlock's
-// comment for why: a real, confirmed-live SIGSEGV in libstdc++'s regex
-// locale setup, not a style preference).
-std::string findCssRuleBlock(const std::string &css, const std::string &token) {
-    size_t searchFrom = 0;
-    while (true) {
-        size_t pos = css.find(token, searchFrom);
-        if (pos == std::string::npos) return "";
-        char before = (pos == 0) ? '\0' : css[pos - 1];
-        char after = (pos + token.size() < css.size()) ? css[pos + token.size()] : '\0';
-        bool beforeOk = before == '\0' || before == ',' || before == '{' || before == '}' || std::isspace((unsigned char)before);
-        bool afterOk = after == '\0' || after == ',' || after == '{' || std::isspace((unsigned char)after);
-        if (beforeOk && afterOk) {
-            size_t brace = css.find('{', pos);
-            if (brace == std::string::npos) return "";
-            size_t closeBrace = css.find('}', brace); // CSS rules don't nest -- first close is the match
-            if (closeBrace == std::string::npos) return "";
-            return css.substr(brace + 1, closeBrace - brace - 1);
-        }
-        searchFrom = pos + token.size();
-    }
-}
-
-std::string cssPropertyValue(const std::string &block, const std::string &prop) {
-    size_t p = block.find(prop);
-    if (p == std::string::npos) return "";
-    p = block.find(':', p + prop.size());
-    if (p == std::string::npos) return "";
-    ++p;
-    size_t end = block.find(';', p);
-    return trim(block.substr(p, (end == std::string::npos ? block.size() : end) - p));
-}
-
-// ChartCssFonts is forward-declared (with renderChartImgTag(), its first
-// caller) up near the top of this fenced-code-block-handling section.
-ChartCssFonts resolveChartCssFonts(const std::string &customCssPath) {
-    std::string css = resolveActiveCss(customCssPath);
-    std::string bodyRaw = cssPropertyValue(findCssRuleBlock(css, "body"), "font-family");
-    std::string headingBlock = findCssRuleBlock(css, "h1");
-    std::string headingRaw = cssPropertyValue(headingBlock, "font-family");
-    if (headingRaw.empty()) headingRaw = bodyRaw; // default theme's h1..h6 rule doesn't redefine font-family, only weight/size
-
+// charts.py (the matplotlib renderer these report documents were
+// originally designed for) hardcodes its own fonts unconditionally --
+// PLEX_SANS = "IBM Plex Sans" for body/axis text, PLEX_SERIF =
+// "IBM Plex Serif" bold for the title, both regardless of whatever theme
+// the surrounding document happens to use -- rather than deriving from
+// the active CSS the way this used to work (matching the document's own
+// body/heading font instead). Mirrored here the same way: a chart's fonts
+// are always these two names, not whatever markdownview.css says.
+// Fontconfig substitutes silently if a name isn't actually installed
+// (same graceful-degradation charts.py itself gets from matplotlib's font
+// manager), so this is a best-effort match, not a guarantee of a
+// pixel-identical font on every machine.
+ChartCssFonts resolveChartFonts() {
     ChartCssFonts fonts;
-    fonts.bodyFamily = pickConcreteFontFamily(bodyRaw);
-    fonts.titleFamily = pickConcreteFontFamily(headingRaw);
-    if (fonts.titleFamily.empty()) fonts.titleFamily = fonts.bodyFamily;
-    std::string weightRaw = cssPropertyValue(headingBlock, "font-weight");
-    fonts.titleBold = weightRaw.empty() ? true : isBoldCssWeight(weightRaw); // headings are almost always bold; default theme sets 600 explicitly
+    fonts.bodyFamily = "IBM Plex Sans";
+    fonts.titleFamily = "IBM Plex Serif";
+    fonts.titleBold = true;
     return fonts;
 }
 
@@ -1104,6 +1032,18 @@ void init() {
 
 void setPluginConfigDir(const std::string &dir) {
     g_pluginConfigDir = dir;
+}
+
+void setDiagramEnabled(const std::string &kind, bool enabled) {
+    if (kind == "mermaid") g_mermaidEnabled = enabled;
+    else if (kind == "plantuml") g_plantUmlEnabled = enabled;
+    else if (kind == "latex") g_latexEnabled = enabled;
+}
+
+void setChartRendererMode(const std::string &mode) {
+    if (mode == "cairo") ChartRender::setRendererMode(ChartRender::RendererMode::CairoOnly);
+    else if (mode == "off") ChartRender::setRendererMode(ChartRender::RendererMode::Off);
+    else ChartRender::setRendererMode(ChartRender::RendererMode::Auto);
 }
 
 std::string getLastAutoResolvedCssPath() {
