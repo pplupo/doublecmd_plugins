@@ -22,9 +22,22 @@ EntryTree::Node *EntryTree::makeNode(const std::string &name,
     return node;
 }
 
-void EntryTree::hold(Node *node, Node *parent, Pending *pending)
+void EntryTree::hold(Node *node, Node *parent, Sink *sink)
 {
-    if (pending && parent->attached) {
+    Pending *pending = sink ? sink->pending : nullptr;
+
+    if (!pending) {
+        // Immediate mode: attach and announce now, so the node is never
+        // reachable before the observer has been told about it.
+        node->row = static_cast<int>(parent->children.size());
+        node->attached = true;
+        parent->children.push_back(node);
+        if (sink && sink->listener)
+            sink->listener->nodeAttached(node);
+        return;
+    }
+
+    if (parent->attached) {
         // Parent is already on screen, so this node's arrival has to be
         // announced. Hold it back until the whole batch is processed, then
         // attach every sibling group in one call.
@@ -39,8 +52,13 @@ void EntryTree::hold(Node *node, Node *parent, Pending *pending)
     }
 }
 
-void EntryTree::flush(Pending *pending, Listener *listener)
+void EntryTree::flush(Sink *sink)
 {
+    if (!sink || !sink->pending)
+        return;
+    Pending *pending = sink->pending;
+    Listener *listener = sink->listener;
+
     for (auto &group : *pending) {
         Node *parent = group.first;
         std::vector<Node *> &nodes = group.second;
@@ -77,7 +95,7 @@ void EntryTree::flush(Pending *pending, Listener *listener)
 }
 
 EntryTree::Node *EntryTree::ensureNode(const std::string &path, bool isDir,
-                                       Pending *pending)
+                                       Sink *sink)
 {
     const auto existing = m_byPath.find(path);
     if (existing != m_byPath.end()) {
@@ -91,7 +109,7 @@ EntryTree::Node *EntryTree::ensureNode(const std::string &path, bool isDir,
     std::string name = path;
     if (slash != std::string::npos && slash > 0) {
         // Ancestors are always directories, whether or not the archive said so.
-        parent = ensureNode(path.substr(0, slash), true, pending);
+        parent = ensureNode(path.substr(0, slash), true, sink);
         name = path.substr(slash + 1);
     }
     // slash == 0 means an absolute member path such as "/absolute/file.txt".
@@ -101,11 +119,11 @@ EntryTree::Node *EntryTree::ensureNode(const std::string &path, bool isDir,
 
     Node *node = makeNode(name, path, parent, /*registerPath=*/true);
     node->isDir = isDir;
-    hold(node, parent, pending);
+    hold(node, parent, sink);
     return node;
 }
 
-EntryTree::Node *EntryTree::addDuplicate(Node *original, Pending *pending)
+EntryTree::Node *EntryTree::addDuplicate(Node *original, Sink *sink)
 {
     // An archive may store two members under the same path. Folding them into
     // one row would hide the discrepancy, and a duplicate path is exactly the
@@ -118,29 +136,32 @@ EntryTree::Node *EntryTree::addDuplicate(Node *original, Pending *pending)
                           /*registerPath=*/false);
     node->isDuplicate = true;
     ++m_duplicateCount;
-    hold(node, parent, pending);
+    hold(node, parent, sink);
     return node;
 }
 
-void EntryTree::addEntries(const EntryBatch &batch, Listener *listener)
+void EntryTree::addEntries(const EntryBatch &batch, Listener *listener, Mode mode)
 {
     if (batch.empty())
         return;
 
     Pending pending;
+    Sink sink;
+    sink.listener = listener;
+    sink.pending = (mode == Mode::Grouped) ? &pending : nullptr;
 
     for (const Entry &entry : batch) {
-        Node *node = ensureNode(entry.path, entry.isDir(), &pending);
+        Node *node = ensureNode(entry.path, entry.isDir(), &sink);
 
         if (node->hasEntry)
-            node = addDuplicate(node, &pending);
+            node = addDuplicate(node, &sink);
 
         node->hasEntry = true;
         node->entry = entry;
         m_flat.push_back(node);
     }
 
-    flush(&pending, listener);
+    flush(&sink);
 }
 
 void EntryTree::clear()

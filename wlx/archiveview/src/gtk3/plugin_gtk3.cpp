@@ -6,15 +6,20 @@
 /// hostile member names shown verbatim, duplicate paths given their own rows,
 /// the ZIP central directory's packed sizes and CRCs, encryption indicators.
 ///
-/// Scope: listing. Extraction, drag-out and the filter box are the Qt
-/// variant's today and are the next pass here.
+/// Parity with the Qt6 variant: listing, live filter, context menu,
+/// extract-to-directory, open-with, and drag-out as text/uri-list.
 
 #include <gtk/gtk.h>
+#include <glib/gstdio.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
+
+#include "core/ArchiveExtractor.h"
 
 #include "wlxplugin.h"
 
@@ -42,10 +47,27 @@ struct ArchiveView : std::enable_shared_from_this<ArchiveView>,
     GtkWidget *root = nullptr;        ///< the box handed back to DC
     GtkWidget *view = nullptr;        ///< GtkTreeView
     GtkWidget *status = nullptr;      ///< GtkLabel
+    GtkWidget *filterBox = nullptr;   ///< GtkEntry
     ArchiveTreeModel *model = nullptr;
+    GtkTreeModel *filterModel = nullptr;   ///< GtkTreeModelFilter over `model`
 
     archiveview::EntryTree tree;
     archiveview::Scanner scanner;
+    archiveview::Extractor extractor;
+
+    /// Nodes the current filter admits, plus their ancestors. Recomputed on
+    /// each keystroke in one pass so the visible-func stays O(1); asking
+    /// "does any descendant match?" per row would be quadratic.
+    std::unordered_set<const archiveview::EntryTree::Node *> visible;
+    bool filtering = false;
+
+    /// Scratch directory for previewed and dragged-out members, removed when
+    /// the view goes away.
+    std::string scratch;
+    /// True while a nested extraction loop is running; a second request from
+    /// a menu click or a drag would otherwise nest two loops over one
+    /// extractor. Same guard as the Qt variant.
+    bool extracting = false;
     archiveview::Settings settings;
     archiveview::Summary summary;
 
@@ -56,14 +78,14 @@ struct ArchiveView : std::enable_shared_from_this<ArchiveView>,
     /// Set when the widget is destroyed; idle handlers check it.
     std::atomic<bool> dead{false};
 
+    // Grouped notifications are the Qt model's half of the Listener contract;
+    // GTK uses immediate mode instead, where each node is announced the
+    // moment it becomes reachable.
     void beforeInsert(const archiveview::EntryTree::Node *, int, int) override {}
-    void afterInsert(const archiveview::EntryTree::Node *parent,
-                     int first, int count) override
+    void afterInsert(const archiveview::EntryTree::Node *, int, int) override {}
+    void nodeAttached(const archiveview::EntryTree::Node *node) override
     {
-        // GTK notifies after the fact, which is why EntryTree brackets its
-        // insertions rather than returning them: the Qt model needs the
-        // "before" half, this one needs the "after".
-        archive_tree_model_rows_inserted(model, parent, first, count);
+        archive_tree_model_row_inserted(model, node);
     }
 
     void refreshStatus()
@@ -72,7 +94,12 @@ struct ArchiveView : std::enable_shared_from_this<ArchiveView>,
             return;
 
         std::string text = formatText.empty() ? std::string("scanning…") : formatText;
-        text += "   |   " + std::to_string(tree.entryCount()) + " members";
+        if (filtering) {
+            text += "   |   " + std::to_string(visible.size()) + " of "
+                  + std::to_string(tree.entryCount()) + " members";
+        } else {
+            text += "   |   " + std::to_string(tree.entryCount()) + " members";
+        }
         if (tree.duplicateCount() > 0)
             text += "   |   " + std::to_string(tree.duplicateCount()) + " duplicate paths";
         if (summary.hasEncryptedEntries)
@@ -130,6 +157,356 @@ void post(const ViewWeak &weak, Work work)
     }, payload);
 }
 
+
+/// Normalised in-archive paths of every selected member.
+///
+/// Selecting a directory means everything under it, which is what every other
+/// file manager does.
+std::vector<std::string> selectedMembers(const ViewPtr &view)
+{
+    std::vector<std::string> members;
+    GtkTreeSelection *selection =
+        gtk_tree_view_get_selection(GTK_TREE_VIEW(view->view));
+    GtkTreeModel *model = nullptr;
+    GList *rows = gtk_tree_selection_get_selected_rows(selection, &model);
+
+    for (GList *row = rows; row; row = row->next) {
+        auto *path = static_cast<GtkTreePath *>(row->data);
+        GtkTreeIter iter;
+        if (!gtk_tree_model_get_iter(model, &iter, path))
+            continue;
+
+        // The view may be looking through the filter, whose iters are not
+        // ours; convert before touching the node.
+        GtkTreeIter childIter = iter;
+        if (GTK_IS_TREE_MODEL_FILTER(model)) {
+            gtk_tree_model_filter_convert_iter_to_child_iter(
+                GTK_TREE_MODEL_FILTER(model), &childIter, &iter);
+        }
+
+        const auto *node = archive_tree_model_node(&childIter);
+        if (!node)
+            continue;
+
+        std::vector<const archiveview::EntryTree::Node *> stack{node};
+        while (!stack.empty()) {
+            const auto *current = stack.back();
+            stack.pop_back();
+            if (current->hasEntry)
+                members.push_back(current->fullPath);
+            for (const auto *child : current->children)
+                stack.push_back(child);
+        }
+    }
+
+    g_list_free_full(rows, reinterpret_cast<GDestroyNotify>(gtk_tree_path_free));
+
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    return members;
+}
+
+/// Extract `members` into `destination`, pumping a nested main loop so the UI
+/// stays alive and the Cancel button works. Returns the paths written.
+///
+/// A nested GMainLoop rather than a `while (...) gtk_main_iteration()` spin,
+/// for the same reason the Qt variant uses QEventLoop: a spin has no exit if
+/// the terminal callback never arrives, so a failure to report would present
+/// as a frozen file manager instead of an error.
+std::vector<std::string> extractMembers(const ViewPtr &view,
+                                        const std::vector<std::string> &members,
+                                        const std::string &destination)
+{
+    if (view->extracting || members.empty())
+        return {};
+    view->extracting = true;
+
+    // Reuse a passphrase already accepted for this archive.
+    view->extractor.setPassphrase(view->scanner.acceptedPassphrase());
+
+    GtkWidget *dialog = gtk_dialog_new_with_buttons(
+        "Extracting…", GTK_WINDOW(gtk_widget_get_toplevel(view->view)),
+        GTK_DIALOG_DESTROY_WITH_PARENT, "_Cancel", GTK_RESPONSE_CANCEL, nullptr);
+    GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    GtkWidget *label = gtk_label_new(view->path.c_str());
+    GtkWidget *bar = gtk_progress_bar_new();
+    gtk_widget_set_margin_start(label, 8);
+    gtk_widget_set_margin_end(label, 8);
+    gtk_widget_set_margin_start(bar, 8);
+    gtk_widget_set_margin_end(bar, 8);
+    gtk_box_pack_start(GTK_BOX(content), label, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(content), bar, FALSE, FALSE, 4);
+    gtk_widget_show_all(dialog);
+
+    GMainLoop *loop = g_main_loop_new(nullptr, FALSE);
+    bool ok = false;
+    std::string error;
+    int refused = 0;
+
+    struct Shared {
+        GMainLoop *loop;
+        GtkWidget *bar;
+        GtkWidget *label;
+        bool *ok;
+        std::string *error;
+        int *refused;
+        int total;
+    } shared{loop, bar, label, &ok, &error, &refused,
+             static_cast<int>(members.size())};
+
+    // Cancel closes the loop by cancelling the worker, which then reports.
+    g_signal_connect(dialog, "response",
+                     G_CALLBACK(+[](GtkDialog *, gint, gpointer data) {
+                         static_cast<archiveview::Extractor *>(data)->cancel();
+                     }), &view->extractor);
+
+    archiveview::Extractor::Callbacks callbacks;
+    ViewWeak weak = view->shared_from_this();
+    callbacks.progress = [&shared, weak](int done, int total,
+                                         const std::string &member) {
+        // Worker thread: hop to the main loop before touching widgets.
+        Shared *s = &shared;
+        auto *payload = new std::pair<Shared *, std::pair<int, std::string>>(
+            s, {total > 0 ? done : 0, member});
+        (void)weak;
+        g_idle_add([](gpointer data) -> gboolean {
+            auto *p = static_cast<std::pair<Shared *, std::pair<int, std::string>> *>(data);
+            if (p->first->total > 0) {
+                gtk_progress_bar_set_fraction(
+                    GTK_PROGRESS_BAR(p->first->bar),
+                    double(p->second.first) / double(p->first->total));
+            }
+            gtk_label_set_text(GTK_LABEL(p->first->label), p->second.second.c_str());
+            delete p;
+            return G_SOURCE_REMOVE;
+        }, payload);
+    };
+    callbacks.finished = [&shared](bool succeeded, const std::string &message,
+                                   int, int refusedCount) {
+        *shared.ok = succeeded;
+        *shared.error = message;
+        *shared.refused = refusedCount;
+        // Quitting the loop from the worker thread is safe: g_main_loop_quit
+        // is thread-safe, unlike the widget calls above.
+        g_main_loop_quit(shared.loop);
+    };
+    // No prompt here yet: listing never needs one, and a dialog stacked
+    // inside this nested loop is the kind of thing that wedges a host.
+    callbacks.passphraseNeeded = [&view](int) {
+        view->extractor.providePassphrase(std::string(), false);
+    };
+    view->extractor.setCallbacks(std::move(callbacks));
+
+    view->extractor.extract(view->path, members, destination);
+    g_main_loop_run(loop);
+    view->extractor.cancelAndWait();
+    g_main_loop_unref(loop);
+
+    gtk_widget_destroy(dialog);
+    view->extracting = false;
+
+    const std::vector<std::string> written = view->extractor.writtenPaths();
+
+    if (refused > 0) {
+        // Worth saying out loud: these are the traversal and absolute-path
+        // members the listing shows verbatim.
+        GtkWidget *warning = gtk_message_dialog_new(
+            GTK_WINDOW(gtk_widget_get_toplevel(view->view)),
+            GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
+            "%d member(s) were not extracted because their stored paths point "
+            "outside the destination directory (an absolute path, or one "
+            "containing \"..\").", refused);
+        gtk_dialog_run(GTK_DIALOG(warning));
+        gtk_widget_destroy(warning);
+    } else if (!ok && !error.empty() && error != "Cancelled") {
+        GtkWidget *warning = gtk_message_dialog_new(
+            GTK_WINDOW(gtk_widget_get_toplevel(view->view)),
+            GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_WARNING, GTK_BUTTONS_OK,
+            "Extraction failed: %s", error.c_str());
+        gtk_dialog_run(GTK_DIALOG(warning));
+        gtk_widget_destroy(warning);
+    }
+
+    return written;
+}
+
+const std::string &scratchDir(const ViewPtr &view)
+{
+    if (view->scratch.empty()) {
+        gchar *dir = g_dir_make_tmp("archiveview-XXXXXX", nullptr);
+        if (dir) {
+            view->scratch = dir;
+            g_free(dir);
+        }
+    }
+    return view->scratch;
+}
+
+void onExtractSelection(const ViewPtr &view)
+{
+    const std::vector<std::string> members = selectedMembers(view);
+    if (members.empty())
+        return;
+
+    GtkWidget *chooser = gtk_file_chooser_dialog_new(
+        "Extract selection to", GTK_WINDOW(gtk_widget_get_toplevel(view->view)),
+        GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Extract", GTK_RESPONSE_ACCEPT, nullptr);
+
+    gchar *parent = g_path_get_dirname(view->path.c_str());
+    gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(chooser), parent);
+    g_free(parent);
+
+    std::string destination;
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_ACCEPT) {
+        gchar *chosen = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(chooser));
+        if (chosen) {
+            destination = chosen;
+            g_free(chosen);
+        }
+    }
+    gtk_widget_destroy(chooser);
+
+    if (!destination.empty())
+        extractMembers(view, members, destination);
+}
+
+void onOpenSelection(const ViewPtr &view)
+{
+    const std::vector<std::string> members = selectedMembers(view);
+    if (members.empty() || scratchDir(view).empty())
+        return;
+
+    // Only the first: opening thirty files in thirty applications is never
+    // what someone means by "open".
+    const std::vector<std::string> written =
+        extractMembers(view, {members.front()}, view->scratch);
+    if (written.empty())
+        return;
+
+    gchar *uri = g_filename_to_uri(written.front().c_str(), nullptr, nullptr);
+    if (uri) {
+        g_app_info_launch_default_for_uri(uri, nullptr, nullptr);
+        g_free(uri);
+    }
+}
+
+void applyFilter(const ViewPtr &view)
+{
+    const gchar *text = gtk_entry_get_text(GTK_ENTRY(view->filterBox));
+    const std::string needle = text ? text : "";
+
+    view->visible.clear();
+    view->filtering = !needle.empty();
+
+    if (view->filtering) {
+        gchar *folded = g_utf8_casefold(needle.c_str(), -1);
+        const std::string pattern = folded ? folded : needle;
+        g_free(folded);
+
+        // One pass: a node is visible if it matches, and every ancestor of a
+        // visible node is visible too, so matches inside collapsed
+        // directories still appear with the path that leads to them.
+        for (const auto *node : view->tree.flat()) {
+            gchar *haystack = g_utf8_casefold(node->fullPath.c_str(), -1);
+            const bool hit = haystack
+                          && std::string(haystack).find(pattern) != std::string::npos;
+            g_free(haystack);
+            if (!hit)
+                continue;
+            for (const auto *walk = node; walk && walk != view->tree.root();
+                 walk = walk->parent) {
+                if (!view->visible.insert(walk).second)
+                    break;   // ancestors already marked by an earlier match
+            }
+        }
+    }
+
+    // Attach the filter only while it is doing something, and drop back to
+    // the raw model when the box is cleared.
+    GtkTreeModel *wanted = view->filtering ? view->filterModel
+                                           : GTK_TREE_MODEL(view->model);
+    if (gtk_tree_view_get_model(GTK_TREE_VIEW(view->view)) != wanted) {
+        if (view->filtering)
+            gtk_tree_model_filter_refilter(GTK_TREE_MODEL_FILTER(view->filterModel));
+        gtk_tree_view_set_model(GTK_TREE_VIEW(view->view), wanted);
+    } else if (view->filtering) {
+        gtk_tree_model_filter_refilter(GTK_TREE_MODEL_FILTER(view->filterModel));
+    }
+
+    if (view->filtering && view->visible.size() < 500)
+        gtk_tree_view_expand_all(GTK_TREE_VIEW(view->view));
+    view->refreshStatus();
+}
+
+gboolean filterVisible(GtkTreeModel *, GtkTreeIter *iter, gpointer data)
+{
+    auto *view = static_cast<ArchiveView *>(data);
+    if (!view->filtering)
+        return TRUE;
+    const auto *node = archive_tree_model_node(iter);
+    return node && view->visible.count(node) > 0;
+}
+
+void showContextMenu(const ViewPtr &view, GdkEvent *event)
+{
+    const bool hasSelection = !selectedMembers(view).empty();
+
+    GtkWidget *menu = gtk_menu_new();
+
+    GtkWidget *open = gtk_menu_item_new_with_label("Open with default application");
+    gtk_widget_set_sensitive(open, hasSelection);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), open);
+
+    GtkWidget *extract = gtk_menu_item_new_with_label("Extract selection to…");
+    gtk_widget_set_sensitive(extract, hasSelection);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), extract);
+
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
+
+    GtkWidget *toggle = gtk_menu_item_new_with_label(
+        archive_tree_model_get_flat(view->model) ? "Show as tree"
+                                                 : "Show as flat list");
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), toggle);
+
+    // The view is kept alive by g_instances; the raw pointer is safe for as
+    // long as the menu can be clicked, and the handlers re-check.
+    auto *raw = new ViewWeak(view->shared_from_this());
+    g_object_set_data_full(G_OBJECT(menu), "archiveview",
+                           raw, [](gpointer p) { delete static_cast<ViewWeak *>(p); });
+
+    g_signal_connect(open, "activate", G_CALLBACK(+[](GtkMenuItem *item, gpointer) {
+        auto *weak = static_cast<ViewWeak *>(g_object_get_data(
+            G_OBJECT(gtk_widget_get_parent(GTK_WIDGET(item))), "archiveview"));
+        if (ViewPtr v = weak ? weak->lock() : nullptr)
+            onOpenSelection(v);
+    }), nullptr);
+    g_signal_connect(extract, "activate", G_CALLBACK(+[](GtkMenuItem *item, gpointer) {
+        auto *weak = static_cast<ViewWeak *>(g_object_get_data(
+            G_OBJECT(gtk_widget_get_parent(GTK_WIDGET(item))), "archiveview"));
+        if (ViewPtr v = weak ? weak->lock() : nullptr)
+            onExtractSelection(v);
+    }), nullptr);
+    g_signal_connect(toggle, "activate", G_CALLBACK(+[](GtkMenuItem *item, gpointer) {
+        auto *weak = static_cast<ViewWeak *>(g_object_get_data(
+            G_OBJECT(gtk_widget_get_parent(GTK_WIDGET(item))), "archiveview"));
+        ViewPtr v = weak ? weak->lock() : nullptr;
+        if (!v)
+            return;
+        const bool flat = !archive_tree_model_get_flat(v->model);
+        // Swapping presentation renumbers every row, so detach the view,
+        // change the model, and reattach rather than trying to patch paths.
+        gtk_tree_view_set_model(GTK_TREE_VIEW(v->view), nullptr);
+        archive_tree_model_set_flat(v->model, flat);
+        gtk_tree_view_set_model(GTK_TREE_VIEW(v->view),
+                                v->filtering ? v->filterModel
+                                             : GTK_TREE_MODEL(v->model));
+    }), nullptr);
+
+    gtk_widget_show_all(menu);
+    gtk_menu_popup_at_pointer(GTK_MENU(menu), event);
+}
+
 void addTextColumn(GtkTreeView *view, const char *title, int column, int width)
 {
     GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
@@ -149,6 +526,19 @@ void buildUi(const ViewPtr &view)
     view->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
     view->model = archive_tree_model_new(&view->tree);
+
+    // GtkTreeModelFilter over our model, matching the Qt variant's
+    // QSortFilterProxyModel. The visible-func is O(1) because applyFilter()
+    // precomputes the admitted set.
+    view->filterModel = gtk_tree_model_filter_new(GTK_TREE_MODEL(view->model), nullptr);
+    gtk_tree_model_filter_set_visible_func(GTK_TREE_MODEL_FILTER(view->filterModel),
+                                           filterVisible, view.get(), nullptr);
+
+    // The view is attached to the *raw* model until a filter is actually
+    // typed. GtkTreeModelFilter reindexes its level on every row-inserted,
+    // which is quadratic across a scan: measured at ~1.1 s of overhead for
+    // 10k rows, extrapolating past ten minutes for 100k. Filtering is a
+    // deliberate, occasional act; paying for it continuously is not.
     view->view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(view->model));
     auto *treeView = GTK_TREE_VIEW(view->view);
 
@@ -189,6 +579,79 @@ void buildUi(const ViewPtr &view)
         }
     }
 
+    // Members do not exist on disk, so a drag has to produce them. GTK asks
+    // for the data via drag-data-get, which is where the extraction happens —
+    // nothing is written merely by selecting rows.
+    static const GtkTargetEntry dragTargets[] = {
+        { const_cast<gchar *>("text/uri-list"), 0, 0 }
+    };
+    gtk_tree_view_enable_model_drag_source(treeView, GDK_BUTTON1_MASK,
+                                           dragTargets, 1, GDK_ACTION_COPY);
+    g_signal_connect(view->view, "drag-data-get",
+                     G_CALLBACK(+[](GtkWidget *widget, GdkDragContext *,
+                                    GtkSelectionData *data, guint, guint, gpointer) {
+        ViewPtr v;
+        for (const ViewPtr &candidate : g_instances) {
+            if (candidate->view == widget) {
+                v = candidate;
+                break;
+            }
+        }
+        if (!v || scratchDir(v).empty())
+            return;
+
+        const std::vector<std::string> members = selectedMembers(v);
+        if (members.empty())
+            return;
+
+        const std::vector<std::string> written = extractMembers(v, members, v->scratch);
+        if (written.empty())
+            return;
+
+        std::vector<gchar *> uris;
+        uris.reserve(written.size() + 1);
+        for (const std::string &file : written)
+            uris.push_back(g_filename_to_uri(file.c_str(), nullptr, nullptr));
+        uris.push_back(nullptr);
+        gtk_selection_data_set_uris(data, uris.data());
+        for (gchar *uri : uris)
+            g_free(uri);
+    }), nullptr);
+
+    g_signal_connect(view->view, "button-press-event",
+                     G_CALLBACK(+[](GtkWidget *widget, GdkEventButton *event,
+                                    gpointer) -> gboolean {
+        if (event->type != GDK_BUTTON_PRESS || event->button != GDK_BUTTON_SECONDARY)
+            return FALSE;
+        for (const ViewPtr &candidate : g_instances) {
+            if (candidate->view == widget) {
+                showContextMenu(candidate, reinterpret_cast<GdkEvent *>(event));
+                return TRUE;
+            }
+        }
+        return FALSE;
+    }), nullptr);
+
+    view->filterBox = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(view->filterBox), "Filter members…");
+    gtk_entry_set_icon_from_icon_name(GTK_ENTRY(view->filterBox),
+                                      GTK_ENTRY_ICON_SECONDARY, "edit-clear");
+    gtk_widget_set_visible(view->filterBox, view->settings.showFilterBox);
+    g_signal_connect(view->filterBox, "changed",
+                     G_CALLBACK(+[](GtkEditable *entry, gpointer) {
+        for (const ViewPtr &candidate : g_instances) {
+            if (candidate->filterBox == GTK_WIDGET(entry)) {
+                applyFilter(candidate);
+                return;
+            }
+        }
+    }), nullptr);
+    g_signal_connect(view->filterBox, "icon-release",
+                     G_CALLBACK(+[](GtkEntry *entry, GtkEntryIconPosition, GdkEvent *,
+                                    gpointer) { gtk_entry_set_text(entry, ""); }),
+                     nullptr);
+    gtk_box_pack_start(GTK_BOX(view->root), view->filterBox, FALSE, FALSE, 2);
+
     GtkWidget *scroller = gtk_scrolled_window_new(nullptr, nullptr);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -201,10 +664,15 @@ void buildUi(const ViewPtr &view)
     gtk_widget_set_margin_end(view->status, 4);
     gtk_box_pack_start(GTK_BOX(view->root), view->status, FALSE, FALSE, 2);
 
-    if (view->settings.startFlat)
+    if (view->settings.startFlat) {
+        gtk_tree_view_set_model(GTK_TREE_VIEW(view->view), nullptr);
         archive_tree_model_set_flat(view->model, true);
+        gtk_tree_view_set_model(GTK_TREE_VIEW(view->view), GTK_TREE_MODEL(view->model));
+    }
 
     gtk_widget_show_all(view->root);
+    // show_all would override the ini setting for the filter box.
+    gtk_widget_set_visible(view->filterBox, view->settings.showFilterBox);
 }
 
 void wireScanner(const ViewPtr &view)
@@ -228,13 +696,14 @@ void wireScanner(const ViewPtr &view)
         post(weak, [batch](const ViewPtr &v) {
             const bool flat = archive_tree_model_get_flat(v->model);
             const int before = v->tree.entryCount();
-            // In flat mode the per-parent insertions describe rows nobody is
-            // showing, so build silently and announce the one run that did
-            // appear — the same split the Qt model makes.
-            v->tree.addEntries(batch, flat ? nullptr : v.get());
+            // In flat mode the tree's per-node notifications describe rows
+            // nobody is showing, so build silently and announce the run that
+            // actually appeared in the list.
+            v->tree.addEntries(batch, flat ? nullptr : v.get(),
+                               archiveview::EntryTree::Mode::Immediate);
             if (flat) {
                 for (int row = before; row < v->tree.entryCount(); ++row)
-                    archive_tree_model_rows_inserted(v->model, nullptr, row, 1);
+                    archive_tree_model_row_inserted_flat(v->model, row);
             }
             v->refreshStatus();
         });
@@ -266,11 +735,40 @@ void wireScanner(const ViewPtr &view)
     view->scanner.setCallbacks(std::move(callbacks));
 }
 
+void removeTree(const std::string &directory)
+{
+    // Only ever called on a directory this plugin created with g_dir_make_tmp.
+    GDir *dir = g_dir_open(directory.c_str(), 0, nullptr);
+    if (!dir)
+        return;
+    while (const gchar *name = g_dir_read_name(dir)) {
+        gchar *child = g_build_filename(directory.c_str(), name, nullptr);
+        if (g_file_test(child, G_FILE_TEST_IS_DIR)
+            && !g_file_test(child, G_FILE_TEST_IS_SYMLINK)) {
+            removeTree(child);
+        } else {
+            g_remove(child);
+        }
+        g_free(child);
+    }
+    g_dir_close(dir);
+    g_rmdir(directory.c_str());
+}
+
 void destroyInstance(const ViewPtr &view)
 {
     view->dead.store(true, std::memory_order_relaxed);
     // Join before anything the callbacks touch goes away.
     view->scanner.cancelAndWait();
+    view->extractor.cancelAndWait();
+    if (!view->scratch.empty()) {
+        removeTree(view->scratch);
+        view->scratch.clear();
+    }
+    if (view->filterModel) {
+        g_object_unref(view->filterModel);
+        view->filterModel = nullptr;
+    }
     if (view->model) {
         g_object_unref(view->model);
         view->model = nullptr;
@@ -292,7 +790,7 @@ WLX_EXPORT void DCPCALL ListGetDetectString(char *DetectString, int maxlen)
 {
     snprintf(DetectString, maxlen - 1,
         "EXT=\"ZIP\" | EXT=\"ZIPX\" | EXT=\"WAR\" | EXT=\"EAR\" | EXT=\"APK\" | "
-        "EXT=\"XPI\" | EXT=\"WHL\" | EXT=\"7Z\" | EXT=\"RAR\" | EXT=\"ACE\" | "
+        "EXT=\"XPI\" | EXT=\"WHL\" | EXT=\"7Z\" | EXT=\"RAR\" | "
         "EXT=\"TAR\" | EXT=\"GZ\" | EXT=\"TGZ\" | EXT=\"BZ2\" | EXT=\"TBZ\" | "
         "EXT=\"TBZ2\" | EXT=\"XZ\" | EXT=\"TXZ\" | EXT=\"ZST\" | EXT=\"TZST\" | "
         "EXT=\"LZ\" | EXT=\"LZ4\" | EXT=\"LZMA\" | EXT=\"LZO\" | EXT=\"Z\" | "
@@ -350,6 +848,10 @@ WLX_EXPORT int DCPCALL ListLoadNext(HWND ParentWin, HWND PluginWin,
     view->path = FileToLoad;
 
     // The tree was emptied underneath the view, so observers must resync.
+    view->visible.clear();
+    view->filtering = false;
+    if (view->filterBox)
+        gtk_entry_set_text(GTK_ENTRY(view->filterBox), "");
     gtk_tree_view_set_model(GTK_TREE_VIEW(view->view), nullptr);
     gtk_tree_view_set_model(GTK_TREE_VIEW(view->view), GTK_TREE_MODEL(view->model));
 

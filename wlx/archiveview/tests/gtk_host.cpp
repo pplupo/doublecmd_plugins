@@ -94,6 +94,37 @@ int walkModel(GtkTreeModel *model, GtkTreeIter *parent, int depth,
     return count;
 }
 
+/// The filter entry the plugin packs above the view.
+GtkWidget *filterBoxOf(GtkWidget *root)
+{
+    GList *children = gtk_container_get_children(GTK_CONTAINER(root));
+    GtkWidget *entry = nullptr;
+    for (GList *child = children; child; child = child->next) {
+        if (GTK_IS_ENTRY(child->data))
+            entry = GTK_WIDGET(child->data);
+    }
+    g_list_free(children);
+    return entry;
+}
+
+GtkWidget *treeViewOf(GtkWidget *root)
+{
+    GList *children = gtk_container_get_children(GTK_CONTAINER(root));
+    GtkWidget *view = nullptr;
+    for (GList *child = children; child; child = child->next) {
+        if (GTK_IS_SCROLLED_WINDOW(child->data)) {
+            GList *inner = gtk_container_get_children(GTK_CONTAINER(child->data));
+            for (GList *node = inner; node; node = node->next) {
+                if (GTK_IS_TREE_VIEW(node->data))
+                    view = GTK_WIDGET(node->data);
+            }
+            g_list_free(inner);
+        }
+    }
+    g_list_free(children);
+    return view;
+}
+
 GtkTreeModel *modelOf(GtkWidget *root)
 {
     // The plugin hands back its container; the view is inside a scroller.
@@ -174,6 +205,14 @@ int main(int argc, char **argv)
         pump(1200);
 
         GtkTreeModel *model = modelOf(reinterpret_cast<GtkWidget *>(plugin));
+        if (model && GTK_IS_TREE_MODEL_FILTER(model)) {
+            GtkTreeModel *child =
+                gtk_tree_model_filter_get_model(GTK_TREE_MODEL_FILTER(model));
+            int childFailures = 0;
+            std::string childSample;
+            std::printf("  child model rows: %d\n",
+                        walkModel(child, nullptr, 0, &childFailures, &childSample));
+        }
         if (!model) {
             std::printf("  NO MODEL FOUND\n");
             ++failures;
@@ -189,6 +228,55 @@ int main(int argc, char **argv)
                     roundTripFailures == 0 ? "ok" : "FAILED");
         if (roundTripFailures != 0)
             ++failures;
+
+        // --- live filter -------------------------------------------------
+        if (GtkWidget *entry = filterBoxOf(reinterpret_cast<GtkWidget *>(plugin))) {
+            gtk_entry_set_text(GTK_ENTRY(entry), "deep");
+            pump(300);
+            // Re-query: the plugin attaches the filter model to the view only
+            // while a filter is active (attaching it during a scan is
+            // quadratic), so the model pointer changes here.
+            GtkTreeModel *filteredModel = modelOf(reinterpret_cast<GtkWidget *>(plugin));
+            int filteredFailures = 0;
+            std::string filteredSample;
+            const int filtered = walkModel(filteredModel, nullptr, 0, &filteredFailures,
+                                           &filteredSample);
+            std::printf("  filter 'deep'   : %d of %d rows\n", filtered, rows);
+            // A filter that changes nothing is not filtering.
+            if (filtered >= rows || filteredFailures != 0)
+                ++failures;
+
+            gtk_entry_set_text(GTK_ENTRY(entry), "");
+            pump(300);
+            GtkTreeModel *clearedModel = modelOf(reinterpret_cast<GtkWidget *>(plugin));
+            int clearedFailures = 0;
+            std::string clearedSample;
+            const int cleared = walkModel(clearedModel, nullptr, 0, &clearedFailures,
+                                          &clearedSample);
+            std::printf("  filter cleared  : %d rows %s\n", cleared,
+                        cleared == rows ? "(restored)" : "(MISMATCH)");
+            if (cleared != rows || clearedFailures != 0)
+                ++failures;
+        } else {
+            std::printf("  NO FILTER BOX FOUND\n");
+            ++failures;
+        }
+
+        // --- drag source advertised? --------------------------------------
+        if (GtkWidget *treeView = treeViewOf(reinterpret_cast<GtkWidget *>(plugin))) {
+            // A GtkTreeView only becomes a drag source once the target list is
+            // set; without it the drag-data-get handler is unreachable, which
+            // is exactly how the Qt variant's drag was silently dead.
+            GtkTargetList *targets = gtk_drag_source_get_target_list(treeView);
+            const bool hasUriList =
+                targets && gtk_target_list_find(targets,
+                                                gdk_atom_intern("text/uri-list", FALSE),
+                                                nullptr);
+            std::printf("  drag source     : %s\n",
+                        hasUriList ? "text/uri-list advertised" : "NOT ADVERTISED");
+            if (!hasUriList)
+                ++failures;
+        }
 
         char needle[] = "file";
         std::printf("  ListSearchText  : %s\n",

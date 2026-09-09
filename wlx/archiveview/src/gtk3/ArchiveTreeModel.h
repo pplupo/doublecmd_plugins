@@ -59,11 +59,19 @@ GType archive_tree_model_get_type();
 /// `tree` must outlive the model and is not owned by it.
 ArchiveTreeModel *archive_tree_model_new(archiveview::EntryTree *tree);
 
-/// Announce rows [first, first+count) appearing under `parent` (nullptr for
-/// the root). Called from EntryTree's listener, on the UI thread.
-void archive_tree_model_rows_inserted(ArchiveTreeModel *model,
-                                      const archiveview::EntryTree::Node *parent,
-                                      int first, int count);
+/// Announce one node that has just become reachable. Called from EntryTree's
+/// listener in immediate mode, on the UI thread.
+///
+/// One node at a time rather than a range: a GtkTreeModel must not expose a
+/// row before announcing it, because GtkTreeModelFilter builds its level
+/// cache from these signals *and* independently enumerates what the model
+/// already contains. Anything reachable ahead of its signal gets counted
+/// twice.
+void archive_tree_model_row_inserted(ArchiveTreeModel *model,
+                                     const archiveview::EntryTree::Node *node);
+
+/// The flat-list form: row `index` of the arrival-order list appeared.
+void archive_tree_model_row_inserted_flat(ArchiveTreeModel *model, int index);
 
 /// Tree vs flat presentation. Resets observers, since every row's path changes.
 void archive_tree_model_set_flat(ArchiveTreeModel *model, bool flat);
