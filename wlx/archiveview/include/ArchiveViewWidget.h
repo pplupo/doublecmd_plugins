@@ -45,6 +45,9 @@ public:
 
     /// Apply DC's lcp_* presentation flags from ListLoad/ListLoadNext.
     void applyShowFlags(int showFlags);
+    /// Give the name column whatever width the other columns leave over, so
+    /// the listing fills the pane instead of stopping halfway across it.
+    void fitColumnsToViewport();
     /// DC's lc_setpercent: scroll so `percent` of the listing is above the top.
     void scrollToPercent(int percent);
     /// Show the plugin's own find panel (ListSearchDialog).
@@ -70,6 +73,12 @@ public:
     /// wrong row whenever a filter is active.
     const archiveview::Entry *entryFor(const QModelIndex &viewIndex) const;
     QString pathFor(const QModelIndex &viewIndex) const;
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+    /// Watches the view's viewport, which changes width independently of this
+    /// widget when a scrollbar appears.
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void onFormatDetected(const QString &format, const QString &filters);
