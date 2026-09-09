@@ -1,6 +1,9 @@
 #include "ArchiveViewWidget.h"
 
+#include <QDateTime>
 #include <QFileInfo>
+
+#include <algorithm>
 #include <QHeaderView>
 #include <QAbstractTextDocumentLayout>
 #include <QLabel>
@@ -34,21 +37,22 @@
 #include "wlxplugin.h"      // lcp_* presentation flags
 
 #include "ArchiveExtractor.h"
+
+/// Supplied by wlx_entry.cpp (the plugin) or the harness that links this.
+const QString &archiveviewIniPath();
 #include "ArchiveModel.h"
 #include "ArchiveTreeView.h"
 #include "ArchiveScanner.h"
-#include "ArchiveNames.h"
+#include "core/ArchiveNames.h"
+#include "core/ArchiveSettings.h"
 
 ArchiveViewWidget::ArchiveViewWidget(QWidget *parent)
     : QWidget(parent)
 {
     // Both cross the scanner/GUI thread boundary as queued signal arguments.
-    qRegisterMetaType<ArchiveEntryBatch>("ArchiveEntryBatch");
-    qRegisterMetaType<ArchiveSummary>("ArchiveSummary");
-
-    m_settings = ArchiveSettings::load(archiveviewIniPath());
+    m_settings = archiveview::Settings::load(archiveviewIniPath().toStdString());
     // Both readers consult this, so it must be set before any scan starts.
-    ArchiveNames::fallbackCodec() = m_settings.nameCodec;
+    archiveview::names::setFallbackCodec(m_settings.nameCodec);
 
     setupUi();
 }
@@ -95,7 +99,12 @@ void ArchiveViewWidget::setupUi()
         const QString header =
             m_model->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString();
         if (!header.isEmpty()
-            && m_settings.hiddenColumns.contains(header, Qt::CaseInsensitive)) {
+            && std::any_of(m_settings.hiddenColumns.begin(),
+                           m_settings.hiddenColumns.end(),
+                           [&header](const std::string &hidden) {
+                               return header.compare(QString::fromStdString(hidden),
+                                                     Qt::CaseInsensitive) == 0;
+                           })) {
             m_view->setColumnHidden(column, true);
         }
     }
@@ -369,7 +378,7 @@ bool ArchiveViewWidget::loadFile(const QString &path)
 
     stopScan();
     m_model->clearEntries();
-    m_summary = ArchiveSummary();
+    m_summary = archiveview::Summary();
     m_path = path;
 
     m_status->setFormatInfo(tr("scanning…"));
@@ -435,7 +444,7 @@ void ArchiveViewWidget::toggleFlat()
     m_status->setExtraInfo(QStringLiteral("view"), flat ? tr("Flat") : tr("Tree"));
 }
 
-const ArchiveEntry *ArchiveViewWidget::entryFor(const QModelIndex &viewIndex) const
+const archiveview::Entry *ArchiveViewWidget::entryFor(const QModelIndex &viewIndex) const
 {
     return m_model->entryAt(m_filterProxy->mapToSource(viewIndex));
 }
@@ -474,7 +483,7 @@ void ArchiveViewWidget::onCurrentChanged(const QModelIndex &current)
     updateDetailPanel(entryFor(current), pathFor(current));
 }
 
-void ArchiveViewWidget::updateDetailPanel(const ArchiveEntry *entry,
+void ArchiveViewWidget::updateDetailPanel(const archiveview::Entry *entry,
                                           const QString &path)
 {
     if (!m_detail)
@@ -494,27 +503,27 @@ void ArchiveViewWidget::updateDetailPanel(const ArchiveEntry *entry,
         // A synthesised directory, or nothing selected. Show the archive
         // instead of an empty panel.
         row(tr("Archive"), QFileInfo(m_path).fileName());
-        row(tr("Format"), m_summary.format);
-        row(tr("Filters"), m_summary.filters);
+        row(tr("Format"), QString::fromStdString(m_summary.format));
+        row(tr("Filters"), QString::fromStdString(m_summary.filters));
         row(tr("Members"), QString::number(m_model->entryCount()));
         if (!path.isEmpty())
             row(tr("Directory"), path);
-        if (!m_summary.comment.isEmpty())
-            row(tr("Comment"), m_summary.comment);
+        if (!m_summary.comment.empty())
+            row(tr("Comment"), QString::fromStdString(m_summary.comment));
         m_detail->setText(html);
         return;
     }
 
     row(tr("Path"), path);
     switch (entry->type) {
-    case ArchiveEntry::Directory: row(tr("Type"), tr("Directory")); break;
-    case ArchiveEntry::Symlink:   row(tr("Type"), tr("Symbolic link")); break;
-    case ArchiveEntry::Hardlink:  row(tr("Type"), tr("Hard link")); break;
-    case ArchiveEntry::Other:     row(tr("Type"), tr("Special file")); break;
-    case ArchiveEntry::File:      row(tr("Type"), tr("File")); break;
+    case archiveview::Entry::Type::Directory: row(tr("Type"), tr("Directory")); break;
+    case archiveview::Entry::Type::Symlink:   row(tr("Type"), tr("Symbolic link")); break;
+    case archiveview::Entry::Type::Hardlink:  row(tr("Type"), tr("Hard link")); break;
+    case archiveview::Entry::Type::Other:     row(tr("Type"), tr("Special file")); break;
+    case archiveview::Entry::Type::File:      row(tr("Type"), tr("File")); break;
     }
-    if (!entry->linkTarget.isEmpty())
-        row(tr("Target"), entry->linkTarget);
+    if (!entry->linkTarget.empty())
+        row(tr("Target"), QString::fromStdString(entry->linkTarget));
     if (entry->size >= 0)
         row(tr("Size"), locale.formattedDataSize(entry->size));
     if (entry->compressedSize >= 0)
@@ -523,10 +532,16 @@ void ArchiveViewWidget::updateDetailPanel(const ArchiveEntry *entry,
         row(tr("CRC-32"),
             QStringLiteral("%1").arg(entry->crc32, 8, 16, QLatin1Char('0')).toUpper());
     }
-    if (entry->modified.isValid())
-        row(tr("Modified"), locale.toString(entry->modified, QLocale::LongFormat));
-    if (!entry->owner.isEmpty() || !entry->group.isEmpty())
-        row(tr("Owner"), QStringLiteral("%1 / %2").arg(entry->owner, entry->group));
+    if (entry->hasModified) {
+        row(tr("Modified"),
+            locale.toString(QDateTime::fromSecsSinceEpoch(entry->modified),
+                            QLocale::LongFormat));
+    }
+    if (!entry->owner.empty() || !entry->group.empty()) {
+        row(tr("Owner"), QStringLiteral("%1 / %2")
+                             .arg(QString::fromStdString(entry->owner),
+                                  QString::fromStdString(entry->group)));
+    }
     if (entry->metadataEncrypted)
         row(tr("Encryption"), tr("Contents and metadata encrypted"));
     else if (entry->encrypted)
@@ -621,7 +636,7 @@ QString ArchiveViewWidget::listingAsHtml() const
     QString html = QStringLiteral("<h3>%1</h3><p>%2</p><table cellspacing='0' "
                                   "cellpadding='2' border='1'><tr>")
                        .arg(QFileInfo(m_path).fileName().toHtmlEscaped(),
-                            m_summary.format.toHtmlEscaped());
+                            QString::fromStdString(m_summary.format).toHtmlEscaped());
     for (int column = ArchiveModel::NameColumn; column < ArchiveModel::ColumnCount; ++column) {
         html += QStringLiteral("<th>%1</th>")
                     .arg(m_model->headerData(column, Qt::Horizontal, Qt::DisplayRole)
@@ -686,7 +701,7 @@ void ArchiveViewWidget::onCommentFound(const QString &comment)
     m_status->setToolTip(comment);
 }
 
-void ArchiveViewWidget::onEntriesReady(const ArchiveEntryBatch &batch)
+void ArchiveViewWidget::onEntriesReady(const archiveview::EntryBatch &batch)
 {
     m_model->appendEntries(batch);
     m_status->setRowCount(m_model->entryCount(), m_model->entryCount());
@@ -705,7 +720,7 @@ void ArchiveViewWidget::onProgress(qint64 bytesRead, qint64 totalBytes)
 }
 
 void ArchiveViewWidget::onScanFinished(bool ok, const QString &error,
-                                       const ArchiveSummary &summary)
+                                       const archiveview::Summary &summary)
 {
     m_summary = summary;
     m_status->removeExtraInfo(QStringLiteral("progress"));
@@ -716,9 +731,10 @@ void ArchiveViewWidget::onScanFinished(bool ok, const QString &error,
     }
 
     const QLocale locale;
-    QString info = summary.filters.isEmpty()
-        ? summary.format
-        : QStringLiteral("%1 (%2)").arg(summary.format, summary.filters);
+    const QString format = QString::fromStdString(summary.format);
+    const QString filters = QString::fromStdString(summary.filters);
+    QString info = filters.isEmpty() ? format
+                                     : QStringLiteral("%1 (%2)").arg(format, filters);
 
     // A ratio computed from bytes libarchive actually consumed, rather than
     // stat() of the file compared against a total that may have wrapped.

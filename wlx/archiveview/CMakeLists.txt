@@ -20,15 +20,37 @@ add_subdirectory(
     ${CMAKE_CURRENT_BINARY_DIR}/wlxbase_wlqt
 )
 
+# Toolkit-free core, shared by the Qt6 and (future) GTK3 variants. Nothing in
+# here may reference Qt or GTK: the ZIP parser and the extraction path checks
+# are security-relevant, and two copies would become two behaviours.
+set(ARCHIVEVIEW_CORE_SOURCES
+    src/core/ArchiveNames.cpp
+    src/core/ZipCentralDirectory.cpp
+    src/core/PassphraseBroker.cpp
+    src/core/ArchiveScanner.cpp
+    src/core/ArchiveExtractor.cpp
+    src/core/ArchiveSettings.cpp
+    include/core/ArchiveEntry.h
+    include/core/ArchiveNames.h
+    include/core/ZipCentralDirectory.h
+    include/core/PassphraseBroker.h
+    include/core/ArchiveScanner.h
+    include/core/ArchiveExtractor.h
+    include/core/ArchiveSettings.h
+)
+
+add_library(archiveview_core STATIC ${ARCHIVEVIEW_CORE_SOURCES})
+target_include_directories(archiveview_core PUBLIC include)
+target_compile_options(archiveview_core PRIVATE -Wall -Wextra)
+target_compile_definitions(archiveview_core PUBLIC _FILE_OFFSET_BITS=64)
+target_link_libraries(archiveview_core PUBLIC PkgConfig::LIBARCHIVE)
+find_package(Threads REQUIRED)
+target_link_libraries(archiveview_core PUBLIC Threads::Threads)
+
 set(ARCHIVEVIEW_HEADERS
-    include/ArchiveEntry.h
     include/ArchiveModel.h
     include/ArchiveScanner.h
     include/ArchiveViewWidget.h
-    include/ArchiveNames.h
-    include/ZipCentralDirectory.h
-    include/ArchiveSettings.h
-    include/PassphraseBroker.h
     include/ArchiveExtractor.h
     include/ArchiveTreeView.h
 )
@@ -39,9 +61,6 @@ add_library(archiveview_qt6 SHARED
     src/ArchiveModel.cpp
     src/ArchiveScanner.cpp
     src/ArchiveViewWidget.cpp
-    src/ZipCentralDirectory.cpp
-    src/ArchiveSettings.cpp
-    src/PassphraseBroker.cpp
     src/ArchiveExtractor.cpp
     src/ArchiveTreeView.cpp
 )
@@ -78,6 +97,7 @@ target_link_options(archiveview_qt6 PRIVATE
 )
 
 target_link_libraries(archiveview_qt6 PRIVATE
+    archiveview_core
     wlxbase_wlqt
     Qt6::Widgets
     Qt6::Gui
@@ -96,15 +116,9 @@ if(ENABLE_TESTS)
         tests/scan_smoke.cpp
         src/ArchiveModel.cpp
         src/ArchiveScanner.cpp
-        src/ZipCentralDirectory.cpp
-        src/ArchiveSettings.cpp
-        src/PassphraseBroker.cpp
-        src/ArchiveExtractor.cpp
-        include/ArchiveExtractor.h
         # Only the headers this target actually links — listing
         # ArchiveViewWidget.h here would have AUTOMOC generate code for a
         # class whose implementation is not part of this executable.
-        include/ArchiveEntry.h
         include/ArchiveModel.h
         include/ArchiveScanner.h
     )
@@ -112,22 +126,19 @@ if(ENABLE_TESTS)
     target_compile_options(scan_smoke PRIVATE -Wall -Wextra)
     target_compile_definitions(scan_smoke PRIVATE _FILE_OFFSET_BITS=64)
     target_link_libraries(scan_smoke PRIVATE
+        archiveview_core
         Qt6::Widgets
         Qt6::Gui
         Qt6::Core
         PkgConfig::LIBARCHIVE
     )
 
-    add_executable(extract_smoke
-        tests/extract_smoke.cpp
-        src/ArchiveExtractor.cpp
-        src/PassphraseBroker.cpp
-        include/ArchiveExtractor.h
-    )
+    add_executable(extract_smoke tests/extract_smoke.cpp)
     target_include_directories(extract_smoke PRIVATE include)
     target_compile_options(extract_smoke PRIVATE -Wall -Wextra)
     target_compile_definitions(extract_smoke PRIVATE _FILE_OFFSET_BITS=64)
     target_link_libraries(extract_smoke PRIVATE
+        archiveview_core
         Qt6::Core
         PkgConfig::LIBARCHIVE
     )

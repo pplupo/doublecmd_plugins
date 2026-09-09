@@ -16,7 +16,7 @@
 #include <QDir>
 #include <QTextStream>
 
-#include "ArchiveExtractor.h"
+#include "core/ArchiveExtractor.h"
 
 int main(int argc, char **argv)
 {
@@ -42,22 +42,24 @@ int main(int argc, char **argv)
     const QString archive = positional.at(0);
     const QString destination = positional.at(1);
 
-    ArchiveExtractor extractor;
+    archiveview::Extractor extractor;
     if (parser.isSet(passphrase))
-        extractor.setPassphrase(parser.value(passphrase));
+        extractor.setPassphrase(parser.value(passphrase).toStdString());
 
     // No prompt in a headless harness: an unanswered request must degrade to
     // "declined" rather than hang.
-    QObject::connect(&extractor, &ArchiveExtractor::passphraseRequested, &app,
-                     [&](int attempt) {
+    archiveview::Extractor::Callbacks callbacks;
+    // No prompt in a headless harness: an unanswered request must degrade to
+    // "declined" rather than hang.
+    callbacks.passphraseNeeded = [&](int attempt) {
         out << "passphrase asked: attempt " << attempt << '\n';
         out.flush();
-        extractor.providePassphrase(parser.value(passphrase),
+        extractor.providePassphrase(parser.value(passphrase).toStdString(),
                                     parser.isSet(passphrase));
-    });
-
-    QObject::connect(&extractor, &ArchiveExtractor::extractFinished, &app,
-                     [&](bool ok, const QString &error, int extracted, int refused) {
+    };
+    callbacks.finished = [&](bool ok, const std::string &errorText,
+                             int extracted, int refused) {
+        const QString error = QString::fromStdString(errorText);
         out << "extracted       : " << extracted << '\n';
         out << "refused         : " << refused << '\n';
         if (!ok && !error.isEmpty())
@@ -65,7 +67,10 @@ int main(int argc, char **argv)
 
         const QString canonical = QDir(destination).canonicalPath();
         int escaped = 0;
-        const QStringList written = extractor.writtenPaths();
+        QStringList written;
+        for (const std::string &path : extractor.writtenPaths())
+            written << QString::fromStdString(path);
+
         for (const QString &path : written) {
             const QString clean = QDir::cleanPath(path);
             if (clean != canonical && !clean.startsWith(canonical + QLatin1Char('/'))) {
@@ -80,8 +85,13 @@ int main(int argc, char **argv)
         out << (escaped == 0 ? "CONTAINED OK\n" : "CONTAINMENT FAILED\n");
         out.flush();
         app.exit(escaped == 0 ? 0 : 1);
-    });
+    };
+    extractor.setCallbacks(std::move(callbacks));
 
-    extractor.extract(archive, parser.values(member), destination);
+    std::vector<std::string> members;
+    for (const QString &value : parser.values(member))
+        members.push_back(value.toStdString());
+
+    extractor.extract(archive.toStdString(), members, destination.toStdString());
     return app.exec();
 }
