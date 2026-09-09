@@ -214,8 +214,9 @@ if [ -x "$HOST" ] && [ -e "$WLX" ]; then
         "$FIXTURES/structure.tar" "$FIXTURES/corrupt.zip" 2>&1)"
     host_status=$?
     if [ $host_status -eq 0 ] && grep -q "WLX HOST OK" <<<"$host_output" \
-       && grep -q "ListLoad declined" <<<"$host_output"; then
-        printf '  \033[32mPASS\033[0m %-28s load/search/commands/reload/teardown\n' "wlx_host"
+       && grep -q "ListLoad declined" <<<"$host_output" \
+       && ! grep -q "DOES NOT FILL THE PANE" <<<"$host_output"; then
+        printf '  \033[32mPASS\033[0m %-28s load/search/commands/reload/fill/teardown\n' "wlx_host"
         PASS=$((PASS + 1))
     else
         printf '  \033[31mFAIL\033[0m %-28s exit=%s\n%s\n' "wlx_host" "$host_status" "$host_output"

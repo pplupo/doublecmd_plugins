@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QDBusConnection>
+#include <QEvent>
 #include <QDBusMessage>
 #include <QDBusUnixFileDescriptor>
 #include <QFile>
@@ -42,6 +43,12 @@
 #include "wlxplugin.h"      // lcp_* presentation flags
 
 #include "ArchiveExtractor.h"
+
+namespace {
+/// Below this the name column stops being readable, so the view scrolls
+/// horizontally instead of shrinking it further.
+constexpr int kMinimumNameWidth = 200;
+}
 
 /// Supplied by wlx_entry.cpp (the plugin) or the harness that links this.
 const QString &archiveviewIniPath();
@@ -129,6 +136,8 @@ void ArchiveViewWidget::setupUi()
     layout->addWidget(m_filterBox, 0);
     layout->addWidget(m_view, 1);
     layout->addWidget(m_status, 0);
+
+    m_view->viewport()->installEventFilter(this);
 
     // Double-click opens a leaf with its default application; directories
     // keep the view's own expand/collapse behaviour.
@@ -580,6 +589,55 @@ void ArchiveViewWidget::applyShowFlags(int showFlags)
         for (int column = 0; column < ArchiveModel::ColumnCount; ++column)
             m_view->resizeColumnToContents(column);
     }
+
+    // Sizing every column to its contents leaves the rest of the pane empty,
+    // which for a lister docked in a wide panel is most of the pane.
+    fitColumnsToViewport();
+}
+
+void ArchiveViewWidget::fitColumnsToViewport()
+{
+    if (!m_view || !m_view->viewport())
+        return;
+
+    const int available = m_view->viewport()->width();
+    if (available <= 0)
+        return;   // not laid out yet; resizeEvent will come back round
+
+    int used = 0;
+    for (int column = 0; column < ArchiveModel::ColumnCount; ++column) {
+        if (column == ArchiveModel::NameColumn || m_view->isColumnHidden(column))
+            continue;
+        used += m_view->columnWidth(column);
+    }
+
+    // The name is the column worth widening: it is the one that gets
+    // ellipsized, and the only one whose useful length varies per archive.
+    // A floor keeps it usable when the metadata columns alone overflow the
+    // pane, in which case the view scrolls horizontally as before.
+    const int name = std::max(kMinimumNameWidth, available - used);
+    if (m_view->columnWidth(ArchiveModel::NameColumn) != name)
+        m_view->setColumnWidth(ArchiveModel::NameColumn, name);
+}
+
+void ArchiveViewWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    // Follow the pane: DC's panel is resizable and starts at whatever width
+    // the user left it.
+    fitColumnsToViewport();
+}
+
+bool ArchiveViewWidget::eventFilter(QObject *watched, QEvent *event)
+{
+    // The viewport narrows on its own when the vertical scrollbar appears —
+    // which happens partway through a large scan, after the widget itself has
+    // stopped resizing. Without this the columns overshoot by the scrollbar's
+    // width and the view scrolls horizontally for no reason.
+    if (watched == m_view->viewport() && event->type() == QEvent::Resize)
+        fitColumnsToViewport();
+
+    return QWidget::eventFilter(watched, event);
 }
 
 void ArchiveViewWidget::scrollToPercent(int percent)
@@ -724,7 +782,10 @@ void ArchiveViewWidget::onCommentFound(const QString &comment)
 
 void ArchiveViewWidget::onEntriesReady(const archiveview::EntryBatch &batch)
 {
+    const bool first = m_model->entryCount() == 0;
     m_model->appendEntries(batch);
+    if (first)
+        fitColumnsToViewport();
     m_status->setRowCount(m_model->entryCount(), m_model->entryCount());
 }
 

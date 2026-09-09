@@ -597,6 +597,10 @@ void buildUi(const ViewPtr &view)
     }
 
     addTextColumn(treeView, "Name",        ARCHIVE_COL_NAME, 320);
+    // The name column takes the width the others leave over, so the listing
+    // fills the pane rather than stopping partway across it.
+    gtk_tree_view_column_set_expand(gtk_tree_view_get_column(treeView,
+                                                             ARCHIVE_COL_NAME), TRUE);
     addTextColumn(treeView, "Size",        ARCHIVE_COL_SIZE, 110);
     addTextColumn(treeView, "Packed",      ARCHIVE_COL_PACKED, 110);
     addTextColumn(treeView, "Ratio",       ARCHIVE_COL_RATIO, 80);

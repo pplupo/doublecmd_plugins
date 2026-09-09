@@ -14,6 +14,8 @@
 ///   wlx_host <plugin.wlx> <archive> [more archives...]
 
 #include <QApplication>
+#include <QHeaderView>
+#include <QTreeView>
 #include <QElapsedTimer>
 #include <QTextStream>
 #include <QTimer>
@@ -112,7 +114,10 @@ int main(int argc, char **argv)
 
     // DC hands the plugin a container widget it owns.
     auto *container = new QWidget;
-    container->resize(900, 600);
+    // Deliberately wide: the reported problem was a listing that stopped
+    // partway across a wide panel.
+    container->resize(std::getenv("WLX_HOST_WIDTH")
+                          ? atoi(std::getenv("WLX_HOST_WIDTH")) : 1370, 600);
     container->show();
 
     for (int i = 2; i < argc; ++i) {
@@ -125,7 +130,33 @@ int main(int argc, char **argv)
             out << "  ListLoad declined (expected for non-archives)\n\n";
             continue;
         }
+        // DC reparents the plugin widget into its pane and sizes it to fit.
+        // The bare container here has no layout, so do that explicitly or the
+        // widget keeps its default size and every width check is meaningless.
+        if (auto *root = reinterpret_cast<QWidget *>(window))
+            root->setGeometry(container->rect());
         pump(400);
+
+        // --- does the listing fill the pane? ------------------------------
+        // The plugin's widget is a QWidget subclass living in the .so, but
+        // findChild works across that boundary: it is meta-object based.
+        if (auto *root = reinterpret_cast<QWidget *>(window)) {
+            if (auto *view = root->findChild<QTreeView *>()) {
+                const int viewport = view->viewport()->width();
+                int used = 0;
+                for (int column = 0; column < view->model()->columnCount(); ++column) {
+                    if (!view->isColumnHidden(column))
+                        used += view->columnWidth(column);
+                }
+                const int slack = viewport - used;
+                out << "  columns fill    : " << used << " of " << viewport
+                    << " px (" << (slack >= 0 ? "+" : "") << slack << ")\n";
+                // A few px of rounding is fine; hundreds of unused px is the
+                // bug this checks for.
+                if (viewport > 0 && (slack > 8 || slack < -8))
+                    out << "  DOES NOT FILL THE PANE\n";
+            }
+        }
 
         char needle[] = "file";
         const int found = api.searchText(window, needle, lcs_findfirst);
