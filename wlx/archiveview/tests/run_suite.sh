@@ -252,6 +252,34 @@ check tree.zip        "ini: single value, invalid ceiling ignored" "--ini $SCRAT
     "maxEntries=500000 codec=- hidden=Owner"
 
 echo
+echo "== selecting a directory means everything under it =="
+# Regression: the Qt widget used to find children by walking the view's rows,
+# but Qt returns selections in the name column and only column-0 indexes have
+# children -- so extracting a directory extracted just the directory.
+SELECT="$(dirname "$SMOKE")/select_smoke"
+select_case() {
+    local fixture="$1" root="$2" expected="$3" description="$4"
+    if [ ! -e "$FIXTURES/$fixture" ] || [ ! -x "$SELECT" ]; then
+        printf '  \033[33mSKIP\033[0m %-28s %s\n' "$fixture" "$description"
+        return
+    fi
+    local output
+    output="$(timeout 300 "$SELECT" "$FIXTURES/$fixture" "$root" "$expected" 2>&1)"
+    if grep -q "SELECTION OK" <<<"$output"; then
+        printf '  \033[32mPASS\033[0m %-28s %s\n' "$fixture" "$description"
+        PASS=$((PASS + 1))
+    else
+        printf '  \033[31mFAIL\033[0m %-28s %s\n%s\n' "$fixture" "$description" "$output"
+        FAIL=$((FAIL + 1))
+    fi
+}
+select_case structure.tar wide     5000 "5000 files under one directory"
+# 1001, not 1000: zip -r stores an explicit dir7/ entry alongside its files.
+select_case many.zip      dir7     1001 "1000 files plus the stored dir entry"
+select_case structure.tar level000    1 "300 levels deep, one real member"
+select_case structure.tar dup         1 "duplicate paths collapse to one target"
+
+echo
 echo "== extraction: containment is the whole point =="
 # The listing shows hostile member names verbatim on purpose. Extraction is
 # where that becomes dangerous, so the property under test is the opposite
