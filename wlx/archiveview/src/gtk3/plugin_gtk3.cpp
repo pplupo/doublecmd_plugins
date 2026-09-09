@@ -360,24 +360,61 @@ void onExtractSelection(const ViewPtr &view)
         extractMembers(view, members, destination);
 }
 
-void onOpenSelection(const ViewPtr &view)
+/// Materialise the first selected member into the scratch directory.
+/// Empty if nothing is selected or extraction failed.
+std::string materialiseFirstSelected(const ViewPtr &view)
 {
     const std::vector<std::string> members = selectedMembers(view);
     if (members.empty() || scratchDir(view).empty())
-        return;
+        return {};
 
     // Only the first: opening thirty files in thirty applications is never
     // what someone means by "open".
     const std::vector<std::string> written =
         extractMembers(view, {members.front()}, view->scratch);
-    if (written.empty())
+    return written.empty() ? std::string() : written.front();
+}
+
+void onOpenSelection(const ViewPtr &view)
+{
+    const std::string file = materialiseFirstSelected(view);
+    if (file.empty())
         return;
 
-    gchar *uri = g_filename_to_uri(written.front().c_str(), nullptr, nullptr);
+    gchar *uri = g_filename_to_uri(file.c_str(), nullptr, nullptr);
     if (uri) {
         g_app_info_launch_default_for_uri(uri, nullptr, nullptr);
         g_free(uri);
     }
+}
+
+void onOpenWithSelection(const ViewPtr &view)
+{
+    const std::string file = materialiseFirstSelected(view);
+    if (file.empty())
+        return;
+
+    GFile *gfile = g_file_new_for_path(file.c_str());
+
+    // GTK's own chooser, so the list matches what the rest of the desktop
+    // offers, including "Other Application…". Nothing is exec'd by this
+    // plugin: GAppInfo launches with a proper argv, never through a shell.
+    GtkWidget *chooser = gtk_app_chooser_dialog_new(
+        GTK_WINDOW(gtk_widget_get_toplevel(view->view)),
+        GTK_DIALOG_MODAL, gfile);
+
+    if (gtk_dialog_run(GTK_DIALOG(chooser)) == GTK_RESPONSE_OK) {
+        GAppInfo *app = gtk_app_chooser_get_app_info(GTK_APP_CHOOSER(chooser));
+        if (app) {
+            GList *files = g_list_append(nullptr, gfile);
+            g_app_info_launch(app, files, nullptr, nullptr);
+            g_list_free(files);
+            g_object_unref(app);
+        }
+    }
+
+    gtk_widget_destroy(chooser);
+    g_object_unref(gfile);
 }
 
 void applyFilter(const ViewPtr &view)
@@ -443,9 +480,13 @@ void showContextMenu(const ViewPtr &view, GdkEvent *event)
 
     GtkWidget *menu = gtk_menu_new();
 
-    GtkWidget *open = gtk_menu_item_new_with_label("Open with default application");
+    GtkWidget *open = gtk_menu_item_new_with_label("Open");
     gtk_widget_set_sensitive(open, hasSelection);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), open);
+
+    GtkWidget *openWith = gtk_menu_item_new_with_label("Open with…");
+    gtk_widget_set_sensitive(openWith, hasSelection);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), openWith);
 
     GtkWidget *extract = gtk_menu_item_new_with_label("Extract selection to…");
     gtk_widget_set_sensitive(extract, hasSelection);
@@ -469,6 +510,12 @@ void showContextMenu(const ViewPtr &view, GdkEvent *event)
             G_OBJECT(gtk_widget_get_parent(GTK_WIDGET(item))), "archiveview"));
         if (ViewPtr v = weak ? weak->lock() : nullptr)
             onOpenSelection(v);
+    }), nullptr);
+    g_signal_connect(openWith, "activate", G_CALLBACK(+[](GtkMenuItem *item, gpointer) {
+        auto *weak = static_cast<ViewWeak *>(g_object_get_data(
+            G_OBJECT(gtk_widget_get_parent(GTK_WIDGET(item))), "archiveview"));
+        if (ViewPtr v = weak ? weak->lock() : nullptr)
+            onOpenWithSelection(v);
     }), nullptr);
     g_signal_connect(extract, "activate", G_CALLBACK(+[](GtkMenuItem *item, gpointer) {
         auto *weak = static_cast<ViewWeak *>(g_object_get_data(
@@ -605,6 +652,46 @@ void buildUi(const ViewPtr &view)
         gtk_selection_data_set_uris(data, uris.data());
         for (gchar *uri : uris)
             g_free(uri);
+    }), nullptr);
+
+    // row-activated covers both double-click and Enter. Directories keep the
+    // view's own expand/collapse behaviour; only leaves open.
+    g_signal_connect(view->view, "row-activated",
+                     G_CALLBACK(+[](GtkTreeView *treeView, GtkTreePath *path,
+                                    GtkTreeViewColumn *, gpointer) {
+        ViewPtr v;
+        for (const ViewPtr &candidate : g_instances) {
+            if (candidate->view == GTK_WIDGET(treeView)) {
+                v = candidate;
+                break;
+            }
+        }
+        if (!v)
+            return;
+
+        GtkTreeModel *model = gtk_tree_view_get_model(treeView);
+        GtkTreeIter iter;
+        if (!gtk_tree_model_get_iter(model, &iter, path))
+            return;
+
+        GtkTreeIter childIter = iter;
+        if (GTK_IS_TREE_MODEL_FILTER(model)) {
+            gtk_tree_model_filter_convert_iter_to_child_iter(
+                GTK_TREE_MODEL_FILTER(model), &childIter, &iter);
+        }
+
+        const auto *node = archive_tree_model_node(&childIter);
+        // A directory can also carry an entry record, so test the type rather
+        // than whether an entry exists.
+        if (!node || !node->hasEntry || node->entry.isDir()) {
+            if (gtk_tree_view_row_expanded(treeView, path))
+                gtk_tree_view_collapse_row(treeView, path);
+            else
+                gtk_tree_view_expand_row(treeView, path, FALSE);
+            return;
+        }
+
+        onOpenSelection(v);
     }), nullptr);
 
     g_signal_connect(view->view, "button-press-event",

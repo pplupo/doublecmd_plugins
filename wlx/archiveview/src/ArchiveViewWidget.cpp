@@ -1,7 +1,14 @@
 #include "ArchiveViewWidget.h"
 
 #include <QDateTime>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusUnixFileDescriptor>
+#include <QFile>
 #include <QFileInfo>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <QHeaderView>
@@ -123,6 +130,11 @@ void ArchiveViewWidget::setupUi()
     layout->addWidget(m_view, 1);
     layout->addWidget(m_status, 0);
 
+    // Double-click opens a leaf with its default application; directories
+    // keep the view's own expand/collapse behaviour.
+    connect(m_view, &QAbstractItemView::doubleClicked,
+            this, &ArchiveViewWidget::onRowDoubleClicked);
+
     m_focus = new QtWlPlugin::FocusManager(this, m_view, this);
     m_focus->addInputWidget(m_filterBox);
     m_focus->registerShortcut(QKeySequence(QStringLiteral("Ctrl+F")),
@@ -193,13 +205,20 @@ void ArchiveViewWidget::setupContextMenu()
             [this](const QPoint &point) {
         QMenu menu(this);
 
-        QAction *preview = menu.addAction(tr("Open with default application"));
-        preview->setEnabled(!selectedMembers().isEmpty());
-        connect(preview, &QAction::triggered, this,
-                &ArchiveViewWidget::onPreviewSelection);
+        const bool hasSelection = !selectedMembers().isEmpty();
+
+        QAction *open = menu.addAction(tr("Open"));
+        open->setEnabled(hasSelection);
+        connect(open, &QAction::triggered, this,
+                &ArchiveViewWidget::openWithDefaultApplication);
+
+        QAction *openWith = menu.addAction(tr("Open with…"));
+        openWith->setEnabled(hasSelection);
+        connect(openWith, &QAction::triggered, this,
+                &ArchiveViewWidget::onOpenWithSelection);
 
         QAction *extract = menu.addAction(tr("Extract selection to…"));
-        extract->setEnabled(!selectedMembers().isEmpty());
+        extract->setEnabled(hasSelection);
         connect(extract, &QAction::triggered, this,
                 &ArchiveViewWidget::onExtractSelection);
 
@@ -342,28 +361,102 @@ void ArchiveViewWidget::onExtractSelection()
     extractMembers(members, destination);
 }
 
-void ArchiveViewWidget::onPreviewSelection()
+QString ArchiveViewWidget::materialiseFirstSelected()
 {
     const QStringList members = selectedMembers();
     if (members.isEmpty())
-        return;
+        return {};
 
     if (!m_scratch)
         m_scratch = std::make_unique<QTemporaryDir>();
     if (!m_scratch->isValid()) {
-        QMessageBox::warning(this, tr("Cannot preview"),
+        QMessageBox::warning(this, tr("Cannot open"),
                              tr("No temporary directory available."));
-        return;
+        return {};
     }
 
     // Only the first selected member: opening thirty files in thirty
     // applications is never what someone means by "open".
     const QStringList written = extractMembers({ members.first() },
                                                m_scratch->path());
-    if (written.isEmpty())
+    return written.isEmpty() ? QString() : written.first();
+}
+
+bool ArchiveViewWidget::showPortalChooser(const QString &file)
+{
+    // org.freedesktop.portal.OpenURI.OpenFile with ask=true is the portable
+    // way to get the *desktop's own* "Open With" dialog: the portal frontend
+    // is a freedesktop standard and each desktop ships its own backend
+    // (xdg-desktop-portal-kde, -gtk, -gnome, -hyprland...). Qt has no app
+    // chooser of its own, and hand-rolling one means reimplementing .desktop
+    // parsing and launching — including Exec= field expansion — badly.
+    //
+    // The file is passed as a file descriptor rather than a path, which is
+    // what the interface takes, and it means the portal can reach a file in
+    // our scratch directory without needing the path to be meaningful to it.
+    const int fd = ::open(QFile::encodeName(file).constData(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    QDBusUnixFileDescriptor descriptor(fd);
+    ::close(fd);   // QDBusUnixFileDescriptor duplicates it
+
+    QDBusMessage request = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.portal.Desktop"),
+        QStringLiteral("/org/freedesktop/portal/desktop"),
+        QStringLiteral("org.freedesktop.portal.OpenURI"),
+        QStringLiteral("OpenFile"));
+
+    QVariantMap options;
+    options.insert(QStringLiteral("ask"), true);
+    // An empty parent window is allowed and means "no parent". Supplying a
+    // real one needs an X11 window id or a Wayland xdg-foreign handle, and DC
+    // owns the toplevel here, not us.
+    request << QString() << QVariant::fromValue(descriptor) << options;
+
+    // A bounded wait: a portal frontend with no backend installed can leave a
+    // request unanswered, and blocking a file manager on that is exactly the
+    // failure this plugin exists to avoid. The dialog itself is the portal's
+    // to run — we only need to know the call was accepted.
+    const QDBusMessage reply =
+        QDBusConnection::sessionBus().call(request, QDBus::Block, 2000);
+    return reply.type() != QDBusMessage::ErrorMessage;
+}
+
+void ArchiveViewWidget::onOpenWithSelection()
+{
+    const QString file = materialiseFirstSelected();
+    if (file.isEmpty())
         return;
 
-    QDesktopServices::openUrl(QUrl::fromLocalFile(written.first()));
+    if (showPortalChooser(file))
+        return;
+
+    // No portal answered. Say so rather than silently launching the default
+    // application, which is not what "Open with…" was asked to do.
+    QMessageBox::information(this, tr("No application chooser"),
+        tr("This desktop provides no application chooser "
+           "(xdg-desktop-portal did not respond), so \"Open with…\" is "
+           "unavailable. \"Open\" will still use the default application."));
+}
+
+void ArchiveViewWidget::openWithDefaultApplication()
+{
+    const QString file = materialiseFirstSelected();
+    if (!file.isEmpty())
+        QDesktopServices::openUrl(QUrl::fromLocalFile(file));
+}
+
+void ArchiveViewWidget::onRowDoubleClicked(const QModelIndex &index)
+{
+    const archiveview::Entry *entry = entryFor(index);
+
+    // A directory double-click belongs to the view: expand or collapse it.
+    // Only leaves open. A directory can also carry an entry record, so the
+    // test is on the type rather than on whether an entry exists.
+    if (!entry || entry->isDir())
+        return;
+
+    openWithDefaultApplication();
 }
 
 bool ArchiveViewWidget::loadFile(const QString &path)
