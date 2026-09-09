@@ -262,6 +262,39 @@ int main(int argc, char **argv)
             ++failures;
         }
 
+        // --- row activation dispatch --------------------------------------
+        // Activating a *directory* must expand it, not open anything. Only
+        // directories are activated here on purpose: activating a file would
+        // extract it and launch a real application on the user's desktop,
+        // which a test has no business doing.
+        if (GtkWidget *treeView = treeViewOf(reinterpret_cast<GtkWidget *>(plugin))) {
+            GtkTreeIter iter;
+            bool checked = false;
+            if (gtk_tree_model_iter_children(model, &iter, nullptr)) {
+                do {
+                    if (!gtk_tree_model_iter_has_child(model, &iter))
+                        continue;
+                    GtkTreePath *path = gtk_tree_model_get_path(model, &iter);
+                    if (!path)
+                        continue;
+                    gtk_tree_view_collapse_row(GTK_TREE_VIEW(treeView), path);
+                    gtk_tree_view_row_activated(GTK_TREE_VIEW(treeView), path, nullptr);
+                    pump(120);
+                    const bool expanded =
+                        gtk_tree_view_row_expanded(GTK_TREE_VIEW(treeView), path);
+                    std::printf("  activate dir    : %s\n",
+                                expanded ? "expanded" : "DID NOT EXPAND");
+                    if (!expanded)
+                        ++failures;
+                    gtk_tree_path_free(path);
+                    checked = true;
+                    break;
+                } while (gtk_tree_model_iter_next(model, &iter));
+            }
+            if (!checked)
+                std::printf("  activate dir    : (no directory row in this archive)\n");
+        }
+
         // --- drag source advertised? --------------------------------------
         if (GtkWidget *treeView = treeViewOf(reinterpret_cast<GtkWidget *>(plugin))) {
             // A GtkTreeView only becomes a drag source once the target list is

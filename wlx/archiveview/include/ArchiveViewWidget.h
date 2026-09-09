@@ -76,7 +76,11 @@ private slots:
     void onCommentFound(const QString &comment);
     void onPassphraseRequested(int attempt);
     void onExtractSelection();
-    void onPreviewSelection();
+    /// Double-click, and the context menu's plain "Open".
+    void openWithDefaultApplication();
+    /// Context menu's "Open with…" — the desktop's own chooser.
+    void onOpenWithSelection();
+    void onRowDoubleClicked(const QModelIndex &index);
     void onEntriesReady(const archiveview::EntryBatch &batch);
     void onProgress(qint64 bytesRead, qint64 totalBytes);
     void onScanFinished(bool ok, const QString &error,
@@ -94,6 +98,12 @@ private:
     /// progress dialog. Returns the paths written.
     QStringList extractMembers(const QStringList &members,
                                const QString &destination);
+    /// Materialise the first selected member into the scratch directory.
+    /// Empty if nothing is selected or extraction failed.
+    QString materialiseFirstSelected();
+    /// Ask xdg-desktop-portal to show the desktop's own "Open With" chooser.
+    /// False when no portal answered, which is the caller's cue to fall back.
+    bool showPortalChooser(const QString &file);
 
     QtWlPlugin::FindReplacePanel *m_find = nullptr;
 

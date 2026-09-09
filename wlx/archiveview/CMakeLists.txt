@@ -10,7 +10,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets PrintSupport)
+# DBus is for the XDG desktop portal, which is how the Qt variant gets the
+# desktop's own "Open With" chooser without reimplementing .desktop handling.
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets PrintSupport DBus)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBARCHIVE REQUIRED IMPORTED_TARGET libarchive)
 
@@ -107,6 +109,7 @@ target_link_libraries(archiveview_qt6 PRIVATE
     Qt6::Gui
     Qt6::Core
     Qt6::PrintSupport
+    Qt6::DBus
     PkgConfig::LIBARCHIVE
 )
 

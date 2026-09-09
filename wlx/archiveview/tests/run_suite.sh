@@ -377,8 +377,9 @@ if [ -x "$GTKHOST" ] && [ -e "$GTKWLX" ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:
        && ! grep -q "MISMATCH" <<<"$gtk_output" \
        && grep -q "filter 'deep'   : 101 of 110 rows" <<<"$gtk_output" \
        && grep -q "drag source     : text/uri-list advertised" <<<"$gtk_output" \
+       && grep -q "activate dir    : expanded" <<<"$gtk_output" \
        && grep -q "ListLoad declined" <<<"$gtk_output"; then
-        printf '  \033[32mPASS\033[0m %-28s model, filter, drag source, 100k rows, reload\n' "gtk_host"
+        printf '  \033[32mPASS\033[0m %-28s model, filter, activation, drag, 100k rows\n' "gtk_host"
         PASS=$((PASS + 1))
     else
         printf '  \033[31mFAIL\033[0m %-28s exit=%s\n%s\n' "gtk_host" "$gtk_status" "$gtk_output"
