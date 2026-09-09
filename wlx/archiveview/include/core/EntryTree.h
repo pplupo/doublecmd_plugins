@@ -54,10 +54,28 @@ public:
     public:
         virtual ~Listener() = default;
         /// `parent` is nullptr for the root. Rows [first, first+count) are
-        /// about to appear under it.
+        /// about to appear under it. Grouped mode only.
         virtual void beforeInsert(const Node *parent, int first, int count) = 0;
         virtual void afterInsert(const Node *parent, int first, int count) = 0;
+        /// Called immediately after a single node becomes reachable.
+        /// Immediate mode only.
+        virtual void nodeAttached(const Node *node) { (void)node; }
     };
+
+    /// How insertions are announced.
+    ///
+    /// Grouped is what Qt wants: build the batch's new nodes detached, then
+    /// attach each sibling run inside one beginInsertRows/endInsertRows pair,
+    /// so a 512-entry batch costs a handful of notifications.
+    ///
+    /// Immediate is what GTK requires. A GtkTreeModel must not expose a row
+    /// before it has announced it — GtkTreeModelFilter builds its level cache
+    /// from row-inserted signals and independently enumerates what the model
+    /// already contains, so any row that exists before its signal is counted
+    /// twice. Measured on a fixture with 100 nested directories: 110 real
+    /// rows reported as 217. Immediate mode attaches and announces one node
+    /// at a time, parent before child, so the two views never disagree.
+    enum class Mode { Grouped, Immediate };
 
     EntryTree();
 
@@ -69,7 +87,8 @@ public:
     /// notifications rather than 512. Nodes created underneath a node that is
     /// itself new ride along inside their ancestor's insertion and are never
     /// announced separately.
-    void addEntries(const EntryBatch &batch, Listener *listener = nullptr);
+    void addEntries(const EntryBatch &batch, Listener *listener = nullptr,
+                    Mode mode = Mode::Grouped);
 
     void clear();
 
@@ -88,10 +107,15 @@ private:
 
     Node *makeNode(const std::string &name, const std::string &fullPath,
                    Node *parent, bool registerPath);
-    Node *ensureNode(const std::string &path, bool isDir, Pending *pending);
-    Node *addDuplicate(Node *original, Pending *pending);
-    void hold(Node *node, Node *parent, Pending *pending);
-    void flush(Pending *pending, Listener *listener);
+    struct Sink {
+        Pending *pending = nullptr;    ///< null in immediate mode
+        Listener *listener = nullptr;
+    };
+
+    Node *ensureNode(const std::string &path, bool isDir, Sink *sink);
+    Node *addDuplicate(Node *original, Sink *sink);
+    void hold(Node *node, Node *parent, Sink *sink);
+    void flush(Sink *sink);
 
     std::vector<std::unique_ptr<Node>> m_storage;
     Node m_root;

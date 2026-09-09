@@ -249,8 +249,13 @@ gboolean iterParent(GtkTreeModel *treeModel, GtkTreeIter *iter, GtkTreeIter *chi
     return TRUE;
 }
 
-void treeModelInit(GtkTreeModelIface *iface)
+// These take GObject's own signatures rather than the tidier typed ones, so
+// no function-pointer casts are needed. Casting between incompatible function
+// types is undefined behaviour that happens to work, and -Wcast-function-type
+// is right to complain about it.
+void treeModelInit(void *ifacePtr, void *)
 {
+    auto *iface = static_cast<GtkTreeModelIface *>(ifacePtr);
     iface->get_flags = getFlags;
     iface->get_n_columns = getNColumns;
     iface->get_column_type = getColumnType;
@@ -265,14 +270,15 @@ void treeModelInit(GtkTreeModelIface *iface)
     iface->iter_parent = iterParent;
 }
 
-void instanceInit(ArchiveTreeModel *model)
+void instanceInit(GTypeInstance *instance, void *)
 {
+    auto *model = reinterpret_cast<ArchiveTreeModel *>(instance);
     model->tree = nullptr;
     model->flat = false;
     model->stamp = g_random_int();
 }
 
-void classInit(ArchiveTreeModelClass *)
+void classInit(void *, void *)
 {
 }
 
@@ -284,12 +290,12 @@ GType archive_tree_model_get_type()
     if (type == 0) {
         static const GTypeInfo info = {
             sizeof(ArchiveTreeModelClass), nullptr, nullptr,
-            reinterpret_cast<GClassInitFunc>(classInit), nullptr, nullptr,
+            classInit, nullptr, nullptr,
             sizeof(ArchiveTreeModel), 0,
-            reinterpret_cast<GInstanceInitFunc>(instanceInit), nullptr
+            instanceInit, nullptr
         };
         static const GInterfaceInfo treeModelInfo = {
-            reinterpret_cast<GInterfaceInitFunc>(treeModelInit), nullptr, nullptr
+            treeModelInit, nullptr, nullptr
         };
         type = g_type_register_static(G_TYPE_OBJECT, "ArchiveTreeModel", &info,
                                       GTypeFlags(0));
@@ -305,44 +311,59 @@ ArchiveTreeModel *archive_tree_model_new(archiveview::EntryTree *tree)
     return model;
 }
 
-void archive_tree_model_rows_inserted(ArchiveTreeModel *model,
-                                      const archiveview::EntryTree::Node *parent,
-                                      int first, int count)
+void archive_tree_model_row_inserted(ArchiveTreeModel *model,
+                                     const archiveview::EntryTree::Node *node)
 {
-    if (!model || !model->tree)
+    if (!model || !model->tree || !node || model->flat)
         return;
 
-    for (int offset = 0; offset < count; ++offset) {
-        const auto *children = childrenOf(model, parent);
-        const int row = first + offset;
-        if (row < 0 || row >= static_cast<int>(children->size()))
-            break;
+    GtkTreeIter iter;
+    iter.stamp = model->stamp;
+    iter.user_data = const_cast<archiveview::EntryTree::Node *>(node);
+    iter.user_data2 = nullptr;
+    iter.user_data3 = nullptr;
 
-        GtkTreeIter iter;
-        iter.stamp = model->stamp;
-        iter.user_data = (*children)[static_cast<size_t>(row)];
-        iter.user_data2 = nullptr;
-        iter.user_data3 = nullptr;
+    GtkTreePath *path = getPath(GTK_TREE_MODEL(model), &iter);
+    if (!path)
+        return;
+    gtk_tree_model_row_inserted(GTK_TREE_MODEL(model), path, &iter);
+    gtk_tree_path_free(path);
 
-        GtkTreePath *path = getPath(GTK_TREE_MODEL(model), &iter);
-        gtk_tree_model_row_inserted(GTK_TREE_MODEL(model), path, &iter);
-
-        // A directory that just gained its first child has to be re-announced
-        // as expandable, or GtkTreeView will never draw an expander for it.
-        if (parent && parent->children.size() == 1) {
-            GtkTreeIter parentIter;
-            parentIter.stamp = model->stamp;
-            parentIter.user_data = const_cast<archiveview::EntryTree::Node *>(parent);
-            parentIter.user_data2 = nullptr;
-            parentIter.user_data3 = nullptr;
-            GtkTreePath *parentPath = getPath(GTK_TREE_MODEL(model), &parentIter);
+    // A directory that just gained its first child has to be re-announced as
+    // expandable, or GtkTreeView will never draw an expander for it.
+    const archiveview::EntryTree::Node *parent = node->parent;
+    if (parent && parent != model->tree->root() && parent->children.size() == 1) {
+        GtkTreeIter parentIter;
+        parentIter.stamp = model->stamp;
+        parentIter.user_data = const_cast<archiveview::EntryTree::Node *>(parent);
+        parentIter.user_data2 = nullptr;
+        parentIter.user_data3 = nullptr;
+        GtkTreePath *parentPath = getPath(GTK_TREE_MODEL(model), &parentIter);
+        if (parentPath) {
             gtk_tree_model_row_has_child_toggled(GTK_TREE_MODEL(model),
                                                  parentPath, &parentIter);
             gtk_tree_path_free(parentPath);
         }
-
-        gtk_tree_path_free(path);
     }
+}
+
+void archive_tree_model_row_inserted_flat(ArchiveTreeModel *model, int index)
+{
+    if (!model || !model->tree || !model->flat)
+        return;
+    const auto &flat = model->tree->flat();
+    if (index < 0 || index >= static_cast<int>(flat.size()))
+        return;
+
+    GtkTreeIter iter;
+    iter.stamp = model->stamp;
+    iter.user_data = flat[static_cast<size_t>(index)];
+    iter.user_data2 = nullptr;
+    iter.user_data3 = nullptr;
+
+    GtkTreePath *path = gtk_tree_path_new_from_indices(index, -1);
+    gtk_tree_model_row_inserted(GTK_TREE_MODEL(model), path, &iter);
+    gtk_tree_path_free(path);
 }
 
 void archive_tree_model_set_flat(ArchiveTreeModel *model, bool flat)
