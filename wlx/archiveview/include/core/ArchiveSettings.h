@@ -21,7 +21,6 @@ struct Settings {
     static constexpr const char *kSection = "archiveview";
 
     bool startFlat = false;         ///< open in flat mode instead of a tree
-    bool showDetailPanel = true;    ///< the per-entry panel on the right
     bool showFilterBox = true;
     int64_t maxEntries = 500000;    ///< ceiling before the listing is truncated
 

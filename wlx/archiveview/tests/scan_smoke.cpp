@@ -89,7 +89,6 @@ int main(int argc, char **argv)
     archiveview::names::setFallbackCodec(settings.nameCodec);
     if (parser.isSet(iniFile)) {
         out << "settings        : flat=" << (settings.startFlat ? "yes" : "no")
-            << " detail=" << (settings.showDetailPanel ? "yes" : "no")
             << " filter=" << (settings.showFilterBox ? "yes" : "no")
             << " maxEntries=" << settings.maxEntries
             << " codec=" << (settings.nameCodec.empty()

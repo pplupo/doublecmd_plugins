@@ -6,10 +6,8 @@
 #include <algorithm>
 #include <QHeaderView>
 #include <QAbstractTextDocumentLayout>
-#include <QLabel>
 #include <QLineEdit>
 #include <QSortFilterProxyModel>
-#include <QSplitter>
 #include <QInputDialog>
 #include <QPainter>
 #include <QPrinter>
@@ -23,6 +21,7 @@
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QMenu>
+#include <QEventLoop>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QUrl>
@@ -30,7 +29,6 @@
 
 #include <wlxbase_wlqt/FindReplacePanel.h>
 #include <wlxbase_wlqt/FocusManager.h>
-#include <wlxbase_wlqt/PluginSplitView.h>
 #include <wlxbase_wlqt/PluginStatusBar.h>
 #include <wlxbase_wlqt/ThemeManager.h>
 
@@ -118,29 +116,11 @@ void ArchiveViewWidget::setupUi()
     connect(m_filterBox, &QLineEdit::textChanged,
             this, &ArchiveViewWidget::onFilterChanged);
 
-    // The detail panel is what makes the wide table tolerable: the columns
-    // can stay narrow because everything about the selected entry is here.
-    m_detail = new QLabel(this);
-    m_detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    m_detail->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-    m_detail->setWordWrap(true);
-    m_detail->setMargin(6);
-    m_detail->setMinimumWidth(160);
-
-    QWidget *centre = m_view;
-    if (m_settings.showDetailPanel) {
-        auto *split = new QtWlPlugin::PluginSplitView(m_view, m_detail, this);
-        split->setLeftWidth(520);
-        centre = split;
-    } else {
-        m_detail->hide();
-    }
-
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     layout->addWidget(m_filterBox, 0);
-    layout->addWidget(centre, 1);
+    layout->addWidget(m_view, 1);
     layout->addWidget(m_status, 0);
 
     m_focus = new QtWlPlugin::FocusManager(this, m_view, this);
@@ -165,9 +145,6 @@ void ArchiveViewWidget::setupUi()
     m_focus->registerShortcut(QKeySequence(QStringLiteral("Ctrl+T")),
                               QtWlPlugin::FocusManager::WhenNoInput,
                               [this]() { toggleFlat(); return true; });
-
-    connect(m_view->selectionModel(), &QItemSelectionModel::currentChanged,
-            this, [this](const QModelIndex &current) { onCurrentChanged(current); });
 
     if (m_settings.startFlat)
         toggleFlat();
@@ -265,6 +242,13 @@ QStringList ArchiveViewWidget::selectedMembers() const
 QStringList ArchiveViewWidget::extractMembers(const QStringList &members,
                                               const QString &destination)
 {
+    // Re-entrancy guard. Extraction runs a nested event loop, so a second
+    // request arriving from a menu click or a drag while one is in flight
+    // would nest two loops over one extractor and wedge the host.
+    if (m_extracting)
+        return {};
+    m_extracting = true;
+
     // Reuse a passphrase the user already gave for this archive rather than
     // asking again for the same file.
     m_extractor->setPassphrase(m_scanner->acceptedPassphrase());
@@ -272,42 +256,55 @@ QStringList ArchiveViewWidget::extractMembers(const QStringList &members,
     QProgressDialog progress(tr("Extracting from %1…")
                                  .arg(QFileInfo(m_path).fileName()),
                              tr("Cancel"), 0, members.size(), this);
-    progress.setWindowModality(Qt::WindowModal);
+    // Deliberately NOT WindowModal. This widget's top-level window belongs to
+    // Double Commander, not to Qt — an LCL window that Qt's modality cannot
+    // reason about. Blocking on it is what makes the file manager appear to
+    // hang. Disabling our own view is the containment we actually want.
+    progress.setWindowModality(Qt::NonModal);
     progress.setMinimumDuration(300);
+    m_view->setEnabled(false);
 
-    bool finished = false;
     bool ok = false;
     QString error;
     int refused = 0;
 
-    connect(m_extractor, &ArchiveExtractor::extractProgress, &progress,
-            [&progress](int done, int total, const QString &member) {
-        if (total > 0)
-            progress.setValue(done);
-        progress.setLabelText(member);
-    });
-    connect(m_extractor, &ArchiveExtractor::extractFinished, &progress,
-            [&](bool succeeded, const QString &message, int, int refusedCount) {
-        finished = true;
-        ok = succeeded;
-        error = message;
-        refused = refusedCount;
-        progress.reset();
-    });
+    // A real event loop rather than a `while (!done) processEvents()` spin.
+    // The spin had no exit if the terminal signal never arrived, so any
+    // failure to emit it presented as a frozen file manager rather than an
+    // error — the worst possible failure mode for the one operation here
+    // that touches the filesystem.
+    QEventLoop loop;
+
+    const auto progressConnection = connect(
+        m_extractor, &ArchiveExtractor::extractProgress, &progress,
+        [&progress](int done, int total, const QString &member) {
+            if (total > 0)
+                progress.setValue(done);
+            progress.setLabelText(member);
+        });
+    const auto finishedConnection = connect(
+        m_extractor, &ArchiveExtractor::extractFinished, &loop,
+        [&](bool succeeded, const QString &message, int, int refusedCount) {
+            ok = succeeded;
+            error = message;
+            refused = refusedCount;
+            loop.quit();
+        });
+    const auto cancelConnection = connect(
+        &progress, &QProgressDialog::canceled, this,
+        [this]() { m_extractor->cancel(); });
 
     m_extractor->extract(m_path, members, destination);
+    loop.exec();
 
-    // The extractor runs on its own thread; this keeps the GUI responsive and
-    // the Cancel button live while it works.
-    while (!finished) {
-        if (progress.wasCanceled()) {
-            m_extractor->cancel();
-            break;
-        }
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-    }
+    disconnect(progressConnection);
+    disconnect(finishedConnection);
+    disconnect(cancelConnection);
+
     m_extractor->cancelAndWait();
-    m_extractor->disconnect(&progress);
+    progress.reset();
+    m_view->setEnabled(true);
+    m_extracting = false;
 
     const QStringList written = m_extractor->writtenPaths();
 
@@ -319,7 +316,7 @@ QStringList ArchiveViewWidget::extractMembers(const QStringList &members,
             tr("%n member(s) were not extracted because their stored paths "
                "point outside the destination directory (an absolute path, or "
                "one containing \"..\").", nullptr, refused));
-    } else if (!ok && !error.isEmpty() && error != tr("Cancelled")) {
+    } else if (!ok && !error.isEmpty() && error != QLatin1String("Cancelled")) {
         QMessageBox::warning(this, tr("Extraction failed"), error);
     }
 
@@ -332,9 +329,14 @@ void ArchiveViewWidget::onExtractSelection()
     if (members.isEmpty())
         return;
 
+    // DontUseNativeDialog on purpose: the native chooser goes out to the
+    // desktop portal, and a portal dialog raised from a plugin inside a host
+    // that is not a Qt application is a known way to hang. Qt's own dialog
+    // has no such dependency.
     const QString destination = QFileDialog::getExistingDirectory(
         this, tr("Extract %n member(s) to", nullptr, members.size()),
-        QFileInfo(m_path).absolutePath());
+        QFileInfo(m_path).absolutePath(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
     if (destination.isEmpty())
         return;
 
@@ -390,7 +392,6 @@ bool ArchiveViewWidget::loadFile(const QString &path)
     m_status->removeExtraInfo(QStringLiteral("cancelled"));
     m_status->removeExtraInfo(QStringLiteral("zip64"));
     m_filterBox->clear();
-    updateDetailPanel(nullptr, QString());
 
     m_scanner->scan(path, m_settings.maxEntries);
     return true;
@@ -476,78 +477,6 @@ void ArchiveViewWidget::onFilterChanged(const QString &text)
             stack.append(m_filterProxy->index(row, 0, index));
     }
     m_status->setRowCount(visible, m_model->entryCount());
-}
-
-void ArchiveViewWidget::onCurrentChanged(const QModelIndex &current)
-{
-    updateDetailPanel(entryFor(current), pathFor(current));
-}
-
-void ArchiveViewWidget::updateDetailPanel(const archiveview::Entry *entry,
-                                          const QString &path)
-{
-    if (!m_detail)
-        return;
-
-    const QLocale locale;
-    QString html;
-
-    auto row = [&html](const QString &label, const QString &value) {
-        if (!value.isEmpty()) {
-            html += QStringLiteral("<b>%1</b><br>%2<br><br>")
-                        .arg(label.toHtmlEscaped(), value.toHtmlEscaped());
-        }
-    };
-
-    if (!entry) {
-        // A synthesised directory, or nothing selected. Show the archive
-        // instead of an empty panel.
-        row(tr("Archive"), QFileInfo(m_path).fileName());
-        row(tr("Format"), QString::fromStdString(m_summary.format));
-        row(tr("Filters"), QString::fromStdString(m_summary.filters));
-        row(tr("Members"), QString::number(m_model->entryCount()));
-        if (!path.isEmpty())
-            row(tr("Directory"), path);
-        if (!m_summary.comment.empty())
-            row(tr("Comment"), QString::fromStdString(m_summary.comment));
-        m_detail->setText(html);
-        return;
-    }
-
-    row(tr("Path"), path);
-    switch (entry->type) {
-    case archiveview::Entry::Type::Directory: row(tr("Type"), tr("Directory")); break;
-    case archiveview::Entry::Type::Symlink:   row(tr("Type"), tr("Symbolic link")); break;
-    case archiveview::Entry::Type::Hardlink:  row(tr("Type"), tr("Hard link")); break;
-    case archiveview::Entry::Type::Other:     row(tr("Type"), tr("Special file")); break;
-    case archiveview::Entry::Type::File:      row(tr("Type"), tr("File")); break;
-    }
-    if (!entry->linkTarget.empty())
-        row(tr("Target"), QString::fromStdString(entry->linkTarget));
-    if (entry->size >= 0)
-        row(tr("Size"), locale.formattedDataSize(entry->size));
-    if (entry->compressedSize >= 0)
-        row(tr("Packed"), locale.formattedDataSize(entry->compressedSize));
-    if (entry->hasCrc && !entry->isDir()) {
-        row(tr("CRC-32"),
-            QStringLiteral("%1").arg(entry->crc32, 8, 16, QLatin1Char('0')).toUpper());
-    }
-    if (entry->hasModified) {
-        row(tr("Modified"),
-            locale.toString(QDateTime::fromSecsSinceEpoch(entry->modified),
-                            QLocale::LongFormat));
-    }
-    if (!entry->owner.empty() || !entry->group.empty()) {
-        row(tr("Owner"), QStringLiteral("%1 / %2")
-                             .arg(QString::fromStdString(entry->owner),
-                                  QString::fromStdString(entry->group)));
-    }
-    if (entry->metadataEncrypted)
-        row(tr("Encryption"), tr("Contents and metadata encrypted"));
-    else if (entry->encrypted)
-        row(tr("Encryption"), tr("Contents encrypted"));
-
-    m_detail->setText(html);
 }
 
 void ArchiveViewWidget::applyShowFlags(int showFlags)

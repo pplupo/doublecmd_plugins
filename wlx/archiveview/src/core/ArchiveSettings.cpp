@@ -90,8 +90,6 @@ Settings Settings::load(const std::string &iniPath)
 
         if (key == "flatview") {
             settings.startFlat = parseBool(value, settings.startFlat);
-        } else if (key == "detailpanel") {
-            settings.showDetailPanel = parseBool(value, settings.showDetailPanel);
         } else if (key == "filterbox") {
             settings.showFilterBox = parseBool(value, settings.showFilterBox);
         } else if (key == "maxentries") {

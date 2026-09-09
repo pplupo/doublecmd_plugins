@@ -470,6 +470,18 @@ QVariant ArchiveModel::data(const QModelIndex &index, int role) const
     }
 }
 
+Qt::ItemFlags ArchiveModel::flags(const QModelIndex &index) const
+{
+    if (!index.isValid())
+        return Qt::NoItemFlags;
+
+    // ItemIsDragEnabled is not decoration: QAbstractItemView checks it before
+    // it will call startDrag() at all. Without it the view silently refuses
+    // to begin a drag, however the view itself is configured — which is
+    // exactly why dragging members out did nothing.
+    return QAbstractItemModel::flags(index) | Qt::ItemIsDragEnabled;
+}
+
 QVariant ArchiveModel::headerData(int section, Qt::Orientation orientation,
                                   int role) const
 {
