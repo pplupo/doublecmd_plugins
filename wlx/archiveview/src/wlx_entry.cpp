@@ -199,8 +199,8 @@ WLX_EXPORT void DCPCALL ListGetDetectString(char *DetectString, int maxlen)
     // formats we actually handle keeps the lister out of the way of every
     // other viewer.
     snprintf(DetectString, maxlen - 1,
-        "EXT=\"ZIP\" | EXT=\"ZIPX\" | EXT=\"JAR\" | EXT=\"WAR\" | EXT=\"APK\" | "
-        "EXT=\"EPUB\" | EXT=\"XPI\" | EXT=\"WHL\" | EXT=\"7Z\" | EXT=\"RAR\" | "
+        "EXT=\"ZIP\" | EXT=\"ZIPX\" | EXT=\"WAR\" | EXT=\"EAR\" | EXT=\"APK\" | "
+        "EXT=\"XPI\" | EXT=\"WHL\" | EXT=\"7Z\" | EXT=\"RAR\" | EXT=\"ACE\" | "
         "EXT=\"TAR\" | EXT=\"GZ\" | EXT=\"TGZ\" | EXT=\"BZ2\" | EXT=\"TBZ\" | "
         "EXT=\"TBZ2\" | EXT=\"XZ\" | EXT=\"TXZ\" | EXT=\"ZST\" | EXT=\"TZST\" | "
         "EXT=\"LZ\" | EXT=\"LZ4\" | EXT=\"LZMA\" | EXT=\"LZO\" | EXT=\"Z\" | "

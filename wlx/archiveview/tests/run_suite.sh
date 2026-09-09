@@ -231,14 +231,13 @@ INI="$SCRATCH/archiveview.ini"
 cat > "$INI" <<'INIEOF'
 [archiveview]
 FlatView=true
-DetailPanel=false
 FilterBox=false
 MaxEntries=250
 NameCodec=windows-1251
 HiddenColumns=CRC-32,Owner,Mode
 INIEOF
 check many.zip        "ini: flat, ceiling, hidden columns" "--ini $INI" \
-    "settings +: flat=yes detail=no filter=no maxEntries=250 codec=windows-1251 hidden=CRC-32\+Owner\+Mode" \
+    "settings +: flat=yes filter=no maxEntries=250 codec=windows-1251 hidden=CRC-32\+Owner\+Mode" \
     "^entries +: 250 " "truncated +: yes"
 # The legacy-codepage gap documented since M1: without NameCodec these names
 # are lossless but wrong-looking; with it they are correct.

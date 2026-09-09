@@ -12,7 +12,6 @@
 
 class QDialog;
 class QLineEdit;
-class QLabel;
 class QSortFilterProxyModel;
 class ArchiveModel;
 class ArchiveScanner;
@@ -88,8 +87,6 @@ private:
     void toggleFlat();
     void onFindRequested(bool forward);
     void onFilterChanged(const QString &text);
-    void onCurrentChanged(const QModelIndex &current);
-    void updateDetailPanel(const archiveview::Entry *entry, const QString &path);
     void setupContextMenu();
     /// Normalised in-archive paths of every selected member.
     QStringList selectedMembers() const;
@@ -104,7 +101,6 @@ private:
     ArchiveModel *m_model = nullptr;
     QSortFilterProxyModel *m_filterProxy = nullptr;
     QLineEdit *m_filterBox = nullptr;
-    QLabel *m_detail = nullptr;
     ArchiveScanner *m_scanner = nullptr;
     QtWlPlugin::PluginStatusBar *m_status = nullptr;
     QtWlPlugin::FocusManager *m_focus = nullptr;
@@ -117,6 +113,9 @@ private:
     /// it has to be closed before the scanner is joined or the widget torn
     /// down — otherwise teardown waits on a dialog nobody is looking at.
     QPointer<QDialog> m_passphrasePrompt;
+
+    /// True while a nested extraction event loop is running.
+    bool m_extracting = false;
 
     QString m_path;
     archiveview::Summary m_summary;
