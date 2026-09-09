@@ -113,6 +113,15 @@ mkdir -p wlx/sourceview/build
 install -m 644 wlx/sourceview/build/sourceview_gtk3.wlx release/wlx/sourceview/
 install -m 644 wlx/sourceview/*.md release/wlx/sourceview/
 
+# htmlview: Qt6/QtWebEngine only. Tolerant of failure for the same reason
+# as kpartview below -- qt6-webengine is a large optional package and is
+# not present on every distro/runner.
+mkdir -p release/wlx/htmlview
+mkdir -p wlx/htmlview/build
+(cd wlx/htmlview/build && cmake .. && make) || echo "htmlview build failed (likely missing Qt6 WebEngineWidgets) -- skipping"
+[ -f wlx/htmlview/build/htmlview_qt6.wlx ] && install -m 644 wlx/htmlview/build/htmlview_qt6.wlx release/wlx/htmlview/
+install -m 644 wlx/htmlview/*.md release/wlx/htmlview/
+
 # kpartview: Qt6/KDE Frameworks 6 only (KParts has no GTK3 equivalent).
 # Tolerant of failure: KF6 packaging availability varies by distro/runner,
 # and this is the only plugin that depends on it besides kate.
