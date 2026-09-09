@@ -30,7 +30,11 @@ set(ARCHIVEVIEW_CORE_SOURCES
     src/core/ArchiveScanner.cpp
     src/core/ArchiveExtractor.cpp
     src/core/ArchiveSettings.cpp
+    src/core/EntryTree.cpp
+    src/core/EntryFormat.cpp
     include/core/ArchiveEntry.h
+    include/core/EntryTree.h
+    include/core/EntryFormat.h
     include/core/ArchiveNames.h
     include/core/ZipCentralDirectory.h
     include/core/PassphraseBroker.h
@@ -106,11 +110,86 @@ target_link_libraries(archiveview_qt6 PRIVATE
     PkgConfig::LIBARCHIVE
 )
 
+# The lister shells out to nothing. The predecessor this plugin replaces built
+# a /bin/sh command line containing the previewed file's name, which made
+# opening a file called `x$(...).zip` arbitrary code execution. Guard the
+# property that makes that impossible rather than trusting review to catch a
+# reintroduction.
+add_custom_target(archiveview_no_subprocess ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckNoSubprocess.cmake
+    COMMENT "archiveview: verifying no subprocess/shell usage"
+)
+add_dependencies(archiveview_qt6 archiveview_no_subprocess)
+
+# ---------------------------------------------------------------------------
+# GTK3 variant — same core, different toolkit. Built only when GTK3 is
+# present, following the convention of the other dual-toolkit plugins here.
+# ---------------------------------------------------------------------------
+option(ENABLE_TESTS "Build the archiveview test harnesses" ON)
+option(ENABLE_GTK3 "Build the GTK3 archiveview plugin" ON)
+
+if(ENABLE_GTK3)
+    pkg_check_modules(GTK3 gtk+-3.0)
+    if(GTK3_FOUND)
+        add_library(archiveview_gtk3 SHARED
+            src/gtk3/plugin_gtk3.cpp
+            src/gtk3/ArchiveTreeModel.cpp
+            src/gtk3/ArchiveTreeModel.h
+        )
+        set_target_properties(archiveview_gtk3 PROPERTIES
+            PREFIX ""
+            SUFFIX ".wlx"
+        )
+        target_include_directories(archiveview_gtk3 PRIVATE
+            include
+            src/gtk3
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
+            ${GTK3_INCLUDE_DIRS}
+        )
+        target_compile_options(archiveview_gtk3 PRIVATE
+            -Wall -Wextra
+            -fvisibility=hidden
+            -fvisibility-inlines-hidden
+            ${GTK3_CFLAGS_OTHER}
+        )
+        target_link_directories(archiveview_gtk3 PRIVATE ${GTK3_LIBRARY_DIRS})
+        target_link_libraries(archiveview_gtk3 PRIVATE
+            archiveview_core
+            ${GTK3_LIBRARIES}
+        )
+        # Same reasoning as the Qt6 variant: only the List* entry points may
+        # be exported, so nothing here can be interposed by, or collide with,
+        # what the host already loaded.
+        target_link_options(archiveview_gtk3 PRIVATE
+            -Wl,--exclude-libs,ALL
+            -Wl,-Bsymbolic
+            -Wl,-Bsymbolic-functions
+        )
+        add_dependencies(archiveview_gtk3 archiveview_no_subprocess)
+
+        if(ENABLE_TESTS)
+            # GTK counterpart to wlx_host: dlopen()s the built .wlx and walks
+            # the custom tree model through the public GtkTreeModel API.
+            add_executable(gtk_host tests/gtk_host.cpp)
+            target_include_directories(gtk_host PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
+                ${GTK3_INCLUDE_DIRS}
+            )
+            target_compile_options(gtk_host PRIVATE -Wall -Wextra ${GTK3_CFLAGS_OTHER})
+            target_link_directories(gtk_host PRIVATE ${GTK3_LIBRARY_DIRS})
+            target_link_libraries(gtk_host PRIVATE ${GTK3_LIBRARIES} ${CMAKE_DL_LIBS})
+            add_dependencies(gtk_host archiveview_gtk3)
+        endif()
+    else()
+        message(STATUS "archiveview: gtk+-3.0 not found — GTK3 variant skipped")
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # Headless harness (see tests/scan_smoke.cpp)
 # ---------------------------------------------------------------------------
-option(ENABLE_TESTS "Build the archiveview test harness" ON)
-
 if(ENABLE_TESTS)
     add_executable(scan_smoke
         tests/scan_smoke.cpp
@@ -153,15 +232,3 @@ if(ENABLE_TESTS)
     add_dependencies(wlx_host archiveview_qt6)
 endif()
 
-# The lister shells out to nothing. The predecessor this plugin replaces built
-# a /bin/sh command line containing the previewed file's name, which made
-# opening a file called `x$(...).zip` arbitrary code execution. Guard the
-# property that makes that impossible rather than trusting review to catch a
-# reintroduction.
-add_custom_target(archiveview_no_subprocess ALL
-    COMMAND ${CMAKE_COMMAND}
-        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckNoSubprocess.cmake
-    COMMENT "archiveview: verifying no subprocess/shell usage"
-)
-add_dependencies(archiveview_qt6 archiveview_no_subprocess)

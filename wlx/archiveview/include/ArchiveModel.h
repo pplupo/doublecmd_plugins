@@ -3,23 +3,24 @@
 #include <QAbstractItemModel>
 #include <QHash>
 #include <QIcon>
-#include <QVector>
-
-#include <memory>
-#include <vector>
 
 #include "core/ArchiveEntry.h"
+#include "core/EntryTree.h"
 
-/// Tree/flat model over archive members, fed incrementally by ArchiveScanner.
+/// Qt view onto archiveview::EntryTree.
 ///
 /// Replaces the QTableWidget approach outright: seven heap QTableWidgetItems
 /// per member does not survive a 100k-entry archive, and a flat list of
 /// "a/b/c/d/file.txt" strings is unusable at that size regardless of how it
 /// is stored.
 ///
-/// Directories are synthesised from member paths, so an archive that stores
-/// no explicit directory entries (common for zip) still gets a tree.
-class ArchiveModel : public QAbstractItemModel {
+/// The hierarchy itself lives in the core so the GTK3 variant builds exactly
+/// the same one — synthesised directories, separate rows for duplicate paths,
+/// absolute paths left absolute. Those are decisions about what the user is
+/// told about an archive, not presentation details, and must not differ
+/// between toolkits.
+class ArchiveModel : public QAbstractItemModel,
+                     private archiveview::EntryTree::Listener {
     Q_OBJECT
 public:
     enum Column {
@@ -58,9 +59,9 @@ public:
     /// Used for printing and export, which are always flat.
     QModelIndex flatIndex(int row, int column) const;
 
-    int entryCount() const { return static_cast<int>(m_flatNodes.size()); }
+    int entryCount() const { return m_tree.entryCount(); }
     /// Members whose path was already claimed by an earlier member.
-    int duplicateCount() const { return m_duplicateCount; }
+    int duplicateCount() const { return m_tree.duplicateCount(); }
 
     // --- QAbstractItemModel ---
     QModelIndex index(int row, int column,
@@ -74,42 +75,19 @@ public:
     Qt::ItemFlags flags(const QModelIndex &index) const override;
 
 private:
-    struct Node {
-        QString name;      ///< last path component
-        QString fullPath;
-        Node *parent = nullptr;
-        QVector<Node *> children;
-        int row = 0;
-        bool isDir = false;
-        bool hasEntry = false;    ///< false for a synthesised directory
-        bool attached = false;    ///< already visible to the view
-        bool isDuplicate = false; ///< another member claimed the same path
-        archiveview::Entry entry;
-    };
+    using Node = archiveview::EntryTree::Node;
+
+    // --- EntryTree::Listener: core insertions become Qt notifications ------
+    void beforeInsert(const Node *parent, int first, int count) override;
+    void afterInsert(const Node *parent, int first, int count) override;
 
     Node *nodeFor(const QModelIndex &index) const;
-    QModelIndex indexForNode(Node *node, int column = 0) const;
-    Node *makeNode(const QString &name, const QString &fullPath, Node *parent,
-                   bool registerPath);
-    void attachNode(Node *node, Node *parent,
-                    QHash<Node *, QVector<Node *>> *pending);
-    /// Give a repeated path its own row rather than folding it into the first.
-    Node *addDuplicate(Node *original, QHash<Node *, QVector<Node *>> *pending);
-    /// Find or create the node for `path`, creating missing ancestors.
-    /// New nodes whose parent is already attached are left detached and
-    /// recorded in `pending` so the caller can announce them in one go.
-    Node *ensureNode(const QString &path, bool isDir,
-                     QHash<Node *, QVector<Node *>> *pending);
-    void attachPending(QHash<Node *, QVector<Node *>> *pending);
+    QModelIndex indexForNode(const Node *node, int column = 0) const;
 
     QVariant displayText(const Node *node, int column) const;
     QIcon iconFor(const Node *node) const;
 
-    std::vector<std::unique_ptr<Node>> m_storage;
-    Node m_root;
-    QHash<QString, Node *> m_byPath;
-    std::vector<Node *> m_flatNodes;   ///< entry-bearing nodes, arrival order
+    archiveview::EntryTree m_tree;
     mutable QHash<QString, QIcon> m_iconCache;
-    int m_duplicateCount = 0;
     bool m_flat = false;
 };

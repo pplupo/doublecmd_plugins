@@ -334,6 +334,30 @@ else
 fi
 
 echo
+echo "== GTK3 variant: same core, different toolkit =="
+GTKWLX="$(dirname "$SMOKE")/archiveview_gtk3.wlx"
+GTKHOST="$(dirname "$SMOKE")/gtk_host"
+if [ -x "$GTKHOST" ] && [ -e "$GTKWLX" ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    gtk_output="$(GDK_BACKEND=x11 timeout 600 "$GTKHOST" "$GTKWLX" \
+        "$FIXTURES/tree.zip" "$FIXTURES/many.zip" "$FIXTURES/plain.txt" 2>&1)"
+    gtk_status=$?
+    # The walk exercises get_path/get_iter round-tripping, which is the pair a
+    # hand-written GtkTreeModel most easily gets wrong.
+    if [ $gtk_status -eq 0 ] && grep -q "GTK HOST OK" <<<"$gtk_output" \
+       && grep -q "rows visible    : 100100" <<<"$gtk_output" \
+       && ! grep -q "path round-trip : FAILED" <<<"$gtk_output" \
+       && grep -q "ListLoad declined" <<<"$gtk_output"; then
+        printf '  \033[32mPASS\033[0m %-28s model walk, 100k rows, reload, teardown\n' "gtk_host"
+        PASS=$((PASS + 1))
+    else
+        printf '  \033[31mFAIL\033[0m %-28s exit=%s\n%s\n' "gtk_host" "$gtk_status" "$gtk_output"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    printf '  \033[33mSKIP\033[0m %-28s (no display, or GTK3 variant not built)\n' "gtk_host"
+fi
+
+echo
 echo "== no shell was ever involved =="
 if compgen -G "archiveview-pwned*" > /dev/null; then
     printf '  \033[31mFAIL\033[0m marker files created: %s\n' "$(echo archiveview-pwned*)"
