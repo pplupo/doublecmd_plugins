@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_AUTOMOC ON)
 
 option(ENABLE_QT6 "Build the Qt6/QtWebEngine htmlview plugin" ON)
+option(ENABLE_GTK3 "Build the GTK3/WebKitGTK htmlview plugin" ON)
 
 # -Wformat=2 pulls in -Wformat-nonliteral and -Wformat-security, the exact
 # class of defect that lets a mismatched .mo file in a translation
@@ -57,6 +58,49 @@ if(ENABLE_QT6)
         )
     else()
         message(WARNING "htmlview: Qt6 WebEngineWidgets not found, skipping Qt6 build")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------
+# GTK3 Lister Plugin Target
+# ---------------------------------------------------------------------
+if(ENABLE_GTK3)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GTK3 gtk+-3.0)
+    pkg_check_modules(WEBKIT2 webkit2gtk-4.1)
+    if(GTK3_FOUND AND WEBKIT2_FOUND)
+        add_library(htmlview_gtk3 MODULE
+            src/gtk3/plugin_gtk3.cpp
+        )
+        # AUTOMOC off: no Qt here, and leaving the global setting on makes
+        # moc scan a file full of GObject macros for nothing.
+        set_target_properties(htmlview_gtk3 PROPERTIES AUTOMOC OFF)
+
+        target_link_libraries(htmlview_gtk3 PRIVATE
+            htmlview_core
+            ${GTK3_LIBRARIES}
+            ${WEBKIT2_LIBRARIES}
+        )
+        target_include_directories(htmlview_gtk3 PRIVATE
+            ${GTK3_INCLUDE_DIRS}
+            ${WEBKIT2_INCLUDE_DIRS}
+        )
+        target_link_directories(htmlview_gtk3 PRIVATE
+            ${GTK3_LIBRARY_DIRS}
+            ${WEBKIT2_LIBRARY_DIRS}
+        )
+        target_compile_options(htmlview_gtk3 PRIVATE
+            ${GTK3_CFLAGS_OTHER}
+            ${WEBKIT2_CFLAGS_OTHER}
+        )
+
+        set_target_properties(htmlview_gtk3 PROPERTIES
+            PREFIX ""
+            OUTPUT_NAME "htmlview_gtk3"
+            SUFFIX ".wlx"
+        )
+    else()
+        message(WARNING "htmlview: GTK3 or webkit2gtk-4.1 not found, skipping GTK3 build")
     endif()
 endif()
 
