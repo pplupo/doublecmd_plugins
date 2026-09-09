@@ -7,8 +7,8 @@
 
 #include <memory>
 
-#include "ArchiveEntry.h"
-#include "ArchiveSettings.h"
+#include "core/ArchiveEntry.h"
+#include "core/ArchiveSettings.h"
 
 class QDialog;
 class QLineEdit;
@@ -69,7 +69,7 @@ public:
     /// behind it. Every caller must go through this — the view's model is the
     /// proxy, so passing its indices to ArchiveModel directly yields the
     /// wrong row whenever a filter is active.
-    const ArchiveEntry *entryFor(const QModelIndex &viewIndex) const;
+    const archiveview::Entry *entryFor(const QModelIndex &viewIndex) const;
     QString pathFor(const QModelIndex &viewIndex) const;
 
 private slots:
@@ -78,9 +78,10 @@ private slots:
     void onPassphraseRequested(int attempt);
     void onExtractSelection();
     void onPreviewSelection();
-    void onEntriesReady(const ArchiveEntryBatch &batch);
+    void onEntriesReady(const archiveview::EntryBatch &batch);
     void onProgress(qint64 bytesRead, qint64 totalBytes);
-    void onScanFinished(bool ok, const QString &error, const ArchiveSummary &summary);
+    void onScanFinished(bool ok, const QString &error,
+                        const archiveview::Summary &summary);
 
 private:
     void setupUi();
@@ -88,7 +89,7 @@ private:
     void onFindRequested(bool forward);
     void onFilterChanged(const QString &text);
     void onCurrentChanged(const QModelIndex &current);
-    void updateDetailPanel(const ArchiveEntry *entry, const QString &path);
+    void updateDetailPanel(const archiveview::Entry *entry, const QString &path);
     void setupContextMenu();
     /// Normalised in-archive paths of every selected member.
     QStringList selectedMembers() const;
@@ -118,6 +119,6 @@ private:
     QPointer<QDialog> m_passphrasePrompt;
 
     QString m_path;
-    ArchiveSummary m_summary;
-    ArchiveSettings m_settings;
+    archiveview::Summary m_summary;
+    archiveview::Settings m_settings;
 };

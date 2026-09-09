@@ -18,9 +18,25 @@
 #include <QTimer>
 
 #include "ArchiveModel.h"
-#include "ArchiveNames.h"
+#include "core/ArchiveNames.h"
 #include "ArchiveScanner.h"
-#include "ArchiveSettings.h"
+#include "core/ArchiveSettings.h"
+
+/// The ini path normally comes from DC via ListSetDefaultParams; the
+/// harnesses do not link wlx_entry.cpp, so they supply their own.
+const QString &archiveviewIniPath()
+{
+    static const QString empty;
+    return empty;
+}
+
+static QString hiddenColumnsText(const archiveview::Settings &settings)
+{
+    QStringList names;
+    for (const std::string &column : settings.hiddenColumns)
+        names << QString::fromStdString(column);
+    return names.join(QLatin1Char('+'));
+}
 
 int main(int argc, char **argv)
 {
@@ -68,15 +84,18 @@ int main(int argc, char **argv)
 
     // The plugin gets this path from DC via ListSetDefaultParams; the harness
     // takes it on the command line.
-    ArchiveSettings settings = ArchiveSettings::load(parser.value(iniFile));
-    ArchiveNames::fallbackCodec() = settings.nameCodec;
+    archiveview::Settings settings =
+        archiveview::Settings::load(parser.value(iniFile).toStdString());
+    archiveview::names::setFallbackCodec(settings.nameCodec);
     if (parser.isSet(iniFile)) {
         out << "settings        : flat=" << (settings.startFlat ? "yes" : "no")
             << " detail=" << (settings.showDetailPanel ? "yes" : "no")
             << " filter=" << (settings.showFilterBox ? "yes" : "no")
             << " maxEntries=" << settings.maxEntries
-            << " codec=" << (settings.nameCodec.isEmpty() ? "-" : settings.nameCodec)
-            << " hidden=" << settings.hiddenColumns.join(QLatin1Char('+')) << '\n';
+            << " codec=" << (settings.nameCodec.empty()
+                                 ? QStringLiteral("-")
+                                 : QString::fromStdString(settings.nameCodec))
+            << " hidden=" << hiddenColumnsText(settings) << '\n';
     }
 
     ArchiveModel model;
@@ -89,7 +108,7 @@ int main(int argc, char **argv)
     qint64 cancelRequestedAt = -1;
 
     QObject::connect(&scanner, &ArchiveScanner::entriesReady,
-                     &model, [&](const ArchiveEntryBatch &batch) {
+                     &model, [&](const archiveview::EntryBatch &batch) {
         if (firstBatchAt < 0)
             firstBatchAt = clock.elapsed();
         ++batches;
@@ -97,17 +116,22 @@ int main(int argc, char **argv)
     });
 
     QObject::connect(&scanner, &ArchiveScanner::scanFinished, &app,
-                     [&](bool ok, const QString &error, const ArchiveSummary &summary) {
+                     [&](bool ok, const QString &error,
+                         const archiveview::Summary &summary) {
         const qint64 elapsed = clock.elapsed();
 
-        out << "format          : " << summary.format << '\n';
-        out << "filters         : " << (summary.filters.isEmpty() ? "-" : summary.filters) << '\n';
+        out << "format          : " << QString::fromStdString(summary.format) << '\n';
+        out << "filters         : "
+            << (summary.filters.empty() ? QStringLiteral("-")
+                                        : QString::fromStdString(summary.filters)) << '\n';
         out << "entries         : " << summary.entryCount
             << "  (model rows: " << model.entryCount() << ")\n";
         out << "uncompressed    : " << locale.formattedDataSize(summary.totalUncompressed) << '\n';
         out << "compressed      : " << locale.formattedDataSize(summary.compressedBytes) << '\n';
         out << "comment         : "
-            << (summary.comment.isEmpty() ? "-" : summary.comment.simplified()) << '\n';
+            << (summary.comment.empty()
+                    ? QStringLiteral("-")
+                    : QString::fromStdString(summary.comment).simplified()) << '\n';
         out << "packed (entries): "
             << (summary.totalCompressedEntries > 0
                     ? locale.formattedDataSize(summary.totalCompressedEntries)
@@ -159,7 +183,7 @@ int main(int argc, char **argv)
                                    .data(Qt::DisplayRole).toString();
                 }
                 // The lock column is icon-only, so surface it as text here.
-                const ArchiveEntry *entry = model.entryAt(index);
+                const archiveview::Entry *entry = model.entryAt(index);
                 const char *lock = "  ";
                 if (entry && entry->metadataEncrypted)
                     lock = "LM";

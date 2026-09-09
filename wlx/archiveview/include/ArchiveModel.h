@@ -8,7 +8,7 @@
 #include <memory>
 #include <vector>
 
-#include "ArchiveEntry.h"
+#include "core/ArchiveEntry.h"
 
 /// Tree/flat model over archive members, fed incrementally by ArchiveScanner.
 ///
@@ -40,7 +40,7 @@ public:
     ~ArchiveModel() override;
 
     /// Insert a batch of entries produced by the scanner.
-    void appendEntries(const ArchiveEntryBatch &batch);
+    void appendEntries(const archiveview::EntryBatch &batch);
     void clearEntries();
 
     bool isFlat() const { return m_flat; }
@@ -49,7 +49,7 @@ public:
     void setFlat(bool flat);
 
     /// The entry behind an index, or nullptr for a synthesised directory.
-    const ArchiveEntry *entryAt(const QModelIndex &index) const;
+    const archiveview::Entry *entryAt(const QModelIndex &index) const;
     /// Full in-archive path for an index, empty if invalid.
     QString pathAt(const QModelIndex &index) const;
 
@@ -83,7 +83,7 @@ private:
         bool hasEntry = false;    ///< false for a synthesised directory
         bool attached = false;    ///< already visible to the view
         bool isDuplicate = false; ///< another member claimed the same path
-        ArchiveEntry entry;
+        archiveview::Entry entry;
     };
 
     Node *nodeFor(const QModelIndex &index) const;

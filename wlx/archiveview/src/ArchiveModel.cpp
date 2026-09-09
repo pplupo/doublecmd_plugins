@@ -3,19 +3,20 @@
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QLocale>
+#include <QDateTime>
 #include <QMimeDatabase>
 
 namespace {
 
-QString formatMode(quint32 mode, ArchiveEntry::Type type)
+QString formatMode(quint32 mode, archiveview::Entry::Type type)
 {
     static const char *bits[] = { "---", "--x", "-w-", "-wx",
                                   "r--", "r-x", "rw-", "rwx" };
     QString text;
     switch (type) {
-    case ArchiveEntry::Directory: text = QStringLiteral("d"); break;
-    case ArchiveEntry::Symlink:   text = QStringLiteral("l"); break;
-    case ArchiveEntry::Hardlink:  text = QStringLiteral("h"); break;
+    case archiveview::Entry::Type::Directory: text = QStringLiteral("d"); break;
+    case archiveview::Entry::Type::Symlink:   text = QStringLiteral("l"); break;
+    case archiveview::Entry::Type::Hardlink:  text = QStringLiteral("h"); break;
     default:                      text = QStringLiteral("-"); break;
     }
     text += QLatin1String(bits[(mode >> 6) & 7]);
@@ -164,9 +165,9 @@ void ArchiveModel::attachPending(QHash<Node *, QVector<Node *>> *pending)
 // Population
 // ---------------------------------------------------------------------------
 
-void ArchiveModel::appendEntries(const ArchiveEntryBatch &batch)
+void ArchiveModel::appendEntries(const archiveview::EntryBatch &batch)
 {
-    if (batch.isEmpty())
+    if (batch.empty())
         return;
 
     const int firstFlatRow = static_cast<int>(m_flatNodes.size());
@@ -181,8 +182,10 @@ void ArchiveModel::appendEntries(const ArchiveEntryBatch &batch)
     newFlat.reserve(batch.size());
     QVector<Node *> updatedExisting;
 
-    for (const ArchiveEntry &entry : batch) {
-        Node *node = ensureNode(entry.path, entry.isDir(), pendingPtr);
+    for (const archiveview::Entry &entry : batch) {
+        // std::string -> QString happens once, here, rather than per data() call.
+        Node *node = ensureNode(QString::fromStdString(entry.path),
+                                entry.isDir(), pendingPtr);
 
         if (node->hasEntry)
             node = addDuplicate(node, pendingPtr);
@@ -237,7 +240,7 @@ void ArchiveModel::setFlat(bool flat)
     endResetModel();
 }
 
-const ArchiveEntry *ArchiveModel::entryAt(const QModelIndex &index) const
+const archiveview::Entry *ArchiveModel::entryAt(const QModelIndex &index) const
 {
     Node *node = nodeFor(index);
     if (!node || node == &m_root || !node->hasEntry)
@@ -315,7 +318,7 @@ QVariant ArchiveModel::displayText(const Node *node, int column) const
     if (!node->hasEntry && column != NameColumn)
         return QVariant();
 
-    const ArchiveEntry &entry = node->entry;
+    const archiveview::Entry &entry = node->entry;
     const QLocale locale;
 
     switch (column) {
@@ -361,20 +364,23 @@ QVariant ArchiveModel::displayText(const Node *node, int column) const
         return QStringLiteral("%1").arg(entry.crc32, 8, 16, QLatin1Char('0')).toUpper();
 
     case ModifiedColumn:
-        if (!entry.modified.isValid())
+        if (!entry.hasModified)
             return QVariant();
-        return locale.toString(entry.modified, QLocale::ShortFormat);
+        return locale.toString(QDateTime::fromSecsSinceEpoch(entry.modified),
+                               QLocale::ShortFormat);
 
     case ModeColumn:
         return entry.mode ? formatMode(entry.mode, entry.type) : QVariant();
 
     case OwnerColumn:
-        if (entry.owner.isEmpty() && entry.group.isEmpty())
+        if (entry.owner.empty() && entry.group.empty())
             return QVariant();
-        return QStringLiteral("%1/%2").arg(entry.owner, entry.group);
+        return QStringLiteral("%1/%2").arg(QString::fromStdString(entry.owner),
+                                           QString::fromStdString(entry.group));
 
     case LinkColumn:
-        return entry.linkTarget.isEmpty() ? QVariant() : entry.linkTarget;
+        return entry.linkTarget.empty()
+                   ? QVariant() : QString::fromStdString(entry.linkTarget);
 
     default:
         return QVariant();

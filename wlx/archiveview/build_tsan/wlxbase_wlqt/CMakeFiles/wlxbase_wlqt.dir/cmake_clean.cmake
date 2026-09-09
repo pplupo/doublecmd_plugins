@@ -1,0 +1,42 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/wlxbase_wlqt_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/wlxbase_wlqt_autogen.dir/ParseCache.txt"
+  "wlxbase_wlqt_autogen"
+  "CMakeFiles/wlxbase_wlqt.dir/src/CrashLogger.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/CrashLogger.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/EditableGridWidget.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/EditableGridWidget.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/EncodingUtils.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/EncodingUtils.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/FilterRowWidget.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/FilterRowWidget.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/FilterableHeaderView.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/FilterableHeaderView.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/FindReplacePanel.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/FindReplacePanel.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/FocusManager.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/FocusManager.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/PluginSplitView.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/PluginSplitView.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/PluginStatusBar.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/PluginStatusBar.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/PluginToolBar.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/PluginToolBar.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/ScopedFindReplacePanel.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/ScopedFindReplacePanel.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/SequentialRowProxyModel.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/SequentialRowProxyModel.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/src/ThemeManager.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/src/ThemeManager.cpp.o.d"
+  "CMakeFiles/wlxbase_wlqt.dir/wlxbase_wlqt_autogen/mocs_compilation.cpp.o"
+  "CMakeFiles/wlxbase_wlqt.dir/wlxbase_wlqt_autogen/mocs_compilation.cpp.o.d"
+  "libwlxbase_wlqt.a"
+  "libwlxbase_wlqt.pdb"
+  "wlxbase_wlqt_autogen/mocs_compilation.cpp"
+  "wlxbase_wlqt_autogen/timestamp"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/wlxbase_wlqt.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()
