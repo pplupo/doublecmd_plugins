@@ -99,6 +99,17 @@ public:
     /// printing and export use.
     const std::vector<Node *> &flat() const { return m_flat; }
 
+    /// Every entry-bearing member at `roots` or beneath them.
+    ///
+    /// Selecting a directory means everything under it, which is what every
+    /// other file manager does. Resolved here, against the whole tree, rather
+    /// than by walking the view's rows — a view walk gets three things wrong:
+    /// it descends only column-0 indexes (Qt gives selections in the name
+    /// column), it sees nothing beneath a row in flat mode, and it silently
+    /// skips children a live filter is hiding. Extraction should not depend
+    /// on what happens to be on screen.
+    std::vector<std::string> membersUnder(const std::vector<std::string> &roots) const;
+
     int entryCount() const { return static_cast<int>(m_flat.size()); }
     int duplicateCount() const { return m_duplicateCount; }
 

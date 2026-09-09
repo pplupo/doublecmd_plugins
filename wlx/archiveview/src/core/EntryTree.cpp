@@ -1,5 +1,8 @@
 #include "core/EntryTree.h"
 
+#include <algorithm>
+#include <unordered_set>
+
 namespace archiveview {
 
 EntryTree::EntryTree()
@@ -162,6 +165,41 @@ void EntryTree::addEntries(const EntryBatch &batch, Listener *listener, Mode mod
     }
 
     flush(&sink);
+}
+
+std::vector<std::string>
+EntryTree::membersUnder(const std::vector<std::string> &roots) const
+{
+    std::vector<std::string> members;
+    if (roots.empty())
+        return members;
+
+    const std::unordered_set<std::string> exact(roots.begin(), roots.end());
+
+    for (const Node *node : m_flat) {
+        if (!node->hasEntry)
+            continue;
+
+        bool wanted = exact.count(node->fullPath) > 0;
+        if (!wanted) {
+            for (const std::string &root : roots) {
+                // Prefix match on a path *boundary*, so selecting "dir" does
+                // not drag in "dirty.txt".
+                if (node->fullPath.size() > root.size()
+                    && node->fullPath.compare(0, root.size(), root) == 0
+                    && node->fullPath[root.size()] == '/') {
+                    wanted = true;
+                    break;
+                }
+            }
+        }
+        if (wanted)
+            members.push_back(node->fullPath);
+    }
+
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    return members;
 }
 
 void EntryTree::clear()

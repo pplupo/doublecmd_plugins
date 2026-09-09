@@ -213,6 +213,10 @@ if(ENABLE_TESTS)
     )
 
     add_executable(extract_smoke tests/extract_smoke.cpp)
+
+    # Toolkit-free: "extract this directory" resolves in the core.
+    add_executable(select_smoke tests/select_smoke.cpp)
+    target_link_libraries(select_smoke PRIVATE archiveview_core)
     target_include_directories(extract_smoke PRIVATE include)
     target_compile_options(extract_smoke PRIVATE -Wall -Wextra)
     target_compile_definitions(extract_smoke PRIVATE _FILE_OFFSET_BITS=64)

@@ -164,7 +164,7 @@ void post(const ViewWeak &weak, Work work)
 /// file manager does.
 std::vector<std::string> selectedMembers(const ViewPtr &view)
 {
-    std::vector<std::string> members;
+    std::vector<std::string> roots;
     GtkTreeSelection *selection =
         gtk_tree_view_get_selection(GTK_TREE_VIEW(view->view));
     GtkTreeModel *model = nullptr;
@@ -184,26 +184,15 @@ std::vector<std::string> selectedMembers(const ViewPtr &view)
                 GTK_TREE_MODEL_FILTER(model), &childIter, &iter);
         }
 
-        const auto *node = archive_tree_model_node(&childIter);
-        if (!node)
-            continue;
-
-        std::vector<const archiveview::EntryTree::Node *> stack{node};
-        while (!stack.empty()) {
-            const auto *current = stack.back();
-            stack.pop_back();
-            if (current->hasEntry)
-                members.push_back(current->fullPath);
-            for (const auto *child : current->children)
-                stack.push_back(child);
-        }
+        if (const auto *node = archive_tree_model_node(&childIter))
+            roots.push_back(node->fullPath);
     }
 
     g_list_free_full(rows, reinterpret_cast<GDestroyNotify>(gtk_tree_path_free));
 
-    std::sort(members.begin(), members.end());
-    members.erase(std::unique(members.begin(), members.end()), members.end());
-    return members;
+    // Directories expand against the whole tree, not against the rows on
+    // screen — so a filtered or flat view still extracts the full subtree.
+    return view->tree.membersUnder(roots);
 }
 
 /// Extract `members` into `destination`, pumping a nested main loop so the UI

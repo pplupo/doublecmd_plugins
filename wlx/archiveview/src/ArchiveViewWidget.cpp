@@ -215,27 +215,26 @@ void ArchiveViewWidget::setupContextMenu()
 
 QStringList ArchiveViewWidget::selectedMembers() const
 {
-    QStringList members;
     if (!m_view->selectionModel())
-        return members;
+        return {};
 
+    // Collect what is selected, then let the tree expand directories. Walking
+    // the view's own rows to find children looks equivalent and is not: Qt
+    // hands selections back in the name column, and only column-0 indexes
+    // have children, so the descent silently found nothing.
+    std::vector<std::string> roots;
     const QModelIndexList rows =
         m_view->selectionModel()->selectedRows(ArchiveModel::NameColumn);
+    roots.reserve(rows.size());
     for (const QModelIndex &row : rows) {
-        // Selecting a directory means everything under it, which is what
-        // every other file manager does.
-        QVector<QModelIndex> stack{row};
-        while (!stack.isEmpty()) {
-            const QModelIndex index = stack.takeLast();
-            if (entryFor(index))
-                members << pathFor(index);
-            for (int child = 0; child < m_view->model()->rowCount(index); ++child) {
-                stack.append(m_view->model()->index(child, ArchiveModel::NameColumn,
-                                                    index));
-            }
-        }
+        const QString path = pathFor(row);
+        if (!path.isEmpty())
+            roots.push_back(path.toStdString());
     }
-    members.removeDuplicates();
+
+    QStringList members;
+    for (const std::string &member : m_model->membersUnder(roots))
+        members << QString::fromStdString(member);
     return members;
 }
 

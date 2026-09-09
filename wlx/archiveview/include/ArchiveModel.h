@@ -59,6 +59,13 @@ public:
     /// Used for printing and export, which are always flat.
     QModelIndex flatIndex(int row, int column) const;
 
+    /// Every entry-bearing member at `roots` or beneath them; see
+    /// EntryTree::membersUnder().
+    std::vector<std::string> membersUnder(const std::vector<std::string> &roots) const
+    {
+        return m_tree.membersUnder(roots);
+    }
+
     int entryCount() const { return m_tree.entryCount(); }
     /// Members whose path was already claimed by an earlier member.
     int duplicateCount() const { return m_tree.duplicateCount(); }
