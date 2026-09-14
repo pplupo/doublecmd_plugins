@@ -18,24 +18,45 @@ type
 
   { TfrmMain }
   TfrmMain = class(TForm)
-    ToolBar: TToolBar;
-    btnInstall: TToolButton;
-    btnUninstall: TToolButton;
-    btnEnable: TToolButton;
-    btnMoveUp: TToolButton;
-    btnMoveDown: TToolButton;
-    btnTweak: TToolButton;
-    btnBindUrl: TToolButton;
-    btnCheckUpdate: TToolButton;
-    btnRollback: TToolButton;
-    btnRefresh: TToolButton;
-    btnSettings: TToolButton;
-    btnConfigure: TToolButton;
+    btnBindUrl: TButton;
+    btnCheckUpdate: TButton;
+    btnConfigure: TButton;
+    btnEnable: TButton;
+    btnExit: TButton;
+    btnInstall: TButton;
+    btnMoveDown: TButton;
+    btnMoveUp: TButton;
+    btnRefresh: TButton;
+    btnRollback: TButton;
+    btnSettings: TButton;
+    btnTweak: TButton;
+    btnUninstall: TButton;
+    gbPlugin: TGroupBox;
     lvPlugins: TListView;
-    pnlDetail: TPanel;
+    MainMenu1: TMainMenu;
     memDetail: TMemo;
-    StatusBar: TStatusBar;
+    MenuItem10: TMenuItem;
+    MenuItem4: TMenuItem;
+    miBindUrl: TMenuItem;
+    miConfigure: TMenuItem;
+    miEnable: TMenuItem;
+    miExit: TMenuItem;
+    miHelp: TMenuItem;
+    miInstall: TMenuItem;
+    miMoveDown: TMenuItem;
+    miMoveUp: TMenuItem;
+    miPlugins: TMenuItem;
+    miRollback: TMenuItem;
+    miSettings: TMenuItem;
+    miSettingsMenu: TMenuItem;
+    miTools: TMenuItem;
+    miTweak: TMenuItem;
+    miUninstall: TMenuItem;
+    miUpdate: TMenuItem;
     OpenDialog: TOpenDialog;
+    pnlBottom: TPanel;
+    pnlMiddle: TPanel;
+    StatusBar: TStatusBar;
     procedure FormCreate(Sender: TObject);
     procedure FormShow(Sender: TObject);
     procedure btnInstallClick(Sender: TObject);
@@ -50,6 +71,7 @@ type
     procedure btnRefreshClick(Sender: TObject);
     procedure btnSettingsClick(Sender: TObject);
     procedure btnConfigureClick(Sender: TObject);
+    procedure btnExitClick(Sender: TObject);
     procedure lvPluginsSelectItem(Sender: TObject; Item: TListItem; Selected: Boolean);
   private
     FXmlDoc: TDcXmlDocument;
@@ -509,6 +531,11 @@ procedure TfrmMain.btnSettingsClick(Sender: TObject);
 begin
   if ShowSettingsDialog then
     ReloadAll;
+end;
+
+procedure TfrmMain.btnExitClick(Sender: TObject);
+begin
+  Close;
 end;
 
 end.

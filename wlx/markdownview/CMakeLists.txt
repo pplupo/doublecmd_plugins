@@ -19,6 +19,51 @@ pkg_check_modules(RSVG REQUIRED librsvg-2.0)
 
 include(FetchContent)
 
+# Embeds a binary file as a `const unsigned char <SYMBOL>[]` + `const size_t
+# <SYMBOL>_size` pair, generated once at configure time (benchmarked: ~0.1-
+# 0.8s per file at our sizes, negligible) rather than needing any external
+# tool (ld -b binary, a Python script, etc.). Used for the 8 embedded math
+# fonts (see src/core/embedded_fonts.h) -- baked directly into the compiled
+# .wlx and self-seeded to disk on first use (MicroTeX's FontSrcFile needs a
+# real .otf file path; see markdown_engine.cpp's font registry), so a math
+# font choice survives the single-file "copy the .wlx" install convention
+# every other plugin here already relies on -- no companion folder needed.
+function(embed_binary_resource SRC_FILE SYMBOL OUT_CPP_VAR)
+    file(READ "${SRC_FILE}" _hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _arr "${_hex}")
+    string(LENGTH "${_hex}" _hexlen)
+    math(EXPR _size "${_hexlen} / 2")
+    set(_out "${CMAKE_CURRENT_BINARY_DIR}/embedded/${SYMBOL}.cpp")
+    file(WRITE "${_out}" "#include <cstddef>\nextern const unsigned char ${SYMBOL}[] = {${_arr}};\nextern const size_t ${SYMBOL}_size = ${_size};\n")
+    set(${OUT_CPP_VAR} "${_out}" PARENT_SCOPE)
+endfunction()
+
+set(EMBEDDED_FONT_SOURCES "")
+foreach(_pair
+    "3rdparty/MicroTeX/res/lm-math/latinmodern-math.otf:lm_math_otf"
+    "3rdparty/MicroTeX/res/lm-math/latinmodern-math.clm1:lm_math_clm"
+    "3rdparty/MicroTeX/res/firamath/FiraMath-Regular.otf:fira_math_otf"
+    "3rdparty/MicroTeX/res/firamath/FiraMath-Regular.clm1:fira_math_clm"
+    "3rdparty/MicroTeX/res/tex-gyre/texgyredejavu-math.otf:dejavu_math_otf"
+    "3rdparty/MicroTeX/res/tex-gyre/texgyredejavu-math.clm1:dejavu_math_clm"
+    "3rdparty/MicroTeX/res/ibmplexmath/IBMPlexMath-Regular.otf:ibmplex_math_otf"
+    "3rdparty/MicroTeX/res/ibmplexmath/IBMPlexMath-Regular.clm1:ibmplex_math_clm"
+    "3rdparty/MicroTeX/res/stixtwomath/STIX2Math.otf:stixtwo_math_otf"
+    "3rdparty/MicroTeX/res/stixtwomath/STIX2Math.clm1:stixtwo_math_clm"
+    "3rdparty/MicroTeX/res/libertinusmath/LibertinusMath-Regular.otf:libertinus_math_otf"
+    "3rdparty/MicroTeX/res/libertinusmath/LibertinusMath-Regular.clm1:libertinus_math_clm"
+    "3rdparty/MicroTeX/res/texgyrepagellamath/texgyrepagella-math.otf:pagella_math_otf"
+    "3rdparty/MicroTeX/res/texgyrepagellamath/texgyrepagella-math.clm1:pagella_math_clm"
+    "3rdparty/MicroTeX/res/eulermath/Euler-Math.otf:euler_math_otf"
+    "3rdparty/MicroTeX/res/eulermath/Euler-Math.clm1:euler_math_clm"
+)
+    string(REPLACE ":" ";" _pair_list "${_pair}")
+    list(GET _pair_list 0 _src)
+    list(GET _pair_list 1 _sym)
+    embed_binary_resource("${CMAKE_CURRENT_SOURCE_DIR}/${_src}" "${_sym}" _generated_cpp)
+    list(APPEND EMBEDDED_FONT_SOURCES "${_generated_cpp}")
+endforeach()
+
 # md4c: a plain-C, toolkit-agnostic CommonMark/GFM parser (replaces md4qt,
 # which forced Qt6::Core on both plugin targets via its QString-typed AST
 # and turned out to need Qt 6.5+ APIs this project doesn't otherwise
@@ -41,35 +86,42 @@ set(tinyxml2_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(tinyxml2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/tinyxml2)
 
-# MICROTEX_NO_AUTO_BACKEND: build the LaTeX static library with no
-# Graphics2D backend baked in at all -- each plugin target links its own
-# backend implementation directly (src/qt6/latex_render_qt.cpp using
-# MicroTeX's Qt backend, src/gtk3/latex_render_cairo.cpp using its Cairo
-# backend) instead of forcing one choice onto the shared library. See the
-# comment on that option in 3rdparty/MicroTeX/CMakeLists.txt.
-# MicroTeX defaults both of these ON, which dumps its entire font/symbol
-# tables (thousands of lines) to stdout on every single render -- fine for
-# its own sample apps, not for a plugin embedded in a file manager.
-set(GRAPHICS_DEBUG OFF CACHE BOOL "" FORCE)
+# MicroTeX ("microtex" target below): vendored from upstream's "openmath"
+# branch, NOT master -- see the comment on renderMathTag() in
+# markdown_engine.cpp for the full story of why. Both toolkit backends
+# (microtex-qt, microtex-cairo) are built here so markdownview_core can
+# stay toolkit-neutral while each plugin target links only the backend it
+# actually needs. HAVE_LOG OFF: the default dumps MicroTeX's entire font/
+# symbol tables (thousands of lines) to stdout on every single render --
+# fine for its own sample apps, not for a plugin embedded in a file
+# manager. BUILD_STATIC: keeps every plugin a single self-contained .wlx
+# file, matching every other plugin's "copy the .wlx" install convention
+# (platform/cairo's CMakeLists.txt needed a small patch for this -- see
+# its own comment).
 set(HAVE_LOG OFF CACHE BOOL "" FORCE)
-set(MICROTEX_NO_AUTO_BACKEND ON CACHE BOOL "" FORCE)
+set(BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(CAIRO ON CACHE BOOL "" FORCE)
+set(QT ON CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/MicroTeX)
 
 # Core Markdown Rendering Library (Static Library) -- toolkit-neutral:
-# md4c (parsing), librsvg+Cairo (SVG rasterization for Mermaid/PlantUML),
-# a curl subprocess (fetching those web renders), MicroTeX's core (LaTeX
-# layout, backend-agnostic) -- no Qt, no GTK. Each plugin target supplies
-# its own renderLatexToPng() implementation (see src/qt6/, src/gtk3/) and
-# links it alongside this.
+# md4c (parsing), librsvg+Cairo (SVG rasterization for Mermaid/PlantUML, and
+# direct chart drawing for ```chart blocks -- see chart_render.cpp), a curl
+# subprocess (fetching those web renders), MicroTeX's core (LaTeX layout,
+# backend-agnostic) -- no Qt, no GTK. Each plugin target supplies its own
+# renderLatexToPng() implementation (see src/qt6/, src/gtk3/) and links it
+# alongside this.
 add_library(markdownview_core STATIC
     src/core/markdown_engine.cpp
     src/core/diagram_render.cpp
+    src/core/chart_render.cpp
+    src/core/embedded_fonts.cpp
+    ${EMBEDDED_FONT_SOURCES}
 )
 
 target_include_directories(markdownview_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/MicroTeX/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../sdk
     ${CAIRO_INCLUDE_DIRS}
     ${RSVG_INCLUDE_DIRS}
@@ -81,7 +133,7 @@ target_include_directories(markdownview_core PUBLIC
 
 target_link_libraries(markdownview_core PUBLIC
     md4c-html
-    LaTeX
+    microtex
     ${CAIRO_LIBRARIES}
     ${RSVG_LIBRARIES}
 )
@@ -97,19 +149,12 @@ if(ENABLE_QT6)
         add_library(markdownview_qt6 MODULE
             src/qt6/plugin_qt6.cpp
             src/qt6/latex_render_qt.cpp
-            3rdparty/MicroTeX/src/platform/qt/graphic_qt.cpp
         )
         set_target_properties(markdownview_qt6 PROPERTIES AUTOMOC ON)
-        # graphic_qt.h's tex::Graphics2D_qt is compiled out unless BUILD_QT
-        # is defined -- normally set PUBLIC on the LaTeX target itself by
-        # its own CMakeLists' `if(QT)` branch, but MICROTEX_NO_AUTO_BACKEND
-        # skips that (see the option's comment above), so this target
-        # defines it directly instead, same as markdownview_gtk3 does with
-        # BUILD_GTK for graphic_cairo.h.
-        target_compile_definitions(markdownview_qt6 PRIVATE BUILD_QT)
 
         target_link_libraries(markdownview_qt6 PRIVATE
             markdownview_core
+            microtex-qt
             Qt6::Core
             Qt6::Gui
             Qt6::Widgets
@@ -146,9 +191,8 @@ if(ENABLE_GTK3)
         add_library(markdownview_gtk3 MODULE
             src/gtk3/plugin_gtk3.cpp
             src/gtk3/latex_render_cairo.cpp
-            3rdparty/MicroTeX/src/platform/cairo/graphic_cairo.cpp
         )
-        target_compile_definitions(markdownview_gtk3 PRIVATE BUILD_GTK_TARGET BUILD_GTK)
+        target_compile_definitions(markdownview_gtk3 PRIVATE BUILD_GTK_TARGET)
         target_include_directories(markdownview_gtk3 PRIVATE
             ${GTK3_INCLUDE_DIRS}
             ${CairoMM_INCLUDE_DIRS}
@@ -163,6 +207,7 @@ if(ENABLE_GTK3)
         )
         target_link_libraries(markdownview_gtk3 PRIVATE
             markdownview_core
+            microtex-cairo
             ${GTK3_LIBRARIES}
             ${CairoMM_LIBRARIES}
             ${PangoMM_LIBRARIES}

@@ -5,6 +5,7 @@
 #include <QTextDocument>
 #include <QScrollBar>
 #include <QApplication>
+#include <QCoreApplication>
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QPalette>
@@ -46,6 +47,14 @@ static QString g_configPath;
 // transient zoom into this instead, via a body { font-size: N% } CSS rule
 // (see markdown_engine.cpp's postProcessHtml), so it survives reloads.
 static double g_zoomMultiplier = 1.0;
+// Empty = MarkdownEngine's own default (Latin Modern Math, the closest
+// visual match to what MicroTeX rendered before this feature existed).
+// Otherwise a .clm1 path from MarkdownEngine::availableMathFonts() (or one
+// the user set in the ini by hand, pointing at a font of their own) --
+// selection is by path, not display name, since MicroTeX's own internal
+// font name frequently isn't the same string we'd show in a menu; see
+// markdown_engine.cpp's resolveMathFontCanonicalName().
+static QString g_mathFontClmPath;
 
 static bool isSystemDark() {
     QPalette pal = QGuiApplication::palette();
@@ -65,6 +74,7 @@ static void saveSettings() {
     settings.setValue(PLUGNAME "/mode", g_mode);
     settings.setValue(PLUGNAME "/auto_reload", g_autoReloadEnabled);
     settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
+    settings.setValue(PLUGNAME "/math_font", g_mathFontClmPath);
     // Explicit sync rather than relying solely on ~QSettings() to flush --
     // no known bug requires this (QSettings' destructor already syncs),
     // but it removes any doubt while diagnosing zoom persistence.
@@ -288,7 +298,8 @@ public:
             html = MarkdownEngine::renderFileToHtml(
                 m_filePath.toStdString(),
                 activeDarkMode,
-                g_themeFilePath.toStdString()
+                g_themeFilePath.toStdString(),
+                g_mathFontClmPath.toStdString()
             );
         } catch (const std::exception &e) {
             setHtml(QStringLiteral("<p>markdownview: failed to render this file: %1</p>").arg(QString::fromUtf8(e.what())));
@@ -433,6 +444,24 @@ protected:
             event->accept();
             return;
         }
+        if (event->modifiers() & Qt::ControlModifier) {
+            if (event->key() == Qt::Key_Q) {
+                // DC's own hotkey manager (Ctrl+Q closes Quick View) never
+                // sees key events this widget handles locally -- it's a
+                // real embedded QWidget, but across a native-window
+                // boundary, so key events consumed here don't reach DC's
+                // top-level window. Repost it there explicitly, matching
+                // the pattern used by kpartview/logview/pdfview for the
+                // same problem.
+                QWidget* target = QApplication::activeWindow();
+                if (!target) target = window();
+                if (target) {
+                    QCoreApplication::postEvent(target, new QKeyEvent(QEvent::KeyPress, Qt::Key_Q, Qt::ControlModifier));
+                    QCoreApplication::postEvent(target, new QKeyEvent(QEvent::KeyRelease, Qt::Key_Q, Qt::ControlModifier));
+                }
+                return;
+            }
+        }
         QTextBrowser::keyPressEvent(event);
     }
 
@@ -526,6 +555,40 @@ protected:
             saveSettings();
             reloadContent();
         });
+
+        QMenu* mathFontMenu = menu.addMenu(tr("Math Font"));
+        QActionGroup* mathFontGroup = new QActionGroup(mathFontMenu);
+        mathFontGroup->setExclusive(true);
+
+        QAction* fontDefault = mathFontMenu->addAction(tr("Default"));
+        fontDefault->setCheckable(true);
+        fontDefault->setChecked(g_mathFontClmPath.isEmpty());
+        mathFontGroup->addAction(fontDefault);
+        connect(fontDefault, &QAction::triggered, this, [this]() {
+            g_mathFontClmPath.clear();
+            saveSettings();
+            reloadContent();
+        });
+
+        mathFontMenu->addSeparator();
+
+        // MarkdownEngine::init() must have already run (reloadContent()
+        // above always calls it) before availableMathFonts() has anything
+        // to report -- true here since this is a context menu on an
+        // already-loaded document.
+        for (const MarkdownEngine::MathFontInfo &font : MarkdownEngine::availableMathFonts()) {
+            QString qDisplayName = QString::fromStdString(font.displayName);
+            QString qClmPath = QString::fromStdString(font.clmPath);
+            QAction* fontAction = mathFontMenu->addAction(qDisplayName);
+            fontAction->setCheckable(true);
+            fontAction->setChecked(g_mathFontClmPath == qClmPath);
+            mathFontGroup->addAction(fontAction);
+            connect(fontAction, &QAction::triggered, this, [this, qClmPath]() {
+                g_mathFontClmPath = qClmPath;
+                saveSettings();
+                reloadContent();
+            });
+        }
 
         menu.exec(event->globalPos());
     }
@@ -639,6 +702,11 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
         settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
     else
         g_zoomMultiplier = settings.value(PLUGNAME "/zoom_multiplier").toDouble();
+
+    if (!settings.contains(PLUGNAME "/math_font"))
+        settings.setValue(PLUGNAME "/math_font", g_mathFontClmPath);
+    else
+        g_mathFontClmPath = settings.value(PLUGNAME "/math_font").toString();
 }
 
 } // extern "C"

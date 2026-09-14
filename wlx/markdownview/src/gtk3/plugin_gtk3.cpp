@@ -12,6 +12,7 @@
 #include <set>
 #include <utility>
 #include <algorithm>
+#include <vector>
 
 #include "wlxplugin.h"
 #include "../core/markdown_engine.h"
@@ -103,6 +104,12 @@ struct Settings {
     // N% } CSS rule (see markdown_engine.cpp's postProcessHtml), so it
     // survives reloads.
     double zoomMultiplier = 1.0;
+    // Empty = MarkdownEngine's own default (Latin Modern Math). Otherwise
+    // a .clm1 path from MarkdownEngine::availableMathFonts() (or one set
+    // by hand, pointing at a font of the user's own) -- selection is by
+    // path, not display name; see markdown_engine.cpp's
+    // resolveMathFontCanonicalName().
+    std::string mathFontClmPath;
 
     void loadOrInitDefaults(const std::string &iniPath, const std::string &pluginName)
     {
@@ -140,6 +147,7 @@ struct Settings {
         autoReloadEnabled = getBool("auto_reload", autoReloadEnabled);
         themeFilePath = getStr("theme_file_path", themeFilePath);
         zoomMultiplier = getDouble("zoom_multiplier", zoomMultiplier);
+        mathFontClmPath = getStr("math_font", mathFontClmPath);
         save(iniPath, pluginName);
     }
 
@@ -152,6 +160,7 @@ struct Settings {
         f << "auto_reload=" << (autoReloadEnabled ? "true" : "false") << "\n";
         f << "theme_file_path=" << themeFilePath << "\n";
         f << "zoom_multiplier=" << zoomMultiplier << "\n";
+        f << "math_font=" << mathFontClmPath << "\n";
     }
 };
 
@@ -237,7 +246,7 @@ void reloadContentNow(MarkdownState *st)
     }
     st->loadInFlight = true;
     bool activeDarkMode = resolveDarkMode();
-    std::string html = MarkdownEngine::renderFileToHtml(st->filePath, activeDarkMode, g_settings.themeFilePath);
+    std::string html = MarkdownEngine::renderFileToHtml(st->filePath, activeDarkMode, g_settings.themeFilePath, g_settings.mathFontClmPath);
     std::string autoResolvedCss = MarkdownEngine::getLastAutoResolvedCssPath();
     if (!autoResolvedCss.empty() && autoResolvedCss != g_settings.themeFilePath) {
         g_settings.themeFilePath = autoResolvedCss;
@@ -388,6 +397,10 @@ gboolean onWebViewKeyPress(GtkWidget *, GdkEventKey *event, gpointer userData) {
         showFindBar(st);
         return TRUE;
     }
+    // Ctrl+Q (close Quick View) is deliberately not handled here -- it
+    // falls through to `return FALSE` below so it propagates to DC's own
+    // window and its hotkey manager can act on it, same as pdfview's GTK3
+    // wrapper and mpv_wayland's GTK3 plugin do for the same key.
     return FALSE;
 }
 GtkWidget *buildFindBar(MarkdownState *st) {
@@ -492,6 +505,18 @@ void onSetModeDark(GtkMenuItem *, gpointer userData) {
 void onSetModeLight(GtkMenuItem *, gpointer userData) {
     g_settings.mode = "light"; saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
 }
+// The font's clm path (the actual selector -- see Settings::mathFontClmPath)
+// is stashed as the item's object data (via g_object_set_data) rather than
+// captured per-lambda, since these items are built in a loop over a
+// runtime-sized vector -- mirrors how onSetModeSystem/Dark/Light don't need this
+// because they're one fixed callback each, but a single shared callback here
+// avoids generating one distinct closure per font.
+void onSetMathFont(GtkMenuItem *item, gpointer userData) {
+    const char *clmPath = static_cast<const char *>(g_object_get_data(G_OBJECT(item), "math-font-clm-path"));
+    g_settings.mathFontClmPath = clmPath ? clmPath : "";
+    saveSettingsNow();
+    reloadContent(static_cast<MarkdownState *>(userData));
+}
 
 gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, WebKitHitTestResult *, gpointer userData)
 {
@@ -557,6 +582,42 @@ gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, We
     GtkWidget *modeItem = gtk_menu_item_new_with_label("Theme Mode");
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(modeItem), modeSub);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), modeItem);
+
+    // Math Font submenu: "Default" plus one entry per
+    // MarkdownEngine::availableMathFonts() (the 8 embedded fonts plus any
+    // hand-dropped .otf/.clm1 pair found in markdownview_fonts/). Selection
+    // is keyed by each font's clm path, not its display name -- see
+    // Settings::mathFontClmPath. Same "build unconnected, set all active
+    // states, THEN connect handlers" ordering as Theme Mode above, for the
+    // same reentrancy reason.
+    GtkWidget *fontSub = gtk_menu_new();
+    GSList *fontGroup = nullptr;
+    GtkWidget *fDefault = gtk_radio_menu_item_new_with_label(fontGroup, "Default");
+    fontGroup = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(fDefault));
+    gtk_menu_shell_append(GTK_MENU_SHELL(fontSub), fDefault);
+
+    std::vector<GtkWidget *> fontItems;
+    std::vector<MarkdownEngine::MathFontInfo> fonts = MarkdownEngine::availableMathFonts();
+    for (const auto &font : fonts) {
+        GtkWidget *fItem = gtk_radio_menu_item_new_with_label(fontGroup, font.displayName.c_str());
+        fontGroup = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(fItem));
+        gtk_menu_shell_append(GTK_MENU_SHELL(fontSub), fItem);
+        g_object_set_data_full(G_OBJECT(fItem), "math-font-clm-path", g_strdup(font.clmPath.c_str()), g_free);
+        fontItems.push_back(fItem);
+    }
+
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(fDefault), g_settings.mathFontClmPath.empty());
+    for (size_t i = 0; i < fontItems.size(); ++i) {
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(fontItems[i]), g_settings.mathFontClmPath == fonts[i].clmPath);
+    }
+
+    g_signal_connect(fDefault, "activate", G_CALLBACK(onSetMathFont), st);
+    for (GtkWidget *fItem : fontItems) {
+        g_signal_connect(fItem, "activate", G_CALLBACK(onSetMathFont), st);
+    }
+    GtkWidget *fontItem = gtk_menu_item_new_with_label("Math Font");
+    gtk_menu_item_set_submenu(GTK_MENU_ITEM(fontItem), fontSub);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), fontItem);
 
     gtk_widget_show_all(menu);
     // Passing NULL here (instead of the WebKit-supplied `event`) as a
