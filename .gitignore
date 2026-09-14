@@ -1,0 +1,44 @@
+# Build output directories: CMake trees, per-toolkit and per-edition builds
+# (build_qt6, build_debug, build_tsan, build-markdownview-offline, ...).
+build/
+build_*/
+build-*/
+# ...except rclone's, which holds build scripts rather than build output.
+!wfx/rclone/build/
+
+# Compiled plugin binaries, produced by build.sh next to their sources.
+*.wcx
+*.wcx64
+*.wdx
+*.wdx64
+*.wfx
+*.wfx64
+*.wlx
+*.wlx64
+# ...except plugman's test fixtures, which are checked in on purpose.
+!plugman/testdata/**
+
+# Intermediate compiler output.
+*.o
+*.obj
+
+# Per-plugin staging directories for bundled runtime libraries.
+# Note: this is deliberately not a blanket "lib/" rule -- MicroTeX and other
+# vendored sources under 3rdparty/ keep their real sources in lib/.
+wcx/diskdir/lib/
+wdx/ooinfo/lib/
+wdx/xpi_wdx/lib/
+wfx/rclone/lib/
+wdx/xpi_wdx/src/xpi_wdx.res
+
+# Release archives, produced at the repository root by build.sh.
+/release/
+/*.zip
+/*.tar.gz
+
+# Local logs and scratch space.
+*.log
+# ...except logview's checked-in sample input.
+!wlx/logview/sample.log
+logs/
+/scratch/
