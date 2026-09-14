@@ -1,2 +1,0 @@
-/usr/bin/ar qc libarchiveview_core.a CMakeFiles/archiveview_core.dir/archiveview_core_autogen/mocs_compilation.cpp.o CMakeFiles/archiveview_core.dir/src/core/ArchiveNames.cpp.o CMakeFiles/archiveview_core.dir/src/core/ZipCentralDirectory.cpp.o CMakeFiles/archiveview_core.dir/src/core/PassphraseBroker.cpp.o CMakeFiles/archiveview_core.dir/src/core/ArchiveScanner.cpp.o CMakeFiles/archiveview_core.dir/src/core/ArchiveExtractor.cpp.o CMakeFiles/archiveview_core.dir/src/core/ArchiveSettings.cpp.o
-/usr/bin/ranlib libarchiveview_core.a

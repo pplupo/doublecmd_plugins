@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/pplupo/repos/plugins-archiveview/wlx/archiveview/build_tsan/cmake_install.cmake",
-		"/home/pplupo/repos/plugins-archiveview/wlx/archiveview/build_tsan/wlxbase_wlqt/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
