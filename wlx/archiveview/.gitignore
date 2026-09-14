@@ -1,3 +1,4 @@
 build/
 build_asan/
+build_tsan/
 tests/fixtures-out/
