@@ -187,16 +187,52 @@ install -m 644 wlx/mdk/build/mdk_qt6.wlx release/wlx/mdk/
 [ -f wlx/mdk/build/mdk_gtk3.wlx ] && install -m 644 wlx/mdk/build/mdk_gtk3.wlx release/wlx/mdk/
 install -m 644 wlx/mdk/*.md release/wlx/mdk/
 
-# markdownview: Qt6 required, GTK3 optional. No longer ships a top-level
-# markdownview.css -- both variants self-seed a correct default CSS file
-# next to their own ini on first run if none is found (see
+# markdownview ships in THREE variants, from the same sources, differing
+# only in two CMake options. They get separate release directories so the
+# zip loop below emits one download each:
+#
+#   markdownview           light   -- everything rendered remotely,   ~10MB
+#   markdownview-vlcharts  charts  -- + local vl-convert figures,     ~94MB
+#   markdownview-offline   offline -- + local Mermaid/PlantUML,      ~103MB
+#
+# The .wlx files inside are deliberately named the same in all three, so a
+# user can swap variants by replacing the file and keeps their settings
+# (all read the same ini and self-seeded CSS). They are alternatives, not
+# co-installable -- that is why one name is correct rather than a clash.
+#
+# None ships a top-level markdownview.css: each self-seeds a correct
+# default next to its own ini on first run if none is found (see
 # src/core/markdown_engine.cpp), so a possibly-stale repo copy isn't
 # needed and would just be a second, inconsistent source of truth.
-mkdir -p release/wlx/markdownview
-mkdir -p wlx/markdownview/build
-(cd wlx/markdownview/build && cmake .. && make)
-install -m 644 wlx/markdownview/build/markdownview_qt6.wlx release/wlx/markdownview/
-[ -f wlx/markdownview/build/markdownview_gtk3.wlx ] && install -m 644 wlx/markdownview/build/markdownview_gtk3.wlx release/wlx/markdownview/
+build_markdownview_variant() {
+  variant_dir="$1"      # release/ subdirectory to populate
+  vlconvert="$2"        # ENABLE_VLCONVERT: ON or OFF
+  local_diagrams="$3"   # ENABLE_LOCAL_DIAGRAMS: ON or OFF
+  # Keyed on the variant name, not on the option values -- vlcharts and
+  # offline both build with ENABLE_VLCONVERT=ON, so keying on that would
+  # make them share (and clobber) one build directory.
+  build_dir="wlx/markdownview/build-${variant_dir}"
+
+  mkdir -p "release/wlx/${variant_dir}" "$build_dir"
+  (cd "$build_dir" && cmake -DENABLE_VLCONVERT="$vlconvert" \
+                            -DENABLE_LOCAL_DIAGRAMS="$local_diagrams" ../ && make)
+  install -m 644 "${build_dir}/markdownview_qt6.wlx" "release/wlx/${variant_dir}/"
+  [ -f "${build_dir}/markdownview_gtk3.wlx" ] \
+    && install -m 644 "${build_dir}/markdownview_gtk3.wlx" "release/wlx/${variant_dir}/"
+}
+
+build_markdownview_variant markdownview          OFF OFF
+build_markdownview_variant markdownview-vlcharts ON  OFF
+
+# The offline variant needs a vendored Rust archive that this build does not
+# produce (it needs a Rust toolchain; see wlx/markdownview/3rdparty/supramark/
+# README.md). Skipped rather than fatal when it's absent, so a checkout
+# without it still produces the other two downloads.
+if [ -f wlx/markdownview/3rdparty/supramark/libmarkdownview_diagrams.a ]; then
+  build_markdownview_variant markdownview-offline ON ON
+else
+  echo "build.sh: skipping markdownview-offline -- 3rdparty/supramark/libmarkdownview_diagrams.a not present"
+fi
 
 # Zip each plugin individually (rather than one big tarball) so a user only
 # has to download the plugin(s) they actually want -- keeps free-tier GitHub

@@ -12,6 +12,21 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(ENABLE_QT6 "Build the Qt6 markdownview plugin" ON)
 option(ENABLE_GTK3 "Build the GTK3 markdownview plugin" ON)
+# Embeds the vendored vl-convert binary (see 3rdparty/vl-convert/README.md)
+# for rendering ```vegalite figure blocks. OFF drops ~84MB from the built
+# .wlx and figures stop rendering entirely (the fenced block is left as
+# plain text) -- figure rendering is a soft dependency, never a hard
+# requirement.
+option(ENABLE_VLCONVERT "Embed the vl-convert binary for Vega-Lite chart rendering" ON)
+# Statically links supramark's mermaid-little / plantuml-little Rust
+# archives (see 3rdparty/supramark/README.md), so Mermaid and PlantUML
+# render in-process instead of at mermaid.ink / plantuml.com. Adds ~14MB.
+# OFF keeps the current web behaviour.
+#
+# Unlike ENABLE_VLCONVERT, the archives are LINKED, not embedded-and-
+# self-seeded: they are C ABI libraries rather than executables, so there
+# is no binary to write out and exec.
+option(ENABLE_LOCAL_DIAGRAMS "Statically link mermaid-little/plantuml-little for offline diagram rendering" OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CAIRO REQUIRED cairo)
@@ -64,6 +79,41 @@ foreach(_pair
     list(APPEND EMBEDDED_FONT_SOURCES "${_generated_cpp}")
 endforeach()
 
+# vl-convert (see 3rdparty/vl-convert/README.md): ~84MB, far past where
+# embed_binary_resource()'s CMake-string hex encoding above stays fast
+# (confirmed live: didn't finish inside 60s at this size, vs. under a
+# second for the font/gnuplot binaries that helper was built for). `ld -r
+# -b binary` embeds the raw bytes directly as an object file instead, in
+# under 100ms at any size, with no text intermediate -- linked straight
+# into markdownview_core as a plain object file, with a tiny generated
+# wrapper .cpp re-exporting ld's mangled _binary_..._start/_end symbols
+# under the stable names chart_render_vegalite.cpp expects.
+set(VLCONVERT_EMBED_SOURCES "")
+if(ENABLE_VLCONVERT)
+    set(_vlc_src "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/vl-convert/vl_convert_linux_x86_64")
+    set(_vlc_obj "${CMAKE_CURRENT_BINARY_DIR}/embedded/vl_convert_linux_x86_64.o")
+    add_custom_command(
+        OUTPUT "${_vlc_obj}"
+        COMMAND ${CMAKE_LINKER} -r -b binary -o "${_vlc_obj}" "vl_convert_linux_x86_64"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/vl-convert"
+        DEPENDS "${_vlc_src}"
+        COMMENT "Embedding vl-convert binary (ld -r -b binary)"
+        VERBATIM
+    )
+    set(_vlc_wrapper "${CMAKE_CURRENT_BINARY_DIR}/embedded/vl_convert_syms.cpp")
+    file(WRITE "${_vlc_wrapper}" "\
+#include <cstddef>\n\
+extern \"C\" {\n\
+extern const unsigned char _binary_vl_convert_linux_x86_64_start[];\n\
+extern const unsigned char _binary_vl_convert_linux_x86_64_end[];\n\
+}\n\
+extern const unsigned char *const vl_convert_binary = _binary_vl_convert_linux_x86_64_start;\n\
+extern const size_t vl_convert_binary_size = (size_t)(_binary_vl_convert_linux_x86_64_end - _binary_vl_convert_linux_x86_64_start);\n\
+")
+    set_source_files_properties("${_vlc_obj}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+    list(APPEND VLCONVERT_EMBED_SOURCES "${_vlc_obj}" "${_vlc_wrapper}")
+endif()
+
 # md4c: a plain-C, toolkit-agnostic CommonMark/GFM parser (replaces md4qt,
 # which forced Qt6::Core on both plugin targets via its QString-typed AST
 # and turned out to need Qt 6.5+ APIs this project doesn't otherwise
@@ -105,8 +155,8 @@ set(QT ON CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/MicroTeX)
 
 # Core Markdown Rendering Library (Static Library) -- toolkit-neutral:
-# md4c (parsing), librsvg+Cairo (SVG rasterization for Mermaid/PlantUML, and
-# direct chart drawing for ```chart blocks -- see chart_render.cpp), a curl
+# md4c (parsing), librsvg+Cairo (SVG rasterization for Mermaid/PlantUML and
+# downscaling of rendered figures -- see chart_render_vegalite.cpp), a curl
 # subprocess (fetching those web renders), MicroTeX's core (LaTeX layout,
 # backend-agnostic) -- no Qt, no GTK. Each plugin target supplies its own
 # renderLatexToPng() implementation (see src/qt6/, src/gtk3/) and links it
@@ -114,9 +164,15 @@ add_subdirectory(3rdparty/MicroTeX)
 add_library(markdownview_core STATIC
     src/core/markdown_engine.cpp
     src/core/diagram_render.cpp
-    src/core/chart_render.cpp
+    # Always compiled, unlike the renderer below: the Kroki path needs the
+    # same spec treatment before POSTing that vl-convert gets before
+    # rendering, so the two editions lay a figure out identically.
+    src/core/vegalite_spec.cpp
+    $<IF:$<BOOL:${ENABLE_VLCONVERT}>,${CMAKE_CURRENT_SOURCE_DIR}/src/core/chart_render_vegalite.cpp,${CMAKE_CURRENT_SOURCE_DIR}/src/core/chart_render_vegalite_stub.cpp>
+    $<IF:$<BOOL:${ENABLE_LOCAL_DIAGRAMS}>,${CMAKE_CURRENT_SOURCE_DIR}/src/core/diagram_render_local.cpp,${CMAKE_CURRENT_SOURCE_DIR}/src/core/diagram_render_local_stub.cpp>
     src/core/embedded_fonts.cpp
     ${EMBEDDED_FONT_SOURCES}
+    ${VLCONVERT_EMBED_SOURCES}
 )
 
 target_include_directories(markdownview_core PUBLIC
@@ -137,6 +193,36 @@ target_link_libraries(markdownview_core PUBLIC
     ${CAIRO_LIBRARIES}
     ${RSVG_LIBRARIES}
 )
+
+# The vendored Rust archives, plus what the Graphviz objects bundled inside
+# plantuml-little's archive resolve against: `z` (gvdevice.c's crc32) and
+# `expat` (htmllex.c's XML parser, built in for HTML label geometry). Both
+# are already pulled into the process by librsvg/GTK, so this adds no new
+# runtime dependency -- the linker just needs them named. `stdc++` because
+# Graphviz's C API wrapper is linked with g++.
+#
+# PUBLIC, and listed AFTER markdownview_core's own sources: static archives
+# are order-sensitive, and the plugin targets link this list transitively.
+if(ENABLE_LOCAL_DIAGRAMS)
+    set(_supramark_lib "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/supramark/libmarkdownview_diagrams.a")
+    if(NOT EXISTS "${_supramark_lib}")
+        message(FATAL_ERROR
+            "ENABLE_LOCAL_DIAGRAMS is ON but ${_supramark_lib} is missing. "
+            "See 3rdparty/supramark/README.md for how to build it.")
+    endif()
+    # ONE archive covering both renderers. supramark's own per-renderer
+    # `staticlib`s cannot both be linked into a single binary -- each bundles
+    # its own Rust std, so the link fails on duplicate `rust_eh_personality`,
+    # `std::panicking::EMPTY_PANIC` and friends. The vendored archive is
+    # built from the small wrapper crate in 3rdparty/supramark/, which
+    # depends on both and therefore links std once.
+    target_link_libraries(markdownview_core PUBLIC
+        "${_supramark_lib}"
+        z
+        expat
+        stdc++
+    )
+endif()
 target_link_directories(markdownview_core PUBLIC ${CAIRO_LIBRARY_DIRS} ${RSVG_LIBRARY_DIRS})
 target_compile_options(markdownview_core PUBLIC ${CAIRO_CFLAGS_OTHER} ${RSVG_CFLAGS_OTHER})
 

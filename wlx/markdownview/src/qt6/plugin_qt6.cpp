@@ -55,6 +55,42 @@ static double g_zoomMultiplier = 1.0;
 // font name frequently isn't the same string we'd show in a menu; see
 // markdown_engine.cpp's resolveMathFontCanonicalName().
 static QString g_mathFontClmPath;
+// Figure rendering: "off" leaves ```vegalite blocks as plain text;
+// anything else renders them -- see MarkdownEngine::setChartRendererMode().
+// The menu writes "on"/"off"; a legacy "cairo"/"auto" left in an existing
+// ini by an older build still reads as "render".
+//
+// In the vlcharts build figures render locally (the vendored vl-convert);
+// in the light build they are POSTed to g_krokiUrl. Either way this is the
+// only switch -- there is no second, local chart backend to fall back to.
+static QString g_chartRenderer = QStringLiteral("on");
+static bool g_mermaidEnabled = true;
+static bool g_plantUmlEnabled = true;
+static bool g_latexEnabled = true;
+// Each notation's render service, overridable so a self-hosted instance
+// can be used instead of the public one. Ini-only, no menu entries -- a
+// URL isn't something to type into a context menu, and repointing one is
+// a one-time setup step. Only g_krokiUrl matters in the vlcharts build,
+// whose figures never leave the machine.
+static QString g_mermaidUrl = QStringLiteral("https://mermaid.ink");
+static QString g_plantUmlUrl = QStringLiteral("http://www.plantuml.com/plantuml");
+static QString g_krokiUrl = QStringLiteral("https://kroki.io");
+
+// Pushes the current g_chartRenderer/g_*Enabled/g_*Url globals into the
+// engine's own process-global state (see
+// MarkdownEngine::setChartRendererMode/setDiagramEnabled/
+// setDiagramServiceUrl) -- these aren't per-render-call parameters like
+// g_mathFontClmPath, so they need an explicit push after every ini load
+// and every menu toggle, before the next reloadContent().
+static void applyEngineRenderSettings() {
+    MarkdownEngine::setChartRendererMode(g_chartRenderer.toStdString());
+    MarkdownEngine::setDiagramEnabled("mermaid", g_mermaidEnabled);
+    MarkdownEngine::setDiagramEnabled("plantuml", g_plantUmlEnabled);
+    MarkdownEngine::setDiagramEnabled("latex", g_latexEnabled);
+    MarkdownEngine::setDiagramServiceUrl("mermaid", g_mermaidUrl.toStdString());
+    MarkdownEngine::setDiagramServiceUrl("plantuml", g_plantUmlUrl.toStdString());
+    MarkdownEngine::setDiagramServiceUrl("vegalite", g_krokiUrl.toStdString());
+}
 
 static bool isSystemDark() {
     QPalette pal = QGuiApplication::palette();
@@ -75,6 +111,13 @@ static void saveSettings() {
     settings.setValue(PLUGNAME "/auto_reload", g_autoReloadEnabled);
     settings.setValue(PLUGNAME "/zoom_multiplier", g_zoomMultiplier);
     settings.setValue(PLUGNAME "/math_font", g_mathFontClmPath);
+    settings.setValue(PLUGNAME "/chart_renderer", g_chartRenderer);
+    settings.setValue(PLUGNAME "/enable_mermaid", g_mermaidEnabled);
+    settings.setValue(PLUGNAME "/enable_plantuml", g_plantUmlEnabled);
+    settings.setValue(PLUGNAME "/enable_latex", g_latexEnabled);
+    settings.setValue(PLUGNAME "/mermaid_url", g_mermaidUrl);
+    settings.setValue(PLUGNAME "/plantuml_url", g_plantUmlUrl);
+    settings.setValue(PLUGNAME "/kroki_url", g_krokiUrl);
     // Explicit sync rather than relying solely on ~QSettings() to flush --
     // no known bug requires this (QSettings' destructor already syncs),
     // but it removes any doubt while diagnosing zoom persistence.
@@ -295,6 +338,18 @@ public:
             // here) on the NEXT open, not a visible crash -- exactly why
             // markdownview_gtk3's ListLoad already wraps this same call the
             // same way.
+            // Render diagrams and figures at this widget's actual device
+            // pixel ratio. An image produced at one scale and displayed at
+            // another is what makes an otherwise clean render look soft or
+            // aliased -- QTextDocument rescales image data without
+            // smoothing. Generating at device resolution while declaring
+            // the logical size in the HTML makes the mapping 1:1.
+            //
+            // MarkdownEngine's setter, not VegaLite's: the latter is a
+            // no-op stub in the build without vl-convert compiled in, so
+            // calling it there silently dropped the ratio and left every
+            // web-rendered image hardcoded to 2x.
+            MarkdownEngine::setDisplayScale(devicePixelRatioF());
             html = MarkdownEngine::renderFileToHtml(
                 m_filePath.toStdString(),
                 activeDarkMode,
@@ -483,7 +538,7 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) override {
         QMenu menu(this);
 
-        QAction* copyAction = menu.addAction(tr("Copy Text"));
+        QAction* copyAction = menu.addAction(tr("Copy"));
         copyAction->setEnabled(textCursor().hasSelection());
         connect(copyAction, &QAction::triggered, this, &MarkdownViewerWidget::copySelection);
 
@@ -589,6 +644,40 @@ protected:
                 reloadContent();
             });
         }
+
+        auto addDiagramToggle = [&](const QString &label, bool &flag) {
+            QAction* a = menu.addAction(label);
+            a->setCheckable(true);
+            a->setChecked(flag);
+            // Captures a pointer, not a reference to the `flag` parameter
+            // itself -- that parameter is a local binding that would be
+            // dangling by the time this lambda actually fires (Qt's
+            // QAction::triggered is asynchronous, long after
+            // addDiagramToggle() returns).
+            bool *flagPtr = &flag;
+            connect(a, &QAction::triggered, this, [this, flagPtr](bool checked) {
+                *flagPtr = checked;
+                saveSettings();
+                applyEngineRenderSettings();
+                reloadContent();
+            });
+        };
+        // Plain on/off, where a three-way "Chart Renderer" submenu used to
+        // offer Matplot++/Cairo/Disabled. Those backends are gone -- one
+        // renderer remains, so a backend choice would be a menu of one.
+        QAction* chartAction = menu.addAction(tr("Render Vega-Lite Charts"));
+        chartAction->setCheckable(true);
+        chartAction->setChecked(g_chartRenderer != QStringLiteral("off"));
+        connect(chartAction, &QAction::triggered, this, [this](bool checked) {
+            g_chartRenderer = checked ? QStringLiteral("on") : QStringLiteral("off");
+            saveSettings();
+            applyEngineRenderSettings();
+            reloadContent();
+        });
+
+        addDiagramToggle(tr("Render Mermaid Diagrams"), g_mermaidEnabled);
+        addDiagramToggle(tr("Render PlantUML Diagrams"), g_plantUmlEnabled);
+        addDiagramToggle(tr("Render LaTeX Math"), g_latexEnabled);
 
         menu.exec(event->globalPos());
     }
@@ -707,6 +796,43 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct* dps)
         settings.setValue(PLUGNAME "/math_font", g_mathFontClmPath);
     else
         g_mathFontClmPath = settings.value(PLUGNAME "/math_font").toString();
+
+    if (!settings.contains(PLUGNAME "/chart_renderer"))
+        settings.setValue(PLUGNAME "/chart_renderer", g_chartRenderer);
+    else
+        g_chartRenderer = settings.value(PLUGNAME "/chart_renderer").toString().toLower();
+
+    if (!settings.contains(PLUGNAME "/enable_mermaid"))
+        settings.setValue(PLUGNAME "/enable_mermaid", g_mermaidEnabled);
+    else
+        g_mermaidEnabled = settings.value(PLUGNAME "/enable_mermaid").toBool();
+
+    if (!settings.contains(PLUGNAME "/enable_plantuml"))
+        settings.setValue(PLUGNAME "/enable_plantuml", g_plantUmlEnabled);
+    else
+        g_plantUmlEnabled = settings.value(PLUGNAME "/enable_plantuml").toBool();
+
+    if (!settings.contains(PLUGNAME "/enable_latex"))
+        settings.setValue(PLUGNAME "/enable_latex", g_latexEnabled);
+    else
+        g_latexEnabled = settings.value(PLUGNAME "/enable_latex").toBool();
+
+    if (!settings.contains(PLUGNAME "/mermaid_url"))
+        settings.setValue(PLUGNAME "/mermaid_url", g_mermaidUrl);
+    else
+        g_mermaidUrl = settings.value(PLUGNAME "/mermaid_url").toString();
+
+    if (!settings.contains(PLUGNAME "/plantuml_url"))
+        settings.setValue(PLUGNAME "/plantuml_url", g_plantUmlUrl);
+    else
+        g_plantUmlUrl = settings.value(PLUGNAME "/plantuml_url").toString();
+
+    if (!settings.contains(PLUGNAME "/kroki_url"))
+        settings.setValue(PLUGNAME "/kroki_url", g_krokiUrl);
+    else
+        g_krokiUrl = settings.value(PLUGNAME "/kroki_url").toString();
+
+    applyEngineRenderSettings();
 }
 
 } // extern "C"

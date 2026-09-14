@@ -1,0 +1,52 @@
+[package]
+name = "markdownview-diagrams"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Single C-ABI static library exposing supramark's mermaid-little and plantuml-little to markdownview"
+
+[lib]
+# ONE staticlib holding both renderers, which is the entire reason this
+# crate exists. supramark ships a ready-made native wrapper per renderer
+# (crates/<name>/packages/native), but each is its own `staticlib` and so
+# bundles its own copy of Rust's std and of supramark-font-metrics. Linking
+# both into one .wlx fails outright:
+#
+#   multiple definition of `supramark_install_metrics_callback'
+#   multiple definition of `rust_eh_personality'
+#   multiple definition of `std::panicking::EMPTY_PANIC'
+#
+# Depending on both crates from a single staticlib links std once and
+# resolves it. The C ABI below is deliberately the same shape as the two
+# upstream headers, minus the duplication.
+crate-type = ["staticlib"]
+
+[dependencies]
+# Paths point into a supramark checkout beside this crate -- see
+# ../README.md for the clone step. `default-features = false` drops the
+# CLI (env_logger) and, for plantuml, `remote` (ureq); neither belongs in
+# an embedded renderer.
+#
+# metrics-ffi-callback on BOTH, matching supramark's own native packages:
+# the family of metrics-* impls is mutually exclusive, and the host
+# installs its measurement bridge through the single
+# markdownview_diagrams_install_metrics_callback below.
+mermaid-little = { path = "../supramark-src/crates/mermaid-little", default-features = false, features = ["metrics-ffi-callback"] }
+plantuml-little = { path = "../supramark-src/crates/plantuml-little", default-features = false, features = ["metrics-ffi-callback"] }
+font-metrics = { package = "supramark-font-metrics", path = "../supramark-src/crates/font-metrics", default-features = false, features = ["metrics-ffi-callback"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+# panic = "unwind" (the default, stated here because it is a deliberate
+# choice, not an oversight). supramark's own native packages build under
+# panic = "abort" and say so in their comments -- correct for a React
+# Native host, wrong here. This archive is linked into a Double Commander
+# LISTER PLUGIN: aborting takes the user's file manager down with it. With
+# unwinding, catch_unwind in lib.rs turns a panic on some malformed
+# diagram into an error code, and the block falls back to plain text like
+# any other render failure.
+panic = "unwind"

@@ -47,6 +47,57 @@ std::vector<MathFontInfo> availableMathFonts();
 void setPluginConfigDir(const std::string &dir);
 
 /**
+ * Enable/disable rendering for one diagram kind -- "mermaid", "plantuml",
+ * or "latex". All default to enabled. Disabled means exactly what a
+ * render failure already means for that kind: mermaid/plantuml fenced
+ * blocks show as plain text (the raw code block); LaTeX math shows as
+ * plain, unrendered text. Unrecognized kind names are a no-op. Call
+ * before any render* call below; persists until changed again.
+ */
+void setDiagramEnabled(const std::string &kind, bool enabled);
+
+/**
+ * Base URL of the service that renders one diagram kind -- "mermaid"
+ * (default "https://mermaid.ink"), "plantuml" (default
+ * "http://www.plantuml.com/plantuml"), or "vegalite", which is a Kroki
+ * base (default "https://kroki.io"). Point any of them at a self-hosted
+ * instance to keep diagram sources inside your own network. An empty URL
+ * or an unrecognized kind is a no-op. Call before any render* call below;
+ * persists until changed again.
+ *
+ * "vegalite" is only consulted when the local vl-convert renderer is NOT
+ * compiled in -- that build renders figures locally and never reaches the
+ * network. The other two always go through their service.
+ */
+void setDiagramServiceUrl(const std::string &kind, const std::string &url);
+
+/**
+ * Physical pixels per logical pixel of the display the output is headed
+ * for (a HiDPI screen is typically 2.0; clamped to 0.5..4.0, anything
+ * else ignored). Diagram and figure images are rasterized at this
+ * multiple of their logical size while still being DECLARED at logical
+ * size in the HTML, so they map 1:1 onto device pixels.
+ *
+ * Getting this wrong is visible: an image rasterized at a different
+ * factor than it is displayed at gets rescaled by the toolkit, and
+ * QTextDocument does not smooth-scale image data, so a clean render
+ * arrives on screen aliased. Call before any render* call below;
+ * persists until changed again.
+ */
+void setDisplayScale(double scale);
+
+/**
+ * Whether ```vegalite blocks render at all -- "off" leaves them as plain
+ * text, any other value renders them. Kept as a mode string rather than a
+ * bool purely so existing ini files, which hold this under the legacy
+ * `chart_renderer` key with values like "cairo" or "auto" from when this
+ * selected between chart BACKENDS, keep working: every one of those still
+ * means "render". Call before any render* call below; persists until
+ * changed again.
+ */
+void setChartRendererMode(const std::string &mode);
+
+/**
  * After a render call, returns the CSS file path the engine auto-resolved
  * to when customCssPath was empty or didn't point at an existing file
  * (i.e. it fell through to markdownview.css or ~/.config/markdownpart.css,

@@ -1,6 +1,13 @@
 build/
+build-*/
 .qt/
 *.o
 *.a
 *.so
 *.wlx
+
+# The one .a that is a dependency rather than build output: supramark's
+# Mermaid/PlantUML renderers, vendored the same way 3rdparty/vl-convert's
+# binary is, so the offline edition builds from a clone without needing a
+# Rust toolchain. See 3rdparty/supramark/README.md for how it is produced.
+!3rdparty/supramark/libmarkdownview_diagrams.a

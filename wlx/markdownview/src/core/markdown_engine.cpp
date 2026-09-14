@@ -1,7 +1,8 @@
 #include "markdown_engine.h"
 #include "diagram_render.h"
 #include "latex_render.h"
-#include "chart_render.h"
+#include "chart_render_vegalite.h"
+#include "vegalite_spec.h"
 #include "embedded_fonts.h"
 
 #include <md4c-html.h>
@@ -116,6 +117,28 @@ std::string g_pluginConfigDir;
 // instead). Read via MarkdownEngine::getLastAutoResolvedCssPath() so
 // callers can persist the actual file in use back into their ini.
 std::string g_lastAutoResolvedCssPath;
+
+// Per-diagram-kind enable flags, set via MarkdownEngine::setDiagramEnabled()
+// (called once at startup from the plugin's ini-backed settings, and again
+// whenever the user flips one from the context menu). Default-on, matching
+// this plugin's original always-render behavior.
+bool g_mermaidEnabled = true;
+bool g_plantUmlEnabled = true;
+bool g_latexEnabled = true;
+bool g_chartsEnabled = true;
+
+// Physical pixels per logical pixel, set via MarkdownEngine::setDisplayScale()
+// from each toolkit's own idea of it. Every SVG rasterized below is rendered
+// at this multiple of its logical size and then DECLARED at logical size in
+// the HTML, so it lands 1:1 on device pixels.
+//
+// This used to be VegaLite::setDisplayScale() alone, which was a real
+// function only in the vl-convert build -- the light edition compiled the
+// stub, where it is a no-op, so the scale was silently discarded and web
+// renders were hardcoded to 2.0x. On an ordinary 1.0-ratio display that
+// makes QTextDocument shrink every image 2:1, and it does not smooth-scale
+// image data, which is exactly what "the figures look aliased" was.
+double g_displayScale = 1.0;
 
 std::string htmlUnescape(const std::string &s) {
     std::string out;
@@ -329,53 +352,108 @@ std::string parseMarkdownToHtml(const std::string &markdown) {
     return html;
 }
 
-// --- Fenced code block post-processing: mermaid/plantuml -> rendered image ---
+// --- Fenced code block post-processing: vegalite/mermaid/plantuml -> image ---
 
-// Full definition + implementation is much further down (resolveChartCssFonts()),
-// alongside the rest of the CSS-handling code it depends on (DEFAULT_CSS,
-// resolveActiveCss(), etc.) -- forward-declared here since it's needed by
-// renderChartImgTag() below, which textually comes first.
+// Full definition (resolveChartFonts()) is much further down, alongside
+// the CSS-handling code area it used to depend on -- forward-declared here
+// since it's needed by the figure renderer below, which textually
+// comes first.
 struct ChartCssFonts {
     std::string bodyFamily;
     std::string titleFamily;
     bool titleBold = true;
 };
-ChartCssFonts resolveChartCssFonts(const std::string &customCssPath);
+ChartCssFonts resolveChartFonts();
 
-// ```chart blocks (a JSON spec, same shape ~/repos/reports' charts.py
-// uses) render straight to PNG via Cairo -- no SVG intermediate, unlike
-// mermaid/plantuml below, so it's handled separately rather than folded
-// into the svg/rasterize pipeline the other two share.
-std::string renderChartImgTag(const std::string &code, bool darkMode, const std::string &customCssPath) {
+std::string renderVegaLiteImgTag(const std::string &code, bool darkMode) {
+    if (!g_chartsEnabled) return {}; // caller's empty-result contract leaves the block as plain text
     int w = 0, h = 0;
-    ChartCssFonts fonts = resolveChartCssFonts(customCssPath);
-    std::vector<uint8_t> png = ChartRender::renderChartToPng(code, darkMode, fonts.bodyFamily, fonts.titleFamily, fonts.titleBold, w, h);
-    if (png.empty()) return {};
+    std::vector<uint8_t> png;
+    // Keyed on isCompiledIn(), NOT isAvailable(): a build that ships
+    // vl-convert renders figures locally or not at all. Falling back to the
+    // network because self-seeding happened to fail would send specs off
+    // the machine from the edition whose whole point is that it doesn't.
+    if (VegaLite::isCompiledIn()) {
+        ChartCssFonts fonts = resolveChartFonts();
+        png = VegaLite::renderVegaLiteSpecPng(code, darkMode, fonts.bodyFamily, w, h);
+    } else {
+        std::string svg = DiagramRender::renderVegaLiteWeb(code, darkMode);
+        // g_displayScale, not a fixed 2.0: librsvg rasterizes the vector
+        // at whatever size is asked for, antialiased, so asking for
+        // exactly the device pixels the image will occupy leaves the
+        // toolkit no rescaling to do. Rendering at 2x and declaring 1x
+        // hands QTextDocument a 2:1 downscale it performs without
+        // smoothing -- fine to look at as a raw PNG, aliased on screen.
+        if (!svg.empty())
+            png = DiagramRender::svgToHighDpiPng(svg, (float)g_displayScale, darkMode, w, h);
+    }
+    if (png.empty()) return {}; // caller's empty-result contract leaves the block as plain text
     std::string b64 = base64Encode(png);
-    std::string tag = "<p align=\"center\">\n<img src=\"data:image/png;base64," + b64 + "\"";
+    // Same line-height:1 wrapper as every other block image here -- see
+    // renderVegaLiteImgTag for why QTextDocument needs it.
+    // Figure and caption go in a fixed-width table rather than as two
+    // sibling paragraphs. A caption paragraph is laid out at the
+    // document's full text width, so under a figure narrower than the
+    // viewport it runs far wider than the image it belongs to and reads
+    // as unrelated body text rather than as that figure's caption.
+    // Constraining the table to the image's own width makes the caption
+    // wrap to the figure's edges, which is what visually attaches them.
+    // A table is used because QTextDocument's CSS support does not
+    // include the max-width/margin:auto idiom this would otherwise use.
+    std::string widthAttr = w > 0 ? " width=\"" + std::to_string(w) + "\"" : "";
+    std::string tag = "<table align=\"center\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\"" + widthAttr +
+                      "><tr><td style=\"line-height:1;\">"
+                      "<img src=\"data:image/png;base64," + b64 + "\"";
     if (w > 0 && h > 0) tag += " width=\"" + std::to_string(w) + "\" height=\"" + std::to_string(h) + "\"";
-    tag += " />\n</p>\n";
+    tag += " /></td></tr>\n";
+    // The caption, shown under the figure. reportgen.py already promotes
+    // the same text to a visible caption paragraph in the PDF (see its
+    // image_caption_replacer), so without this the preview is the one
+    // place a figure's own key/caveats are missing -- which reads as a
+    // chart that never explained its markers, when in fact the
+    // explanation existed and simply had nowhere to go on screen.
+    std::string caption = VegaLiteSpec::captionOf(code);
+    if (!caption.empty())
+        tag += "<tr><td class=\"figure-caption\"><small><em>" +
+               htmlEscape(caption) + "</em></small></td></tr>\n";
+    tag += "</table>\n";
     return tag;
 }
 
 std::string renderDiagramImgTag(const std::string &lang, const std::string &code, bool darkMode, const std::string &customCssPath) {
-    if (lang == "chart") return renderChartImgTag(code, darkMode, customCssPath);
+    if (lang == "vegalite") return renderVegaLiteImgTag(code, darkMode);
     std::string svg;
     if (lang == "mermaid") {
-        svg = DiagramRender::renderMermaidWeb(code, darkMode);
+        if (!g_mermaidEnabled) return {}; // caller's empty-result contract leaves the fenced block as plain text
+        svg = DiagramRender::renderMermaid(code, darkMode);
         if (!svg.empty()) svg = DiagramRender::fixMermaidSvgText(svg, darkMode);
     } else { // plantuml / puml
-        svg = DiagramRender::renderPlantUmlWeb(code, darkMode);
+        if (!g_plantUmlEnabled) return {};
+        svg = DiagramRender::renderPlantUml(code, darkMode);
         if (!svg.empty() && darkMode) svg = DiagramRender::fixPlantUmlSvgDark(svg);
     }
     if (svg.empty()) return {};
 
+    // Same display-scale reasoning as renderVegaLiteImgTag above: match the
+    // device pixels the image will actually occupy, rather than rasterizing
+    // at a fixed 2x and letting the toolkit rescale it unsmoothed.
     int w = 0, h = 0;
-    std::vector<uint8_t> png = DiagramRender::svgToHighDpiPng(svg, 2.0f, darkMode, w, h);
+    std::vector<uint8_t> png = DiagramRender::svgToHighDpiPng(svg, (float)g_displayScale, darkMode, w, h);
     if (png.empty()) return {};
 
     std::string b64 = base64Encode(png);
-    std::string tag = "<p align=\"center\">\n<img src=\"data:image/png;base64," + b64 + "\"";
+    // style="line-height:1": QTextDocument (this plugin's rich-text
+    // engine) applies the SURROUNDING body text's line-height (1.6, see
+    // markdownview.css) to this paragraph's reserved height too, even
+    // though its only content is a single block image -- for a real
+    // report chart at ~500-800px tall, 0.6x of that becomes 300-500px of
+    // pure blank space between the image and whatever follows, with
+    // nothing in the HTML markup itself (no stray blank paragraphs) to
+    // explain it. Confirmed live via a Qt offscreen render of this exact
+    // plugin's real output: this one property removes the gap entirely,
+    // with the image's own displayed size completely unaffected (the
+    // explicit width/height attributes below are unrelated to this).
+    std::string tag = "<p align=\"center\" style=\"line-height:1;\">\n<img src=\"data:image/png;base64," + b64 + "\"";
     if (w > 0 && h > 0) tag += " width=\"" + std::to_string(w) + "\" height=\"" + std::to_string(h) + "\"";
     tag += " />\n</p>\n";
     return tag;
@@ -410,7 +488,7 @@ bool findNextCodeBlock(const std::string &html, size_t from, CodeBlockMatch &out
         // Must be immediately followed by `>` (matches the original
         // regex's literal `">` right after the captured language group).
         if (langEnd + 1 >= html.size() || html[langEnd + 1] != '>') { from = langEnd + 1; continue; }
-        if (lang != "mermaid" && lang != "plantuml" && lang != "puml" && lang != "chart") { from = langEnd + 1; continue; }
+        if (lang != "mermaid" && lang != "plantuml" && lang != "puml" && lang != "vegalite") { from = langEnd + 1; continue; }
 
         size_t codeStart = langEnd + 2;
         static const std::string closeTag = "</code></pre>";
@@ -453,8 +531,11 @@ std::string replaceDiagramBlocks(const std::string &htmlIn, bool darkMode, const
 
 std::string renderMathTag(const std::string &tex, bool isDisplay, bool darkMode, const std::string &mathFontClmPath) {
     int w = 0, h = 0;
-    std::string resolvedFontName = resolveMathFontCanonicalName(mathFontClmPath);
-    std::vector<uint8_t> png = renderLatexToPng(tex, darkMode, resolvedFontName, w, h);
+    std::vector<uint8_t> png;
+    if (g_latexEnabled) {
+        std::string resolvedFontName = resolveMathFontCanonicalName(mathFontClmPath);
+        png = renderLatexToPng(tex, darkMode, resolvedFontName, w, h);
+    }
     if (png.empty()) {
         // Fallback: plain text, same shape as the original md4qt-based code's
         // non-LaTeX/parse-failure fallback. `tex` is the raw (unescaped)
@@ -475,7 +556,12 @@ std::string renderMathTag(const std::string &tex, bool isDisplay, bool darkMode,
     // makes that size explicit for the zoom feature to read.
     if (w > 0 && h > 0) imgTag += " width=\"" + std::to_string(w) + "\" height=\"" + std::to_string(h) + "\"";
     imgTag += " />";
-    return isDisplay ? ("<p align=\"center\">" + imgTag + "</p>") : ("<span class=\"math inline\">" + imgTag + "</span>");
+    // style="line-height:1": same fix, same reason as renderVegaLiteImgTag/
+    // renderDiagramImgTag above -- QTextDocument reserves body line-height
+    // (1.6x) worth of extra blank space below a block image otherwise. A
+    // tall multi-line display equation is exactly the LaTeX case this
+    // bites hardest.
+    return isDisplay ? ("<p align=\"center\" style=\"line-height:1;\">" + imgTag + "</p>") : ("<span class=\"math inline\">" + imgTag + "</span>");
 }
 
 // Hand-written scanner replacing what used to be
@@ -686,111 +772,28 @@ std::string resolveActiveCss(const std::string &customCssPath) {
     return cssStr;
 }
 
-std::string trim(const std::string &s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
-}
-
-// --- Chart title/body font: mirror the active CSS's own fonts ---
+// --- Chart title/body font: fixed to IBM Plex Sans throughout ---
 //
-// Cairo's "toy" text API (chart_render.cpp) takes one bare family name, not
-// a CSS-style comma-separated fallback stack -- so picking a usable name
-// out of a real stack like `-apple-system, BlinkMacSystemFont, "Segoe UI",
-// Roboto, Helvetica, Arial, sans-serif` (the shipped default theme's body
-// rule) means skipping the Apple/Windows-only aliases up front (never real
-// installed font names on Linux) and taking the first genuinely-named
-// entry after that -- "Roboto" here. Fontconfig substitutes silently if
-// the chosen name isn't actually installed (same graceful-degradation
-// behavior the plain "sans-serif" default already relied on), so this is
-// a best-effort match, not a guarantee of a pixel-identical font.
-std::string pickConcreteFontFamily(const std::string &rawFontFamilyValue) {
-    static const std::vector<std::string> kSkipAliases = {
-        "-apple-system", "blinkmacsystemfont", "segoe ui", "system-ui", "-webkit-system-font"
-    };
-    static const std::vector<std::string> kGenericKeywords = {
-        "sans-serif", "serif", "monospace", "cursive", "fantasy"
-    };
-    std::string firstGeneric;
-    size_t pos = 0;
-    while (pos < rawFontFamilyValue.size()) {
-        size_t comma = rawFontFamilyValue.find(',', pos);
-        std::string token = rawFontFamilyValue.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
-        pos = (comma == std::string::npos) ? rawFontFamilyValue.size() : comma + 1;
-        token = trim(token);
-        if (token.size() >= 2 && (token.front() == '"' || token.front() == '\'') && token.back() == token.front())
-            token = token.substr(1, token.size() - 2);
-        if (token.empty()) continue;
-        std::string lower = token;
-        for (char &c : lower) c = (char)std::tolower((unsigned char)c);
-        bool isSkipAlias = std::find(kSkipAliases.begin(), kSkipAliases.end(), lower) != kSkipAliases.end();
-        if (isSkipAlias) continue;
-        bool isGeneric = std::find(kGenericKeywords.begin(), kGenericKeywords.end(), lower) != kGenericKeywords.end();
-        if (isGeneric) { if (firstGeneric.empty()) firstGeneric = token; continue; }
-        return token; // first concrete (non-alias, non-generic) name found
-    }
-    return firstGeneric; // nothing concrete -- fall back to whatever generic keyword was present, or "" if none
-}
-
-bool isBoldCssWeight(const std::string &weightValue) {
-    std::string v = trim(weightValue);
-    for (char &c : v) c = (char)std::tolower((unsigned char)c);
-    if (v == "bold" || v == "bolder") return true;
-    try { return std::stoi(v) >= 600; } catch (...) { return false; }
-}
-
-// Finds the `{ ... }` block body for a CSS rule whose selector list
-// contains `token` as a whole word (e.g. "h1" matches "h1, h2, h3 { ... }"
-// but not "th1" or "phi1"). Hand-written rather than std::regex-based --
-// this file already avoids std::regex entirely (see findNextCodeBlock's
-// comment for why: a real, confirmed-live SIGSEGV in libstdc++'s regex
-// locale setup, not a style preference).
-std::string findCssRuleBlock(const std::string &css, const std::string &token) {
-    size_t searchFrom = 0;
-    while (true) {
-        size_t pos = css.find(token, searchFrom);
-        if (pos == std::string::npos) return "";
-        char before = (pos == 0) ? '\0' : css[pos - 1];
-        char after = (pos + token.size() < css.size()) ? css[pos + token.size()] : '\0';
-        bool beforeOk = before == '\0' || before == ',' || before == '{' || before == '}' || std::isspace((unsigned char)before);
-        bool afterOk = after == '\0' || after == ',' || after == '{' || std::isspace((unsigned char)after);
-        if (beforeOk && afterOk) {
-            size_t brace = css.find('{', pos);
-            if (brace == std::string::npos) return "";
-            size_t closeBrace = css.find('}', brace); // CSS rules don't nest -- first close is the match
-            if (closeBrace == std::string::npos) return "";
-            return css.substr(brace + 1, closeBrace - brace - 1);
-        }
-        searchFrom = pos + token.size();
-    }
-}
-
-std::string cssPropertyValue(const std::string &block, const std::string &prop) {
-    size_t p = block.find(prop);
-    if (p == std::string::npos) return "";
-    p = block.find(':', p + prop.size());
-    if (p == std::string::npos) return "";
-    ++p;
-    size_t end = block.find(';', p);
-    return trim(block.substr(p, (end == std::string::npos ? block.size() : end) - p));
-}
-
-// ChartCssFonts is forward-declared (with renderChartImgTag(), its first
-// caller) up near the top of this fenced-code-block-handling section.
-ChartCssFonts resolveChartCssFonts(const std::string &customCssPath) {
-    std::string css = resolveActiveCss(customCssPath);
-    std::string bodyRaw = cssPropertyValue(findCssRuleBlock(css, "body"), "font-family");
-    std::string headingBlock = findCssRuleBlock(css, "h1");
-    std::string headingRaw = cssPropertyValue(headingBlock, "font-family");
-    if (headingRaw.empty()) headingRaw = bodyRaw; // default theme's h1..h6 rule doesn't redefine font-family, only weight/size
-
+// charts.py (the matplotlib renderer these report documents were
+// originally designed for) hardcodes PLEX_SANS = "IBM Plex Sans" for
+// body/axis text and PLEX_SERIF = "IBM Plex Serif" bold for the title.
+// This used to mirror that split exactly -- title in the serif, body in
+// the sans -- but that meant the Vega-Lite chart renderer's title never
+// actually matched markdownview.css's own body font (also IBM Plex Sans),
+// which reads as "the chart ignores the document's font" even though it
+// was deliberately matching a DIFFERENT source of truth (charts.py) --
+// confirmed as a real complaint once seen rendered. Both fields are IBM
+// Plex Sans now (title kept bold for visual weight, just not a different
+// family) so the chart's title agrees with the rest of the theme it's
+// embedded in. Fontconfig substitutes silently if a name isn't actually
+// installed (same graceful-degradation matplotlib's font manager gets),
+// so this is a best-effort match, not a guarantee of a pixel-identical
+// font on every machine.
+ChartCssFonts resolveChartFonts() {
     ChartCssFonts fonts;
-    fonts.bodyFamily = pickConcreteFontFamily(bodyRaw);
-    fonts.titleFamily = pickConcreteFontFamily(headingRaw);
-    if (fonts.titleFamily.empty()) fonts.titleFamily = fonts.bodyFamily;
-    std::string weightRaw = cssPropertyValue(headingBlock, "font-weight");
-    fonts.titleBold = weightRaw.empty() ? true : isBoldCssWeight(weightRaw); // headings are almost always bold; default theme sets 600 explicitly
+    fonts.bodyFamily = "IBM Plex Sans";
+    fonts.titleFamily = "IBM Plex Sans";
+    fonts.titleBold = true;
     return fonts;
 }
 
@@ -1104,6 +1107,38 @@ void init() {
 
 void setPluginConfigDir(const std::string &dir) {
     g_pluginConfigDir = dir;
+}
+
+void setDiagramEnabled(const std::string &kind, bool enabled) {
+    if (kind == "mermaid") g_mermaidEnabled = enabled;
+    else if (kind == "plantuml") g_plantUmlEnabled = enabled;
+    else if (kind == "latex") g_latexEnabled = enabled;
+}
+
+void setDisplayScale(double scale) {
+    // Clamped: a nonsense value here silently multiplies every render's
+    // pixel budget. Same bounds VegaLite::setDisplayScale() applies.
+    if (!(scale > 0.5 && scale <= 4.0)) return;
+    g_displayScale = scale;
+    // Forwarded so the local vl-convert renderer keeps sizing its own
+    // output the same way. A no-op in the light build's stub, which is
+    // fine -- there, figures go through the SVG path above instead.
+    VegaLite::setDisplayScale(scale);
+}
+
+void setDiagramServiceUrl(const std::string &kind, const std::string &url) {
+    if (kind == "mermaid") DiagramRender::setMermaidBaseUrl(url);
+    else if (kind == "plantuml") DiagramRender::setPlantUmlBaseUrl(url);
+    else if (kind == "vegalite") DiagramRender::setKrokiBaseUrl(url);
+}
+
+// Kept as the settings-facing name both plugin targets already call
+// (see plugin_qt6.cpp / plugin_gtk3.cpp) even though there is only one
+// figure renderer now: "off" still means "don't render figures at all",
+// which is a real thing to want on a slow machine. Any other value
+// enables rendering, so a legacy "cairo"/"auto" value keeps working.
+void setChartRendererMode(const std::string &mode) {
+    g_chartsEnabled = (mode != "off");
 }
 
 std::string getLastAutoResolvedCssPath() {

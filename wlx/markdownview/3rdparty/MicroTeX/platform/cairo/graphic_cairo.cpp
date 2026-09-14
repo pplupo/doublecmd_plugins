@@ -1,4 +1,10 @@
 #include <fontconfig/fontconfig.h>
+// FcFreeTypeQuery (used below to read a font's family straight out of
+// its file) lives here, not in fontconfig.h. Upstream MicroTeX gets it
+// transitively on the toolchains it was developed against; on a current
+// fontconfig it is not pulled in, and the GTK3 target failed to compile
+// with "FcFreeTypeQuery was not declared in this scope". Vendored patch.
+#include <fontconfig/fcfreetype.h>
 // #include <cairo/cairo-ft.h>
 #include <cairo-ft.h>
 #include <pango/pangocairo.h>

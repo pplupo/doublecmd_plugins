@@ -1,0 +1,5 @@
+# Build output of the wrapper crate, and the supramark checkout its path
+# dependencies point at. Neither belongs in the repo -- only the built
+# libmarkdownview_diagrams.a does. See README.md.
+markdownview-diagrams/target/
+supramark-src/

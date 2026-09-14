@@ -110,6 +110,19 @@ struct Settings {
     // path, not display name; see markdown_engine.cpp's
     // resolveMathFontCanonicalName().
     std::string mathFontClmPath;
+    // "off" leaves ```vegalite blocks as plain text, any other value
+    // renders them -- see MarkdownEngine::setChartRendererMode(), and the
+    // matching comment on plugin_qt6.cpp's g_chartRenderer.
+    std::string chartRenderer = "on";
+    bool mermaidEnabled = true;
+    bool plantUmlEnabled = true;
+    bool latexEnabled = true;
+    // Each notation's render service, overridable so a self-hosted
+    // instance can be used instead of the public one. Ini-only, no menu
+    // entries -- see the matching comment on plugin_qt6.cpp's g_mermaidUrl.
+    std::string mermaidUrl = "https://mermaid.ink";
+    std::string plantUmlUrl = "http://www.plantuml.com/plantuml";
+    std::string krokiUrl = "https://kroki.io";
 
     void loadOrInitDefaults(const std::string &iniPath, const std::string &pluginName)
     {
@@ -148,6 +161,13 @@ struct Settings {
         themeFilePath = getStr("theme_file_path", themeFilePath);
         zoomMultiplier = getDouble("zoom_multiplier", zoomMultiplier);
         mathFontClmPath = getStr("math_font", mathFontClmPath);
+        chartRenderer = getStr("chart_renderer", chartRenderer);
+        mermaidEnabled = getBool("enable_mermaid", mermaidEnabled);
+        plantUmlEnabled = getBool("enable_plantuml", plantUmlEnabled);
+        latexEnabled = getBool("enable_latex", latexEnabled);
+        mermaidUrl = getStr("mermaid_url", mermaidUrl);
+        plantUmlUrl = getStr("plantuml_url", plantUmlUrl);
+        krokiUrl = getStr("kroki_url", krokiUrl);
         save(iniPath, pluginName);
     }
 
@@ -161,11 +181,35 @@ struct Settings {
         f << "theme_file_path=" << themeFilePath << "\n";
         f << "zoom_multiplier=" << zoomMultiplier << "\n";
         f << "math_font=" << mathFontClmPath << "\n";
+        f << "chart_renderer=" << chartRenderer << "\n";
+        f << "enable_mermaid=" << (mermaidEnabled ? "true" : "false") << "\n";
+        f << "enable_plantuml=" << (plantUmlEnabled ? "true" : "false") << "\n";
+        f << "enable_latex=" << (latexEnabled ? "true" : "false") << "\n";
+        f << "mermaid_url=" << mermaidUrl << "\n";
+        f << "plantuml_url=" << plantUmlUrl << "\n";
+        f << "kroki_url=" << krokiUrl << "\n";
     }
 };
 
 Settings g_settings;
 std::string g_configPath;
+
+// Pushes g_settings' renderer-related fields into MarkdownEngine's own
+// process-global state (see MarkdownEngine::setChartRendererMode/
+// setDiagramEnabled/setDiagramServiceUrl) -- unlike
+// g_settings.mathFontClmPath, these aren't per-render-call parameters, so
+// they need an explicit push after every ini load and every menu toggle,
+// before the next reloadContent().
+void applyEngineRenderSettings()
+{
+    MarkdownEngine::setChartRendererMode(g_settings.chartRenderer);
+    MarkdownEngine::setDiagramEnabled("mermaid", g_settings.mermaidEnabled);
+    MarkdownEngine::setDiagramEnabled("plantuml", g_settings.plantUmlEnabled);
+    MarkdownEngine::setDiagramEnabled("latex", g_settings.latexEnabled);
+    MarkdownEngine::setDiagramServiceUrl("mermaid", g_settings.mermaidUrl);
+    MarkdownEngine::setDiagramServiceUrl("plantuml", g_settings.plantUmlUrl);
+    MarkdownEngine::setDiagramServiceUrl("vegalite", g_settings.krokiUrl);
+}
 
 bool resolveDarkMode()
 {
@@ -246,6 +290,12 @@ void reloadContentNow(MarkdownState *st)
     }
     st->loadInFlight = true;
     bool activeDarkMode = resolveDarkMode();
+    // Rasterize diagrams and figures at this display's device pixel ratio,
+    // matching what the Qt6 target does with devicePixelRatioF(). GTK's
+    // scale factor is an integer (1 on an ordinary screen, 2 on HiDPI),
+    // which is exactly the granularity this needs.
+    if (st->webView)
+        MarkdownEngine::setDisplayScale((double)gtk_widget_get_scale_factor(st->webView));
     std::string html = MarkdownEngine::renderFileToHtml(st->filePath, activeDarkMode, g_settings.themeFilePath, g_settings.mathFontClmPath);
     std::string autoResolvedCss = MarkdownEngine::getLastAutoResolvedCssPath();
     if (!autoResolvedCss.empty() && autoResolvedCss != g_settings.themeFilePath) {
@@ -517,6 +567,22 @@ void onSetMathFont(GtkMenuItem *item, gpointer userData) {
     saveSettingsNow();
     reloadContent(static_cast<MarkdownState *>(userData));
 }
+void onToggleCharts(GtkCheckMenuItem *item, gpointer userData) {
+    g_settings.chartRenderer = gtk_check_menu_item_get_active(item) ? "on" : "off";
+    applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
+void onToggleMermaid(GtkCheckMenuItem *item, gpointer userData) {
+    g_settings.mermaidEnabled = gtk_check_menu_item_get_active(item);
+    applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
+void onTogglePlantUml(GtkCheckMenuItem *item, gpointer userData) {
+    g_settings.plantUmlEnabled = gtk_check_menu_item_get_active(item);
+    applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
+void onToggleLatex(GtkCheckMenuItem *item, gpointer userData) {
+    g_settings.latexEnabled = gtk_check_menu_item_get_active(item);
+    applyEngineRenderSettings(); saveSettingsNow(); reloadContent(static_cast<MarkdownState *>(userData));
+}
 
 gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, WebKitHitTestResult *, gpointer userData)
 {
@@ -530,7 +596,7 @@ gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, We
         return item;
     };
 
-    addItem("Copy Text", G_CALLBACK(onCopyText));
+    addItem("Copy", G_CALLBACK(onCopyText));
     addItem("Select All", G_CALLBACK(onSelectAll));
     addItem("Find in Document...", G_CALLBACK(+[](GtkMenuItem *, gpointer userData) {
         showFindBar(static_cast<MarkdownState *>(userData));
@@ -618,6 +684,29 @@ gboolean onContextMenu(WebKitWebView *, WebKitContextMenu *, GdkEvent *event, We
     GtkWidget *fontItem = gtk_menu_item_new_with_label("Math Font");
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(fontItem), fontSub);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), fontItem);
+
+    // Plain on/off, where a three-way "Chart Renderer" submenu used to
+    // offer Matplot++/Cairo/Disabled. Those backends are gone -- one
+    // renderer remains, so a backend choice would be a menu of one.
+    GtkWidget *chartItem = gtk_check_menu_item_new_with_label("Render Vega-Lite Charts");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(chartItem), g_settings.chartRenderer != "off");
+    g_signal_connect(chartItem, "toggled", G_CALLBACK(onToggleCharts), st);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), chartItem);
+
+    GtkWidget *mermaidItem = gtk_check_menu_item_new_with_label("Render Mermaid Diagrams");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(mermaidItem), g_settings.mermaidEnabled);
+    g_signal_connect(mermaidItem, "toggled", G_CALLBACK(onToggleMermaid), st);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), mermaidItem);
+
+    GtkWidget *plantUmlItem = gtk_check_menu_item_new_with_label("Render PlantUML Diagrams");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(plantUmlItem), g_settings.plantUmlEnabled);
+    g_signal_connect(plantUmlItem, "toggled", G_CALLBACK(onTogglePlantUml), st);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), plantUmlItem);
+
+    GtkWidget *latexItem = gtk_check_menu_item_new_with_label("Render LaTeX Math");
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(latexItem), g_settings.latexEnabled);
+    g_signal_connect(latexItem, "toggled", G_CALLBACK(onToggleLatex), st);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), latexItem);
 
     gtk_widget_show_all(menu);
     // Passing NULL here (instead of the WebKit-supplied `event`) as a
@@ -751,6 +840,7 @@ void DCPCALL ListSetDefaultParams(ListDefaultParamStruct *dps)
     g_configPath = dir + "/markdownview.ini";
     g_settings.loadOrInitDefaults(g_configPath, PLUGNAME);
     MarkdownEngine::setPluginConfigDir(dir);
+    applyEngineRenderSettings();
 }
 
 } // extern "C"

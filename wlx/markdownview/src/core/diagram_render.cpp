@@ -1,5 +1,10 @@
 #include "diagram_render.h"
 
+#include "diagram_render_local.h"
+#include "vegalite_spec.h"
+
+#include "../../3rdparty/nlohmann_json/json.hpp"
+
 #include <cairo.h>
 #include <librsvg/rsvg.h>
 
@@ -9,6 +14,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
@@ -124,6 +130,87 @@ std::string toHex(const std::string &data) {
     return out;
 }
 
+// Service bases, each overridable from the ini (see
+// MarkdownEngine::setDiagramServiceUrl). Mermaid and PlantUML keep their
+// own dedicated services; Kroki is used for Vega-Lite alone, which has no
+// comparable single-purpose service.
+//
+// Routing all three through Kroki was tried and reverted. Measured
+// 2026-09-08, be precise about which half of that holds: Kroki's mermaid
+// backend was returning HTTP 500 after ~30s for every request, including
+// `graph TD\nA-->B`, while mermaid.ink answered the same diagram in ~2.4s
+// -- so for Mermaid it was not slower, it was unusable. For PlantUML the
+// two were comparable (Kroki ~0.18s warm vs plantuml.com ~0.22s), so that
+// half is a consistency choice, not a latency one. Each of these accepts a
+// self-hosted instance at the same URL shape, so the configurability that
+// motivated Kroki survives the revert.
+std::string g_mermaidBaseUrl = "https://mermaid.ink";
+std::string g_plantUmlBaseUrl = "http://www.plantuml.com/plantuml";
+std::string g_krokiBaseUrl = "https://kroki.io";
+
+// Trailing slashes are trimmed so each caller below can splice a path on
+// without doubling the separator.
+std::string trimTrailingSlashes(const std::string &url) {
+    std::string trimmed = url;
+    while (!trimmed.empty() && trimmed.back() == '/') trimmed.pop_back();
+    return trimmed;
+}
+
+// POSTs one diagram to the configured Kroki endpoint and returns the SVG
+// it renders back, or empty on any failure. Only ```vegalite uses this;
+// Mermaid and PlantUML go to their own faster services above.
+//
+// POST rather than Kroki's GET-with-deflated-path form: the GET URL grows
+// with the diagram, and a real figure spec (data rows and all) runs well
+// past what is safe to put in a URL -- which is also the part of a request
+// intermediaries log. Verified live against https://kroki.io (2026-09-08).
+// 15s matches what the old httpGet() allowed, deliberately: these renders
+// run synchronously on the UI thread (see the comment in
+// MarkdownViewerWidget::reloadContent), so the timeout is also how long a
+// document full of diagrams can freeze Double Commander for. Worth knowing
+// that a struggling endpoint spends the whole budget -- kroki.io's mermaid
+// backend was observed 500ing at ~30s, which this abandons at 15.
+std::string krokiRenderSvg(const std::string &diagramType, const std::string &source, int timeoutMs = 15000)
+{
+    if (g_krokiBaseUrl.empty() || source.empty()) return {};
+    std::string payload = nlohmann::json{
+        {"diagram_source", source},
+        {"diagram_type", diagramType},
+        {"output_format", "svg"},
+    }.dump();
+
+    // The body goes through a 0600 temp file rather than curl's argv.
+    // Every process on the machine can read another's argv via /proc, and
+    // the body here is the diagram's full source text -- precisely the
+    // content this whole feature is opt-in about.
+    char bodyPath[] = "/tmp/markdownview_kroki_XXXXXX";
+    int fd = mkstemp(bodyPath);
+    if (fd < 0) return {};
+    bool written = write(fd, payload.data(), payload.size()) == (ssize_t)payload.size();
+    close(fd);
+    if (!written) { ::unlink(bodyPath); return {}; }
+
+    // -f makes a non-2xx reply exit non-zero rather than handing back
+    // Kroki's error page as if it were an SVG -- that is what makes the
+    // "fall back to the block's plain text" contract actually hold for a
+    // diagram the endpoint rejects.
+    // --post30x keeps a redirect a POST. Without them curl silently turns a
+    // followed 301/302/303 into a GET, which Kroki answers with its landing
+    // page -- the failure a self-hosted `http://kroki.internal` that
+    // redirects to https would otherwise hit, and an unobvious one, since
+    // the request "succeeds".
+    ProcessResult r = runProcess("curl", {"-s", "-f", "-L",
+                                          "--post301", "--post302", "--post303",
+                                          "--max-time", std::to_string(timeoutMs / 1000),
+                                          "-H", "Content-Type: application/json",
+                                          "--data-binary", std::string("@") + bodyPath,
+                                          g_krokiBaseUrl},
+                                 timeoutMs + 2000);
+    ::unlink(bodyPath);
+    if (r.exitCode != 0) return {};
+    return r.stdoutData;
+}
+
 cairo_status_t writeToString(void *closure, const unsigned char *data, unsigned int length) {
     auto *out = static_cast<std::string *>(closure);
     out->append(reinterpret_cast<const char *>(data), length);
@@ -142,7 +229,31 @@ namespace DiagramRender {
 // same document.
 constexpr const char *kAccentColor = "#58a6ff";
 
-std::string renderMermaidWeb(const std::string &code, bool darkMode)
+void setMermaidBaseUrl(const std::string &url)
+{
+    std::string trimmed = trimTrailingSlashes(url);
+    if (!trimmed.empty()) g_mermaidBaseUrl = trimmed;
+}
+
+void setPlantUmlBaseUrl(const std::string &url)
+{
+    std::string trimmed = trimTrailingSlashes(url);
+    if (!trimmed.empty()) g_plantUmlBaseUrl = trimmed;
+}
+
+void setKrokiBaseUrl(const std::string &url)
+{
+    std::string trimmed = trimTrailingSlashes(url);
+    if (!trimmed.empty()) g_krokiBaseUrl = trimmed;
+}
+
+// The theme block rides along INSIDE the source as a `%%{init}%%`
+// directive rather than being a request parameter, which is why the same
+// decorated string works unchanged against mermaid.ink and against a
+// locally linked mermaid-little -- both hand it to the same mermaid
+// dialect. Split out of renderMermaidWeb so the local path gets identical
+// styling instead of quietly rendering unthemed.
+std::string mermaidWithTheme(const std::string &code, bool darkMode)
 {
     std::string theme = darkMode ? "\"dark\"" : "\"default\"";
     std::string config = "%%{init: {\"theme\": " + theme +
@@ -162,11 +273,12 @@ std::string renderMermaidWeb(const std::string &code, bool darkMode)
         "\"activationBorderColor\": \"" + std::string(kAccentColor) + "\", "
         "\"labelBoxBorderColor\": \"" + std::string(kAccentColor) + "\", "
         "\"signalColor\": \"" + std::string(kAccentColor) + "\"}}}%%\n";
-    std::string url = "https://mermaid.ink/svg/" + base64UrlEncode(config + code);
-    return httpGet(url);
+    return config + code;
 }
 
-std::string renderPlantUmlWeb(const std::string &code, bool darkMode)
+// Same idea as mermaidWithTheme: the skinparams live in the source, so one
+// decorated string serves both the web and the local renderer.
+std::string plantUmlWithTheme(const std::string &code, bool darkMode)
 {
     std::string modified = code;
     size_t startIdx = modified.find("@startuml");
@@ -206,9 +318,48 @@ std::string renderPlantUmlWeb(const std::string &code, bool darkMode)
 
     if (startIdx != std::string::npos) modified.insert(startIdx + 9, skin);
     else modified = skin + modified;
+    return modified;
+}
 
-    std::string url = "http://www.plantuml.com/plantuml/svg/~h" + toHex(modified);
-    return httpGet(url);
+std::string renderMermaidWeb(const std::string &code, bool darkMode)
+{
+    return httpGet(g_mermaidBaseUrl + "/svg/" + base64UrlEncode(mermaidWithTheme(code, darkMode)));
+}
+
+std::string renderPlantUmlWeb(const std::string &code, bool darkMode)
+{
+    return httpGet(g_plantUmlBaseUrl + "/svg/~h" + toHex(plantUmlWithTheme(code, darkMode)));
+}
+
+std::string renderMermaid(const std::string &code, bool darkMode)
+{
+    if (LocalDiagram::isCompiledIn())
+        return LocalDiagram::renderMermaid(mermaidWithTheme(code, darkMode));
+    return renderMermaidWeb(code, darkMode);
+}
+
+std::string renderPlantUml(const std::string &code, bool darkMode)
+{
+    if (LocalDiagram::isCompiledIn())
+        return LocalDiagram::renderPlantUml(plantUmlWithTheme(code, darkMode));
+    return renderPlantUmlWeb(code, darkMode);
+}
+
+std::string renderVegaLiteWeb(const std::string &vegaLiteJson, bool darkMode)
+{
+    // "sans-serif" rather than the document's own CSS body family: the
+    // endpoint lays the text out with ITS fonts, and asking for a family it
+    // does not have buys nothing. It is also what makes the returned SVG
+    // rasterize predictably here, since librsvg resolves generic
+    // sans-serif locally. The spec's own config.font, if it sets one, still
+    // wins -- normalizeSpec only fills defaults in underneath.
+    //
+    // Note the layout is still approximate across the two editions: Kroki
+    // measures text with its fonts and librsvg draws it with local ones, so
+    // where the two disagree a long label can shift or collide.
+    std::string spec = VegaLiteSpec::normalizeSpec(vegaLiteJson, darkMode, "sans-serif");
+    if (spec.empty()) return {};
+    return krokiRenderSvg("vegalite", spec);
 }
 
 // ── Hand-written replacements for what used to be static const std::regex

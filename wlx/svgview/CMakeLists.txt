@@ -73,7 +73,7 @@ if(ENABLE_GTK3)
     
     set_target_properties(svgview_gtk3 PROPERTIES
         PREFIX ""
-        OUTPUT_NAME "svgview_gtk"
+        OUTPUT_NAME "svgview_gtk3"
         SUFFIX ".wlx"
     )
 endif()
