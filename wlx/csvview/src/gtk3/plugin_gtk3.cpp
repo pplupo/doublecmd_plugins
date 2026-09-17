@@ -308,11 +308,21 @@ void loadFile(CsvGtkState *st, const std::string &path)
     std::string data = readFile(path);
     std::vector<std::string> lines = splitLines(data);
 
-    st->separator = detectSeparator(lines.empty() ? std::string() : lines[0], path);
+    // Fold physical lines into logical records: a quoted field may contain
+    // newlines, in which case the record continues on the following lines.
+    std::vector<std::string> records;
+    for (auto &line : lines) {
+        if (!records.empty() && CsvCore::continuesQuotedField(records.back()))
+            records.back() += line;
+        else
+            records.push_back(line);
+    }
+
+    st->separator = detectSeparator(records.empty() ? std::string() : records[0], path);
 
     std::vector<std::vector<CsvCore::Field>> rows;
     int colCount = 1;
-    for (auto &line : lines) {
+    for (auto &line : records) {
         auto fields = CsvCore::parseLine(line, st->separator);
         colCount = std::max(colCount, (int)fields.size());
         rows.push_back(std::move(fields));

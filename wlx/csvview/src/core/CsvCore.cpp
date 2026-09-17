@@ -104,9 +104,30 @@ std::vector<Field> parseLine(const std::string &utf8LineIn, char separator)
     return list;
 }
 
+bool continuesQuotedField(const std::string &utf8Record)
+{
+    bool inQuote = false;
+    for (size_t i = 0; i < utf8Record.size(); ++i) {
+        if (utf8Record[i] != '"') continue;
+        // A doubled quote inside a quoted field is an escaped quote, not a
+        // delimiter: skip its partner so the state comes out unchanged.
+        if (inQuote && i + 1 < utf8Record.size() && utf8Record[i + 1] == '"') {
+            ++i;
+            continue;
+        }
+        inQuote = !inQuote;
+    }
+    return inQuote;
+}
+
 std::string escapeField(const std::string &text, char separator, bool wasQuoted)
 {
-    bool needsQuote = wasQuoted || text.find(separator) != std::string::npos;
+    // A field holding a newline must stay quoted, or the record it belongs to
+    // would be split in two when read back.
+    bool needsQuote = wasQuoted
+        || text.find(separator) != std::string::npos
+        || text.find('\n') != std::string::npos
+        || text.find('"') != std::string::npos;
     if (!needsQuote) return text;
 
     std::string out = text;
