@@ -132,7 +132,10 @@ bool YamlEngine::parse(const QByteArray &data)
         YAML::Node yamlRoot = YAML::Load(data.toStdString());
         fprintf(stderr, "[structview/yaml] YAML::Load OK, type=%d IsNull=%d\n",
                 static_cast<int>(yamlRoot.Type()), yamlRoot.IsNull());
-        if (yamlRoot.IsNull()) return false;
+        if (yamlRoot.IsNull()) {
+            setError(QStringLiteral("Document is empty or contains only a null value"));
+            return false;
+        }
 
         m_root = std::make_unique<DocumentNode>(QStringLiteral("root"));
         buildTree(m_root.get(), yamlRoot);
@@ -141,12 +144,19 @@ bool YamlEngine::parse(const QByteArray &data)
 
     } catch (const YAML::Exception &e) {
         fprintf(stderr, "[structview/yaml] YAML::Exception: %s\n", e.what());
+        // YAML::Mark is 0-based and left at -1 when the error has no position.
+        if (e.mark.line >= 0)
+            setError(QString::fromStdString(e.msg), e.mark.line + 1, e.mark.column + 1);
+        else
+            setError(QString::fromStdString(e.msg));
         return false;
     } catch (const std::exception &e) {
         fprintf(stderr, "[structview/yaml] std::exception: %s\n", e.what());
+        setError(QString::fromUtf8(e.what()));
         return false;
     } catch (...) {
         fprintf(stderr, "[structview/yaml] unknown exception\n");
+        setError(QStringLiteral("Unrecognized YAML parse failure"));
         return false;
     }
 }

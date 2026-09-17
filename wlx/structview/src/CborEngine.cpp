@@ -32,8 +32,10 @@ bool CborEngine::parse(const QByteArray &data)
 {
     QCborParserError err;
     QCborValue cbor = QCborValue::fromCbor(data, &err);
-    if (err.error != QCborError::NoError)
+    if (err.error != QCborError::NoError) {
+        setError(err.error.toString());
         return false;
+    }
 
     // Convert to JSON for tree building and text display
     QJsonValue jsonVal = cbor.toJsonValue();
@@ -42,15 +44,21 @@ bool CborEngine::parse(const QByteArray &data)
         doc = QJsonDocument(jsonVal.toObject());
     else if (jsonVal.isArray())
         doc = QJsonDocument(jsonVal.toArray());
-    else
+    else {
+        setError(QStringLiteral("CBOR root is neither a map nor an array"));
         return false;
+    }
 
     m_rawText = QString::fromUtf8(doc.toJson(QJsonDocument::Indented));
 
     // Delegate to JsonEngine: parse the JSON bytes
     m_jsonEngine = createJsonEngine();
     QByteArray jsonBytes = doc.toJson(QJsonDocument::Compact);
-    return m_jsonEngine->parse(jsonBytes);
+    if (!m_jsonEngine->parse(jsonBytes)) {
+        setError(m_jsonEngine->errorMessage());
+        return false;
+    }
+    return true;
 }
 
 QByteArray CborEngine::serialize() const

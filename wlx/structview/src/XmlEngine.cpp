@@ -172,13 +172,18 @@ bool XmlEngine::parse(const QByteArray &data)
 {
     QString errorMsg;
     int errorLine, errorCol;
-    if (!m_originalDoc.setContent(data, &errorMsg, &errorLine, &errorCol))
+    if (!m_originalDoc.setContent(data, &errorMsg, &errorLine, &errorCol)) {
+        setError(errorMsg, errorLine, errorCol);
         return false;
+    }
 
     m_rawText = m_originalDoc.toString(2);
 
     QDomElement rootEl = m_originalDoc.documentElement();
-    if (rootEl.isNull()) return false;
+    if (rootEl.isNull()) {
+        setError(QStringLiteral("Document has no root element"));
+        return false;
+    }
 
     m_root = std::make_unique<DocumentNode>(rootEl.tagName());
     buildTree(m_root.get(), rootEl);

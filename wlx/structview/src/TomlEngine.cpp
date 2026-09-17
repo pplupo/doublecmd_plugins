@@ -173,7 +173,11 @@ bool TomlEngine::parse(const QByteArray &data)
         buildTree(m_root.get(), tbl);
         return true;
 
-    } catch (const toml::parse_error &) {
+    } catch (const toml::parse_error &e) {
+        const auto &begin = e.source().begin;
+        setError(QString::fromUtf8(e.description().data(),
+                                   static_cast<int>(e.description().size())),
+                 static_cast<int>(begin.line), static_cast<int>(begin.column));
         return false;
     }
 }
