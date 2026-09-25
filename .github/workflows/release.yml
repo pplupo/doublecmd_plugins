@@ -35,6 +35,9 @@ jobs:
     # jammy's repos don't carry at all.
     runs-on: ubuntu-24.04
     steps:
+    - name: Refresh apt package lists
+      run: sudo apt-get update
+
     - name: Install Lazarus
       run: sudo apt install -y lazarus
 
