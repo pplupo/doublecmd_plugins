@@ -19,8 +19,6 @@
 #include <QVBoxLayout>
 #include <QUrl>
 #include <QPrinter>
-#include <QPageLayout>
-#include <QMargins>
 #include <QPrintDialog>
 #include <QPainter>
 #include <QAbstractTextDocumentLayout>
@@ -657,8 +655,8 @@ public:
 
         QColor pageColor = resolveDarkMode() ? QColor("#0d1117") : QColor("#ffffff");
 
-        // setFullPage(true) + QPageLayout below, instead of the default
-        // printer.pageRect() this used to use: by default a QPrinter's
+        // setFullPage(true), instead of the default printer.pageRect()
+        // this used to use: by default a QPrinter's
         // paint-device origin is already inset from the physical paper
         // edge by the driver's hardware margins, so a QPainter drawing at
         // (0,0) is drawing at the inside edge of that margin, not the
@@ -669,15 +667,6 @@ public:
         // matter what color is asked for). Painting the full physical
         // page requires opting into that coordinate space explicitly.
         printer.setFullPage(true);
-        // A real margin -- previously whatever the printer/driver's own
-        // default happened to be (near-zero on this setup), which read as
-        // content running almost edge-to-edge. Content still only ever
-        // fills the CONTENT rect below (contentRect, inset by this
-        // margin); the fullPageSize fill above/below paints the SAME
-        // theme color everywhere, including this margin strip, so it
-        // reads as a colored border rather than a blank one.
-        printer.setPageMargins(QMarginsF(0.5, 0.5, 0.5, 0.5), QPageLayout::Inch);
-        QPageLayout pageLayout = printer.pageLayout();
         // Not pageLayout.fullRectPixels(): that converts the page's
         // physical size to pixels itself (point size * resolution / 72,
         // rounded into an integer QRect), which can come out fractionally
@@ -689,11 +678,20 @@ public:
         // the printer's own paint-device metrics directly guarantees this
         // matches the exact coordinate space the QPainter below draws in.
         QSizeF fullPageSize(printer.width(), printer.height());
-        // The margin box the print dialog's user-facing margins describe --
-        // content still lays out and stays positioned exactly here, same
-        // as before setFullPage(true) was added. Only the background fill
-        // below now reaches past it to the true paper edge.
-        QRect contentRect = pageLayout.paintRectPixels(printer.resolution());
+        // NOT printer.setPageMargins()/the printer's own margin rect:
+        // setFullPage(true) above makes the printable area equal the
+        // whole physical page, which makes that margin concept
+        // moot in that mode -- confirmed live, setPageMargins() here had
+        // no visible effect at all. Computing the inset ourselves, in the
+        // same full-page coordinate space fullPageSize already uses,
+        // keeps the two consistent by construction and can't reintroduce
+        // the original white-border bug: contentRect is still entirely
+        // inside the area fillRect() below paints solid, nothing is ever
+        // drawn outside the painter's addressable full-page space.
+        qreal marginPx = 0.5 * printer.resolution();
+        QRect contentRect(qRound(marginPx), qRound(marginPx),
+                           qRound(fullPageSize.width() - 2 * marginPx),
+                           qRound(fullPageSize.height() - 2 * marginPx));
 
         QTextDocument *doc = document()->clone();
         QSizeF pageSize = contentRect.size();
