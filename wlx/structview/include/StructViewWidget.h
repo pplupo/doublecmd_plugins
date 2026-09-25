@@ -7,6 +7,7 @@
 #include <QPlainTextEdit>
 #include <QStandardItemModel>
 #include <QSortFilterProxyModel>
+#include <QLabel>
 #include <memory>
 
 #include "TextFormatEngine.h"
@@ -63,6 +64,7 @@ private slots:
 private:
     void setupUi();
     void setupToolbar();
+    void showParseError(const QByteArray &data);
     void setupFindReplace();
     void populateTree();
     void populateTreeNode(QStandardItem *parentItem, DocumentNode *node);
@@ -77,6 +79,7 @@ private:
     QtWlPlugin::PluginToolBar *m_toolbar;
     QtWlPlugin::ScopedFindReplacePanel *m_findReplace;
     QtWlPlugin::PluginStatusBar *m_statusBar;
+    QLabel *m_errorBanner = nullptr;   ///< Parse failure notice; hidden while the file parses
     QAction *m_actShowText = nullptr;
 
     // Left panel: document tree

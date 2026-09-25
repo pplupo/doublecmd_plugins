@@ -184,8 +184,12 @@ bool JsonEngine::parse(const QByteArray &data)
 {
     QJsonParseError err;
     QJsonDocument doc = QJsonDocument::fromJson(data, &err);
-    if (err.error != QJsonParseError::NoError)
+    if (err.error != QJsonParseError::NoError) {
+        int line, column;
+        offsetToLineColumn(data, err.offset, &line, &column);
+        setError(err.errorString(), line, column);
         return false;
+    }
 
     m_rawText = QString::fromUtf8(doc.toJson(QJsonDocument::Indented));
 
@@ -196,6 +200,7 @@ bool JsonEngine::parse(const QByteArray &data)
     } else if (doc.isArray()) {
         root = doc.array();
     } else {
+        setError(QStringLiteral("Document root is neither an object nor an array"));
         return false;
     }
 

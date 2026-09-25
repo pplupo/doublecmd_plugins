@@ -28,6 +28,7 @@
 #include <QPrintDialog>
 #include <QPushButton>
 #include <QHBoxLayout>
+#include <QToolButton>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QTextStream>
@@ -173,6 +174,8 @@ private:
 
 	QStackedWidget *m_stackedWidget;
 	QTextBrowser *m_textBrowser;
+	QWidget *m_warningBanner = nullptr;   // malformed-row notice, dismissable
+	QLabel *m_warningLabel = nullptr;
 	QAction *m_actFindReplace;
 	QAction *m_actTextMode;
 	QAction *m_actWordWrap;
@@ -216,6 +219,26 @@ CsvViewerWidget::CsvViewerWidget(QWidget *parent)
 
 	setupToolbar();
 	layout->addWidget(m_toolbar);
+
+	// Malformed-row warning: the table still loads, so this never blocks.
+	m_warningBanner = new QWidget(this);
+	m_warningBanner->setStyleSheet("QWidget { background: #78350f; }");
+	QHBoxLayout *warnLayout = new QHBoxLayout(m_warningBanner);
+	warnLayout->setContentsMargins(10, 5, 6, 5);
+	m_warningLabel = new QLabel(m_warningBanner);
+	m_warningLabel->setWordWrap(true);
+	m_warningLabel->setStyleSheet("QLabel { color: #fef3c7; background: transparent; }");
+	m_warningLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	QToolButton *warnClose = new QToolButton(m_warningBanner);
+	warnClose->setText("✕");
+	warnClose->setAutoRaise(true);
+	warnClose->setToolTip("Dismiss");
+	warnClose->setStyleSheet("QToolButton { color: #fef3c7; border: none; }");
+	connect(warnClose, &QToolButton::clicked, m_warningBanner, &QWidget::hide);
+	warnLayout->addWidget(m_warningLabel, 1);
+	warnLayout->addWidget(warnClose, 0, Qt::AlignTop);
+	m_warningBanner->hide();
+	layout->addWidget(m_warningBanner);
 
 	m_stackedWidget = new QStackedWidget(this);
 	m_stackedWidget->addWidget(m_grid);
@@ -582,7 +605,25 @@ bool CsvViewerWidget::loadFile(const QString& filePath)
 		}
 	}
 
-	line = file.readLine();
+	// One logical record, not one physical line: a quoted field may contain
+	// newlines, in which case the record continues on the following lines.
+	// recordLines reports how many physical lines the record consumed, so the
+	// malformed-row warning below can still cite real file line numbers.
+	int recordLines = 0;
+	auto readRecord = [&file, &recordLines]() {
+		QByteArray record = file.readLine();
+		recordLines = 1;
+		while (!file.atEnd() &&
+		       CsvCore::continuesQuotedField(record.toStdString()))
+		{
+			record += file.readLine();
+			++recordLines;
+		}
+		return record;
+	};
+
+	line = readRecord();
+	int lineNumber = recordLines;
 	QByteArray seps(",;\t");
 	bool detected = false;
 
@@ -702,11 +743,42 @@ bool CsvViewerWidget::loadFile(const QString& filePath)
 		row++;
 	}
 
+	// Malformed rows are reported in a banner rather than refused: the grid
+	// still loads, so the warning only says which lines to go look at.
+	const int expectedColumns = columns;
+	int raggedRows = 0, unbalancedQuoteRows = 0, binaryRows = 0;
+	int badRecords = 0;     // records with at least one problem; a record can hit several
+	QList<int> firstBadLines;
+
 	while (!file.atEnd())
 	{
 		m_view->insertRow(row);
 		QList<bool> rowQuoted;
-		list = parse_line(file.readLine(), m_encoding, m_separator, &rowQuoted);
+		const int recordStartLine = lineNumber + 1;
+		QByteArray rawRecord = readRecord();
+		lineNumber += recordLines;
+		list = parse_line(rawRecord, m_encoding, m_separator, &rowQuoted);
+
+		bool lineIsBad = false;
+		if (list.size() != expectedColumns && !(list.isEmpty() && rawRecord.trimmed().isEmpty())) {
+			++raggedRows;
+			lineIsBad = true;
+		}
+		// readRecord() only stops mid-quote at end of file, so a record that
+		// is still inside a quoted field has one that was never closed.
+		if (CsvCore::continuesQuotedField(rawRecord.toStdString())) {
+			++unbalancedQuoteRows;
+			lineIsBad = true;
+		}
+		if (rawRecord.contains('\0')) {
+			++binaryRows;
+			lineIsBad = true;
+		}
+		if (lineIsBad) {
+			++badRecords;
+			if (firstBadLines.size() < 5)
+				firstBadLines.append(recordStartLine);
+		}
 
 		if (list.size() > columns)
 		{
@@ -736,6 +808,27 @@ bool CsvViewerWidget::loadFile(const QString& filePath)
 
 	m_grid->undoStack()->clear();
 	m_isProgrammaticChange = false;
+
+	QStringList problems;
+	if (raggedRows > 0)
+		problems << QString("%1 row(s) do not have %2 field(s)").arg(raggedRows).arg(expectedColumns);
+	if (unbalancedQuoteRows > 0)
+		problems << QString("%1 row(s) have an unclosed quote").arg(unbalancedQuoteRows);
+	if (binaryRows > 0)
+		problems << QString("%1 row(s) contain binary data").arg(binaryRows);
+
+	if (problems.isEmpty()) {
+		m_warningBanner->hide();
+	} else {
+		QStringList lineLabels;
+		for (int badLine : firstBadLines)
+			lineLabels << QString::number(badLine);
+		QString where = QString(" — first at line %1%2")
+			.arg(lineLabels.join(", "),
+			     firstBadLines.size() < badRecords ? "…" : "");
+		m_warningLabel->setText("Malformed CSV: " + problems.join("; ") + where);
+		m_warningBanner->show();
+	}
 
 	m_findReplace->setStatusText(QString());
 	return true;

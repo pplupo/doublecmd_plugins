@@ -12,6 +12,7 @@ This plugin ships as **two independent native builds** — one for DC's **GTK3**
 - **INI**: Section navigation list on the left, 2-column Key/Value grid on the right. Sections switch without losing edits.
 - **YAML**: Displays mappings and sequences, natively supporting nested tree building.
 - **TOML**: Supports parsing tables and arrays of tables into structured grids.
+- **Malformed file reporting**: instead of silently handing the file to the next viewer in the chain, a failed parse still opens the widget — a banner names the problem (with line/column where the format provides one) and the Text tab shows the raw bytes with the offending line selected. Saving is disabled until the file parses. An empty file, or binary content in a non-binary format, is still handed off (a `.json` holding JSON Lines keeps reaching logview).
 - **Find** with scope filtering (All Cells, Current Column, Current Row) — read-only find, no replace (despite the panel being named "Find/Replace" internally, no format engine wires up a replace path on either toolkit).
 - **Full undo/redo** (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y)
 - **Save** (Ctrl+S) writes back to the original file

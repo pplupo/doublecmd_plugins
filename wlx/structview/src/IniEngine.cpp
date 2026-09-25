@@ -26,13 +26,20 @@ bool IniEngine::parse(const QByteArray &data)
     // Write to temp file for QSettings to parse
     QTemporaryFile tmp;
     tmp.setAutoRemove(true);
-    if (!tmp.open()) return false;
+    if (!tmp.open()) {
+        setError(QStringLiteral("Could not create a temporary file to parse into"));
+        return false;
+    }
     tmp.write(data);
     tmp.flush();
 
     QSettings ini(tmp.fileName(), QSettings::IniFormat);
-    if (ini.status() != QSettings::NoError)
+    if (ini.status() != QSettings::NoError) {
+        setError(ini.status() == QSettings::FormatError
+                     ? QStringLiteral("Malformed INI syntax")
+                     : QStringLiteral("INI file could not be read"));
         return false;
+    }
 
     m_root = std::make_unique<DocumentNode>(QStringLiteral("root"));
 

@@ -97,4 +97,38 @@ public:
 
     /// Factory: detect format from file extension and return the right engine.
     static std::unique_ptr<TextFormatEngine> createForFile(const QString &filepath);
+
+    /// Description of why the last parse() failed (empty if it succeeded).
+    QString errorMessage() const { return m_errorMessage; }
+
+    /// 1-based line the failure was reported at, or -1 if the format gave
+    /// no position. Column is -1 when only a line is known.
+    int errorLine() const { return m_errorLine; }
+    int errorColumn() const { return m_errorColumn; }
+
+protected:
+    /// Record why parse() failed. Engines that know a position pass it in;
+    /// byte offsets are converted to a line/column by offsetToLineColumn().
+    void setError(const QString &message, int line = -1, int column = -1) {
+        m_errorMessage = message;
+        m_errorLine = line;
+        m_errorColumn = column;
+    }
+
+    /// Convert a byte offset into the 1-based line/column it falls on.
+    static void offsetToLineColumn(const QByteArray &data, int offset,
+                                   int *line, int *column) {
+        int l = 1, c = 1;
+        const int end = qMin(offset, static_cast<int>(data.size()));
+        for (int i = 0; i < end; ++i) {
+            if (data.at(i) == '\n') { ++l; c = 1; } else { ++c; }
+        }
+        *line = l;
+        *column = c;
+    }
+
+private:
+    QString m_errorMessage;
+    int m_errorLine = -1;
+    int m_errorColumn = -1;
 };

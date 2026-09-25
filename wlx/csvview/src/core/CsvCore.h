@@ -23,6 +23,15 @@ struct Field {
 /// as the original parse_line(), just std::string instead of QStringList.
 std::vector<Field> parseLine(const std::string &utf8Line, char separator);
 
+/// True if `utf8Record` leaves a double-quoted field open, meaning the CSV
+/// record continues onto the next physical line. Callers walking a file append
+/// the next line while this keeps returning true, then hand the joined record
+/// to parseLine(). Always pass the whole record from its first line, never a
+/// continuation line on its own, or the quote state starts out inverted.
+/// Doubled quotes ("") are escaped quotes and leave the state unchanged,
+/// matching parseLine().
+bool continuesQuotedField(const std::string &utf8Record);
+
 /// Escape one field for output: doubles embedded quotes and wraps in
 /// quotes if the field was originally quoted or contains the separator —
 /// same rule as the original saveFile()'s inline logic.

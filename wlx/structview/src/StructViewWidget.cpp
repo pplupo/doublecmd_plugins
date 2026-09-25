@@ -201,6 +201,15 @@ void StructViewWidget::setupUi()
     setupToolbar();
     mainLayout->addWidget(m_toolbar);
 
+    // --- Parse error banner (shown only when the file fails to parse) ---
+    m_errorBanner = new QLabel;
+    m_errorBanner->setWordWrap(true);
+    m_errorBanner->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_errorBanner->setStyleSheet(QStringLiteral(
+        "QLabel { background: #7f1d1d; color: #fee2e2; padding: 6px 10px; }"));
+    m_errorBanner->hide();
+    mainLayout->addWidget(m_errorBanner);
+
     // --- Left panel: Tree view ---
     m_treeView = new QTreeView;
     m_treeModel = new QStandardItemModel(this);
@@ -373,9 +382,24 @@ bool StructViewWidget::loadFile(const QString &filepath)
     m_engine = TextFormatEngine::createForFile(filepath);
     if (!m_engine) return false;
 
-    if (!m_engine->parse(data))
-        return false;
+    if (!m_engine->parse(data)) {
+        // A malformed file is reported here rather than handed back to the
+        // host, which would silently pass it to the next viewer in the chain.
+        // Only claim it if it plausibly *is* the format the extension claims:
+        // an empty file, or binary content in a text format, is more likely
+        // meant for another plugin (e.g. a .json holding JSON Lines).
+        if (data.isEmpty())
+            return false;
+        const bool isBinaryFormat = (m_engine->formatName() == QStringLiteral("CBOR"));
+        if (!isBinaryFormat && data.left(4096).contains('\0'))
+            return false;
 
+        m_filepath = filepath;
+        showParseError(data);
+        return true;
+    }
+
+    m_errorBanner->hide();
     m_filepath = filepath;
 
     // Populate tree
@@ -396,6 +420,45 @@ bool StructViewWidget::loadFile(const QString &filepath)
     }
 
     return true;
+}
+
+void StructViewWidget::showParseError(const QByteArray &data)
+{
+    const int line = m_engine->errorLine();
+    const int column = m_engine->errorColumn();
+
+    QString where;
+    if (line > 0 && column > 0)
+        where = QStringLiteral(" at line %1, column %2").arg(line).arg(column);
+    else if (line > 0)
+        where = QStringLiteral(" at line %1").arg(line);
+
+    QString detail = m_engine->errorMessage();
+    if (detail.isEmpty())
+        detail = QStringLiteral("could not be parsed");
+
+    m_errorBanner->setText(QStringLiteral("Malformed %1: %2%3")
+                               .arg(m_engine->formatName(), detail, where));
+    m_errorBanner->show();
+
+    // No tree or grid to show — offer the raw bytes so the problem is visible.
+    m_treeModel->clear();
+    m_gridModel->clear();
+    m_textView->setPlainText(QString::fromUtf8(data));
+    m_tabWidget->setCurrentIndex(1);
+
+    if (line > 0) {
+        QTextCursor cursor(m_textView->document());
+        cursor.movePosition(QTextCursor::Down, QTextCursor::MoveAnchor, line - 1);
+        if (column > 1)
+            cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, column - 1);
+        cursor.select(QTextCursor::LineUnderCursor);
+        m_textView->setTextCursor(cursor);
+        m_textView->centerCursor();
+    }
+
+    m_statusBar->setFormatInfo(QStringLiteral("%1 (invalid)").arg(m_engine->formatName()));
+    m_statusBar->setEncoding(EncodingUtils::detectEncoding(data));
 }
 
 void StructViewWidget::populateTree()
@@ -535,6 +598,10 @@ bool StructViewWidget::saveFileAs(const QString &path)
 {
     if (!m_engine) return false;
 
+    // A malformed file has no document tree, so serialize() would write out an
+    // empty document over the user's content.
+    if (!m_engine->errorMessage().isEmpty()) return false;
+
     // Sync current grid data back to the node
     syncGridToNode();
 
@@ -570,6 +637,13 @@ bool StructViewWidget::saveFileAs(const QString &path)
 
 void StructViewWidget::onSave()
 {
+    if (m_engine && !m_engine->errorMessage().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Save Error"),
+                             QStringLiteral("This file could not be parsed, "
+                                            "so there is nothing to save."));
+        return;
+    }
+
     if (!saveFile()) {
         QMessageBox::warning(this, QStringLiteral("Save Error"),
                              QStringLiteral("Could not save file."));
@@ -668,7 +742,11 @@ void StructViewWidget::onOpenExternally()
 void StructViewWidget::updateTextTab()
 {
     if (!m_engine) return;
-    
+
+    // On a parse failure the Text tab already holds the raw bytes; serializing
+    // the (empty) tree over them would hide the very thing the user needs.
+    if (!m_engine->errorMessage().isEmpty()) return;
+
     // Sync current grid data
     syncGridToNode();
     
