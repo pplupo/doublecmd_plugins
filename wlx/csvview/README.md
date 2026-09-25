@@ -29,6 +29,8 @@ This plugin ships as **two independent native builds** — one for DC's **GTK3**
 - **Text / Source View Mode**: Switch between the spreadsheet grid and a raw text preview with word wrap.
 - **Open Externally**: Launch the file in the system's default external application directly from the toolbar.
 - **Smart Focus Management**: Seamlessly yields keyboard and mouse focus to Double Commander when clicking outside the plugin, ensuring file selection changes and arrow-key pane navigation work flawlessly.
+- **Multi-line Quoted Fields**: A quoted field spanning several physical lines is read as one logical record instead of being split across rows.
+- **Malformed Row Warnings** *(Qt6 only, see [Feature Differences](#feature-differences-gtk3-vs-qt6))*: The grid still loads a malformed file; a dismissable banner names what's off (ragged field counts, unclosed quotes, embedded NUL bytes) and cites the first few line numbers to check.
 
 ---
 
@@ -131,6 +133,7 @@ Works with both `.csv` and `.tsv` files. The separator is auto-detected from con
 | Column drag-and-drop reordering | **Not implemented** | Drag any column header to reorder, with undo/redo support |
 | Insert Row from Clipboard | **Not implemented** — only empty-row insertion (Insert Row Above/Below) is available | `Ctrl+V` / context menu inserts clipboard rows directly, with header-line deduplication and column-count validation |
 | Save As... | Not present in the toolbar | Present, exports to a different file path/format |
+| Malformed row warning banner | **Not implemented** — bad rows load silently | Dismissable banner names ragged/unclosed-quote/binary rows and their line numbers |
 | Auto-resize columns to content | Not configurable (no ini) | `resize_columns` setting |
 | Grid line drawing toggle | Not configurable (no ini) | `draw_grid` setting |
 
