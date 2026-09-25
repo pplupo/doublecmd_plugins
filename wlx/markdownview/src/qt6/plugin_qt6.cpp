@@ -19,6 +19,8 @@
 #include <QVBoxLayout>
 #include <QUrl>
 #include <QPrinter>
+#include <QPageLayout>
+#include <QMargins>
 #include <QPrintDialog>
 #include <QPainter>
 #include <QAbstractTextDocumentLayout>
@@ -29,6 +31,8 @@
 #include <QResizeEvent>
 #include <QTextBlock>
 #include <QTextImageFormat>
+#include <QTextFrame>
+#include <QTextTable>
 #include <QImage>
 #include <QImageReader>
 #include <QPixmap>
@@ -609,6 +613,43 @@ public:
     // printer's native white paper showed through as a border around the
     // (still dark-colored) text. Paint each page's background first, then
     // draw the document's content on top of it.
+    // A plain image's width/height (injectPlainImageSizes()) is baked in
+    // to fit the SCREEN viewport, in that viewport's own device-pixel
+    // scale. printer.pageRect(QPrinter::DevicePixel) below is in the
+    // PRINTER's device-pixel scale, which is a different number of pixels
+    // per inch -- so an image already fitted to (say) an 900px-wide screen
+    // pane can be wider than a print page whose printable area happens to
+    // be fewer device pixels across at the printer/PDF-writer's resolution.
+    // Nothing upstream re-fits it for that new width, so it bleeds past
+    // the right margin exactly like body text doesn't (text reflows to
+    // whatever width doc->setPageSize() below gives it; a fixed-size image
+    // format does not). Clamped here, once, against the real print content
+    // width, same cursor-mutation pattern as scaleImages() above -- safe
+    // here specifically because this is a clone (see the big comment on
+    // m_rawHtml above for why mutating a *live* image format was the thing
+    // that corrupted real documents; this document is thrown away after
+    // this function returns).
+    void clampImagesToWidth(QTextDocument *doc, qreal availableWidth) {
+        if (availableWidth <= 0) return;
+        QTextCursor cursor(doc);
+        for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                QTextFragment frag = it.fragment();
+                if (!frag.isValid()) continue;
+                QTextCharFormat fmt = frag.charFormat();
+                if (!fmt.isImageFormat()) continue;
+                QTextImageFormat imgFmt = fmt.toImageFormat();
+                if (imgFmt.width() <= availableWidth) continue;
+                qreal scale = availableWidth / imgFmt.width();
+                imgFmt.setWidth(imgFmt.width() * scale);
+                imgFmt.setHeight(imgFmt.height() * scale);
+                cursor.setPosition(frag.position());
+                cursor.setPosition(frag.position() + frag.length(), QTextCursor::KeepAnchor);
+                cursor.setCharFormat(imgFmt);
+            }
+        }
+    }
+
     void printDocument() {
         QPrinter printer;
         QPrintDialog dialog(&printer, this);
@@ -616,15 +657,71 @@ public:
 
         QColor pageColor = resolveDarkMode() ? QColor("#0d1117") : QColor("#ffffff");
 
+        // setFullPage(true) + QPageLayout below, instead of the default
+        // printer.pageRect() this used to use: by default a QPrinter's
+        // paint-device origin is already inset from the physical paper
+        // edge by the driver's hardware margins, so a QPainter drawing at
+        // (0,0) is drawing at the inside edge of that margin, not the
+        // paper's actual corner -- fillRect() below could only ever reach
+        // as far as that inset boundary, leaving the driver's own margin
+        // strip outside the painter's addressable space entirely (shows
+        // as a plain white/default border on a dark-theme print, no
+        // matter what color is asked for). Painting the full physical
+        // page requires opting into that coordinate space explicitly.
+        printer.setFullPage(true);
+        // A real margin -- previously whatever the printer/driver's own
+        // default happened to be (near-zero on this setup), which read as
+        // content running almost edge-to-edge. Content still only ever
+        // fills the CONTENT rect below (contentRect, inset by this
+        // margin); the fullPageSize fill above/below paints the SAME
+        // theme color everywhere, including this margin strip, so it
+        // reads as a colored border rather than a blank one.
+        printer.setPageMargins(QMarginsF(0.5, 0.5, 0.5, 0.5), QPageLayout::Inch);
+        QPageLayout pageLayout = printer.pageLayout();
+        // Not pageLayout.fullRectPixels(): that converts the page's
+        // physical size to pixels itself (point size * resolution / 72,
+        // rounded into an integer QRect), which can come out fractionally
+        // smaller than what the paint device actually reports -- and
+        // since painting starts at (0,0), any such shortfall only shows
+        // up on the far edges (right/bottom), never the near ones
+        // (confirmed live: left/top were flush, right/bottom had a
+        // shrunk-but-nonzero sliver of the old white border left). Asking
+        // the printer's own paint-device metrics directly guarantees this
+        // matches the exact coordinate space the QPainter below draws in.
+        QSizeF fullPageSize(printer.width(), printer.height());
+        // The margin box the print dialog's user-facing margins describe --
+        // content still lays out and stays positioned exactly here, same
+        // as before setFullPage(true) was added. Only the background fill
+        // below now reaches past it to the true paper edge.
+        QRect contentRect = pageLayout.paintRectPixels(printer.resolution());
+
         QTextDocument *doc = document()->clone();
-        QSizeF pageSize = printer.pageRect(QPrinter::DevicePixel).size();
+        QSizeF pageSize = contentRect.size();
+        clampImagesToWidth(doc, pageSize.width() - 2 * doc->documentMargin());
         doc->setPageSize(pageSize);
+        for (QTextFrame::iterator it = doc->rootFrame()->begin(); !it.atEnd(); ++it) {
+            QTextTable *table = qobject_cast<QTextTable *>(it.currentFrame());
+            if (!table) continue;
+            QTextTableFormat fmt = table->format();
+            if (fmt.width().type() != QTextLength::PercentageLength) continue;
+            fmt.setWidth(QTextLength(QTextLength::FixedLength, pageSize.width()));
+            table->setFormat(fmt);
+        }
 
         QPainter painter(&printer);
         int pageCount = doc->pageCount();
         for (int page = 0; page < pageCount; ++page) {
             if (page > 0) printer.newPage();
-            painter.fillRect(QRectF(QPointF(0, 0), pageSize), pageColor);
+            // Measured directly against real print output: a fillRect
+            // sized to EXACTLY fullPageSize leaves a literal 1-device-pixel
+            // white line uncovered along the right and bottom edges (never
+            // left/top) on every page -- a sub-pixel rounding shortfall
+            // between what printer.width()/height() report and where the
+            // PDF backend's own page boundary actually falls. Padding the
+            // fill a couple pixels past the reported size in every
+            // direction closes that gap; the backend clips anything past
+            // the real page edge on its own, so overshooting here is safe.
+            painter.fillRect(QRectF(QPointF(-2, -2), fullPageSize + QSizeF(4, 4)), pageColor);
 
             QAbstractTextDocumentLayout::PaintContext ctx;
             // A default-constructed PaintContext's palette is the AMBIENT
@@ -641,6 +738,7 @@ public:
             ctx.palette = palette();
             ctx.clip = QRectF(0, page * pageSize.height(), pageSize.width(), pageSize.height());
             painter.save();
+            painter.translate(contentRect.topLeft());
             painter.translate(0, -page * pageSize.height());
             doc->documentLayout()->draw(&painter, ctx);
             painter.restore();

@@ -628,6 +628,19 @@ std::string replaceMathTags(const std::string &htmlIn, bool darkMode, const std:
 // QTextBrowser (a QTextDocument rich-text renderer, not a browser engine)
 // doesn't support at all, unlike WebKitGTK which does. A plain class
 // selector is the one mechanism both toolkits actually honor identically.
+// pre's white-space:pre-wrap/word-wrap:break-word below: no white-space
+// rule meant the HTML default (`white-space: pre`, never wrap) applied --
+// harmless on screen (QTextBrowser has its own horizontal scrollbar, so a
+// too-long line just scrolls), but print has no scroll mechanism at all:
+// a long code line that doesn't fit the fixed print-content width
+// (printDocument() in plugin_qt6.cpp) just gets clipped at the box edge,
+// silently dropping text (confirmed live against a real print, long lines
+// like `<w:rPr>...Symbol...</w:rPr>` cut off exactly at the box's right
+// edge -- previously masked by the table's own overshoot bug giving lines
+// extra room to run into before that fix). pre-wrap keeps all the
+// whitespace-preservation `pre` gives (indentation, blank lines) but
+// allows wrapping at whitespace, same as an ordinary paragraph -- no more
+// silent truncation either place.
 const char *DEFAULT_CSS = R"(
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -674,6 +687,8 @@ pre {
     margin: 0;
     overflow: auto;
     line-height: 1.45;
+    white-space: pre-wrap;
+    word-wrap: break-word;
 }
 body.theme-light pre { background-color: #bec0c4; color: #24292e; }
 body.theme-dark pre { background-color: #2d333b; color: #e6edf3; }
@@ -829,18 +844,18 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
     // to work.
     if (darkMode) {
         replaceAll(html, "<blockquote>",
-            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#58a6ff\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td>");
+            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\"><tr><td width=\"4\" bgcolor=\"#58a6ff\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td>");
         replaceAll(html, "<pre>",
-            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0;\">");
+            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0; white-space:pre-wrap; word-wrap:break-word;\">");
         replaceAll(html, "<pre class=",
-            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0;\" class=");
+            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#2d333b\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#2d333b\"><pre style=\"background-color:#2d333b; margin:0; padding:0; white-space:pre-wrap; word-wrap:break-word;\" class=");
     } else {
         replaceAll(html, "<blockquote>",
-            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\" style=\"margin-left: 20px;\"><tr><td width=\"4\" bgcolor=\"#58a6ff\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td>");
+            "<table border=\"0\" class=\"blockquote\" width=\"100%\" cellspacing=\"0\" cellpadding=\"8\"><tr><td width=\"4\" bgcolor=\"#58a6ff\" style=\"padding: 0;\"></td><td width=\"16\" style=\"padding: 0;\"></td><td>");
         replaceAll(html, "<pre>",
-            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#bec0c4\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#bec0c4\"><pre style=\"background-color:#bec0c4; margin:0; padding:0;\">");
+            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#bec0c4\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#bec0c4\"><pre style=\"background-color:#bec0c4; margin:0; padding:0; white-space:pre-wrap; word-wrap:break-word;\">");
         replaceAll(html, "<pre class=",
-            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#bec0c4\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#bec0c4\"><pre style=\"background-color:#bec0c4; margin:0; padding:0;\" class=");
+            "<table border=\"0\" class=\"codeblock\" width=\"100%\" cellspacing=\"0\" cellpadding=\"12\" bgcolor=\"#bec0c4\" style=\"margin: 12px 0;\"><tr><td bgcolor=\"#bec0c4\"><pre style=\"background-color:#bec0c4; margin:0; padding:0; white-space:pre-wrap; word-wrap:break-word;\" class=");
     }
 
     replaceAll(html, "</blockquote>", "</td></tr></table>");
@@ -849,6 +864,26 @@ std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std
     std::string hrReplacement = darkMode ? "<hr color=\"#58a6ff\" size=\"2\" />" : "<hr color=\"#58a6ff\" size=\"2\" />";
     replaceAll(html, "<hr />", hrReplacement);
     replaceAll(html, "<hr>", hrReplacement);
+
+    // A <hr> as literally the FIRST block in the whole document doesn't
+    // paint in the print path -- confirmed against a real print: a file
+    // opening with a bare `***` shows no rule above its first line, while
+    // every later <hr> in the same document (light theme, so this isn't
+    // the dark-palette theory from before) renders fine. Print draws page
+    // 0 from a clip rect whose top edge is exactly y=0 (see
+    // printDocument() in plugin_qt6.cpp); an element sitting flush
+    // against that same y=0 boundary with nothing above it to anchor
+    // against apparently doesn't get painted -- on-screen rendering never
+    // clips to a page rect at all, so it has no such edge case. Giving it
+    // a zero-visible-height paragraph to sit below instead of directly at
+    // the clip boundary sidesteps that without touching the clip/paint
+    // logic itself.
+    {
+        size_t firstTag = html.find_first_not_of(" \t\r\n");
+        if (firstTag != std::string::npos && html.compare(firstTag, 3, "<hr") == 0) {
+            html.insert(firstTag, "<p style=\"margin:0;padding:0;line-height:1px;\">&nbsp;</p>");
+        }
+    }
 
     // One file covers BOTH themes (see DEFAULT_CSS above) -- no more
     // "-dark"-suffixed sibling file lookup; the `body.theme-light`/
