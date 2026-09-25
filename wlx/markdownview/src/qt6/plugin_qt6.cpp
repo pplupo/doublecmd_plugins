@@ -29,6 +29,14 @@
 #include <QResizeEvent>
 #include <QTextBlock>
 #include <QTextImageFormat>
+#include <QImage>
+#include <QImageReader>
+#include <QPixmap>
+#include <QRegularExpression>
+#include <QDir>
+#include <QVariant>
+#include <QSize>
+#include <QSet>
 #include <dlfcn.h>
 #include <cmath>
 
@@ -129,6 +137,7 @@ private:
     QString m_filePath;
     QFileSystemWatcher m_watcher;
     QTimer m_debounceTimer;
+    QTimer m_imageFitTimer;
     int m_zoomLevel = 0;
 
     // In-document incremental search (Ctrl+F), matching kpartview's
@@ -234,6 +243,19 @@ private:
     // already-scaled one.
     QVector<QSize> m_imageNaturalSizes;
 
+    // src attribute values of <img> tags injectPlainImageSizes() sized on
+    // the MOST RECENT call -- captureImageNaturalSizes() below uses this to
+    // recognize a plain image (however explicitly-sized it now looks in
+    // the format) and deliberately record an invalid size for it, so
+    // scaleImages() -- see its own comment on why mutating a plain image's
+    // format in place is unsafe -- skips it via the same "no explicit size
+    // to scale from" check it already had. A diagram/equation image (never
+    // in this set) is still tracked normally and still zoom-scales via the
+    // cursor-mutation path, which is fine for those -- they've always been
+    // explicitly sized from the moment they were first laid out, never
+    // resized in place after the fact the way a plain image would be here.
+    QSet<QString> m_plainImageSrcs;
+
     void captureImageNaturalSizes() {
         m_imageNaturalSizes.clear();
         QTextDocument *doc = document();
@@ -245,12 +267,184 @@ private:
                 QTextCharFormat fmt = frag.charFormat();
                 if (fmt.isImageFormat()) {
                     QTextImageFormat imgFmt = fmt.toImageFormat();
-                    m_imageNaturalSizes.append(QSize(qRound(imgFmt.width()), qRound(imgFmt.height())));
+                    if (m_plainImageSrcs.contains(imgFmt.name())) {
+                        m_imageNaturalSizes.append(QSize()); // invalid: scaleImages() skips it
+                    } else {
+                        m_imageNaturalSizes.append(QSize(qRound(imgFmt.width()), qRound(imgFmt.height())));
+                    }
                 }
             }
         }
     }
 
+    // Qt's rich-text CSS subset doesn't support `max-width`/`max-height` on
+    // <img> at all (only explicit width/height, which is why
+    // markdownview.css's `img { max-width: 100%; }` is a no-op here despite
+    // doing real work in the GTK3/WebKit variant) -- confirmed by
+    // scaleImages()'s own "no explicit size to scale from" comment below: a
+    // plain user image with no width/height HTML attribute lays out at its
+    // full natural pixel size, unconstrained, however large that is.
+    //
+    // Two earlier approaches to fixing that both corrupted real documents
+    // (a chunk of body text going invisible, with the final image
+    // duplicated in its place) on any file that also has tables,
+    // blockquotes, or code blocks (all three render as QTextTable frames --
+    // see postProcessHtml() in markdown_engine.cpp): first, reading a
+    // resource via doc->resource(QTextDocument::ImageResource, ...) mid-
+    // layout; then, mutating an already-laid-out plain image's
+    // QTextImageFormat via QTextCursor::setCharFormat() (even a
+    // doc->markContentsDirty() covering the whole document afterwards
+    // didn't fix it). scaleImages() below does that same cursor-mutation
+    // pattern too and is fine -- but only because it only ever touches
+    // images that ALREADY had an explicit width/height from the moment
+    // they were first laid out (diagrams/equations, sized by
+    // renderDiagramImgTag()/replaceMathTags() in markdown_engine.cpp);
+    // it always skips plain images (natural.width() <= 0). So a plain
+    // image is what specifically breaks when its format is mutated
+    // in-place after the fact.
+    //
+    // This sidesteps the whole class of bug: the fitted width/height for
+    // a plain image is computed and spliced directly into the <img> tag
+    // in the HTML STRING, before it's ever handed to setHtml() at all --
+    // by the time Qt lays the document out for the first time, a plain
+    // image already carries an explicit size, exactly like a diagram
+    // always has. No live document mutation, so nothing to corrupt.
+    QString m_rawHtml; // last renderFileToHtml() output, before per-size <img> injection
+
+    // Splices width="W" height="H" into any <img> tag that doesn't already
+    // have one (a diagram/equation image always does; a plain markdown
+    // image never does), sized to fit this pane (per the four rules
+    // fitImageSize() implements) at the given zoom multiplier. Called
+    // fresh from reapplyImageSizing() every time -- recomputing from the
+    // raw string each time rather than caching results, since the "fits
+    // the pane" answer depends on the pane's current size AND zoom.
+    // Repopulates m_plainImageSrcs with every src this call sized, for
+    // captureImageNaturalSizes() to recognize afterwards.
+    QString injectPlainImageSizes(const QString &html, double zoomMultiplier) {
+        m_plainImageSrcs.clear();
+        QTextDocument *doc = document();
+        qreal margin = doc ? doc->documentMargin() : 4.0;
+        qreal pageW = (viewport()->width() - 2 * margin) / zoomMultiplier;
+        qreal pageH = (viewport()->height() - 2 * margin) / zoomMultiplier;
+        bool paneUsablySized = pageW >= 50 && pageH >= 50;
+        QDir baseDir = QFileInfo(m_filePath).absoluteDir();
+
+        QString out;
+        out.reserve(html.size());
+        static const QRegularExpression imgTagRe(QStringLiteral("<img\\b[^>]*>"));
+        static const QRegularExpression srcRe(QStringLiteral("src=\"([^\"]*)\""));
+        static const QRegularExpression widthRe(QStringLiteral("\\bwidth="));
+        int lastEnd = 0;
+        auto it = imgTagRe.globalMatch(html);
+        while (it.hasNext()) {
+            QRegularExpressionMatch m = it.next();
+            out += html.mid(lastEnd, m.capturedStart() - lastEnd);
+            QString tag = m.captured(0);
+            lastEnd = m.capturedEnd();
+
+            // Diagrams/equations already declare width/height (device-pixel
+            // correct, set in markdown_engine.cpp) -- leave those alone;
+            // they zoom-scale separately via scaleImages().
+            if (widthRe.match(tag).hasMatch() || !paneUsablySized) {
+                out += tag;
+                continue;
+            }
+            QRegularExpressionMatch srcMatch = srcRe.match(tag);
+            if (!srcMatch.hasMatch()) {
+                out += tag;
+                continue;
+            }
+            QString src = srcMatch.captured(1);
+            QString localPath = baseDir.filePath(src);
+            QImageReader reader(localPath);
+            QSize natural = reader.size();
+            if (!natural.isValid() || natural.isEmpty()) {
+                out += tag;
+                continue;
+            }
+            QSizeF fitted = fitImageSize(natural, pageW, pageH);
+            tag.insert(tag.size() - 1, // just before the closing '>'
+                QStringLiteral(" width=\"%1\" height=\"%2\"")
+                    .arg(qRound(fitted.width() * zoomMultiplier))
+                    .arg(qRound(fitted.height() * zoomMultiplier)));
+            out += tag;
+            m_plainImageSrcs.insert(src);
+        }
+        out += html.mid(lastEnd);
+        return out;
+    }
+
+    // Shared by injectPlainImageSizes() above: an image that's already
+    // smaller than the pane in both dimensions displays at its real size
+    // (never upscaled); one too tall but not too wide fits to the pane's
+    // height; one too wide but not too tall fits to the pane's width; one
+    // exceeding both fits to whichever dimension is more constraining (the
+    // smaller of the two scale factors), so it lands fully inside the pane
+    // either way. Aspect ratio is always preserved.
+    static QSizeF fitImageSize(QSize natural, qreal pageW, qreal pageH) {
+        qreal w = natural.width();
+        qreal h = natural.height();
+        bool fitsW = w <= pageW;
+        bool fitsH = h <= pageH;
+        double scale;
+        if (fitsW && fitsH) scale = 1.0;
+        else if (fitsW && !fitsH) scale = pageH / h;
+        else if (!fitsW && fitsH) scale = pageW / w;
+        else scale = qMin(pageW / w, pageH / h);
+        return QSizeF(w * scale, h * scale);
+    }
+
+    double effectiveZoomMultiplier() const {
+        if (m_baseFontPointSize <= 0) return 1.0;
+        return g_zoomMultiplier * (1.0 + 0.1 * m_zoomLevel);
+    }
+
+    // The single entry point for "make the pane match its current size AND
+    // zoom level" -- called from reloadContent(), (debounced) resizeEvent(),
+    // and every zoom change (wheel, Save Zoom, Reset Zoom). Re-derives the
+    // fitted HTML from m_rawHtml fresh each time and does a full, ordinary
+    // setHtml() with it, rather than caching/mutating -- the pane's real
+    // size may not exist yet the first time reloadContent() runs (Double
+    // Commander resizes this widget into its quick-view panel after
+    // construction, not before). A plain setHtml() call is a full, clean
+    // re-layout every time, same as any ordinary reload -- no live
+    // mutation of an already-laid-out plain image, which is what corrupted
+    // real documents before (see injectPlainImageSizes()'s comment above).
+    // Diagram/equation images still zoom-scale via scaleImages()'s
+    // existing cursor-mutation, which is fine for those -- see
+    // captureImageNaturalSizes()'s comment on why plain images are
+    // deliberately excluded from it.
+    void reapplyImageSizing() {
+        if (m_rawHtml.isEmpty()) return;
+        double multiplier = effectiveZoomMultiplier();
+        int currentScrollX = horizontalScrollBar() ? horizontalScrollBar()->value() : 0;
+        int currentScrollY = verticalScrollBar() ? verticalScrollBar()->value() : 0;
+
+        setHtml(injectPlainImageSizes(m_rawHtml, multiplier));
+        document()->setBaseUrl(QUrl::fromLocalFile(m_filePath).adjusted(QUrl::RemoveFilename));
+
+        QFont f = font();
+        f.setPointSizeF(m_baseFontPointSize * multiplier);
+        setFont(f);
+        // setFont() alone does NOT retroactively rescale content already
+        // loaded via setHtml() -- confirmed live via idealWidth() staying
+        // identical before/after a setFont()-only call once content
+        // exists. QTextDocument::setDefaultFont() is what actually forces
+        // the relayout against the new base size.
+        if (document()) document()->setDefaultFont(f);
+
+        captureImageNaturalSizes();
+        scaleImages(multiplier);
+
+        if (horizontalScrollBar()) horizontalScrollBar()->setValue(currentScrollX);
+        if (verticalScrollBar()) verticalScrollBar()->setValue(currentScrollY);
+    }
+
+    // Confirmed live that QTextBrowser::zoomIn()/zoomOut() never touch
+    // <img> sizing at all -- an image's width/height in QTextImageFormat
+    // has to be scaled explicitly. Only ever touches images NOT in
+    // m_plainImageSrcs (diagrams/equations) -- see
+    // captureImageNaturalSizes()'s comment for why.
     void scaleImages(double multiplier) {
         if (m_imageNaturalSizes.isEmpty()) return;
         QTextDocument *doc = document();
@@ -276,21 +470,6 @@ private:
         }
     }
 
-    void applyZoom() {
-        if (m_baseFontPointSize <= 0) return;
-        double totalMultiplier = g_zoomMultiplier * (1.0 + 0.1 * m_zoomLevel);
-        QFont f = font();
-        f.setPointSizeF(m_baseFontPointSize * totalMultiplier);
-        setFont(f);
-        // setFont() alone does NOT retroactively rescale content already
-        // loaded via setHtml() -- confirmed live via idealWidth() staying
-        // identical before/after a setFont()-only call once content
-        // exists. QTextDocument::setDefaultFont() is what actually forces
-        // the relayout against the new base size.
-        if (document()) document()->setDefaultFont(f);
-        scaleImages(totalMultiplier);
-    }
-
 public:
     MarkdownViewerWidget(QWidget* parent = nullptr) : QTextBrowser(parent) {
         setOpenExternalLinks(true);
@@ -299,6 +478,15 @@ public:
 
         m_debounceTimer.setSingleShot(true);
         m_debounceTimer.setInterval(200);
+
+        // Debounced re-fit on resize (see resizeEvent()) -- coalesces a
+        // drag-resize into one re-render instead of one per intermediate
+        // frame.
+        m_imageFitTimer.setSingleShot(true);
+        m_imageFitTimer.setInterval(50);
+        connect(&m_imageFitTimer, &QTimer::timeout, this, [this]() {
+            reapplyImageSizing();
+        });
 
         connect(&m_debounceTimer, &QTimer::timeout, this, &MarkdownViewerWidget::reloadContent);
         connect(&m_watcher, &QFileSystemWatcher::fileChanged, this, [this](const QString&) {
@@ -398,16 +586,8 @@ public:
         pal.setColor(QPalette::WindowText, fg);
         setPalette(pal);
 
-        int currentScrollX = horizontalScrollBar() ? horizontalScrollBar()->value() : 0;
-        int currentScrollY = verticalScrollBar() ? verticalScrollBar()->value() : 0;
-
-        setHtml(QString::fromStdString(html));
-        document()->setBaseUrl(QUrl::fromLocalFile(m_filePath).adjusted(QUrl::RemoveFilename));
-        captureImageNaturalSizes();
-        applyZoom();
-
-        if (horizontalScrollBar()) horizontalScrollBar()->setValue(currentScrollX);
-        if (verticalScrollBar()) verticalScrollBar()->setValue(currentScrollY);
+        m_rawHtml = QString::fromStdString(html);
+        reapplyImageSizing(); // does its own setHtml() + scroll preservation
 
         if (QFile::exists(m_filePath) && !m_watcher.files().contains(m_filePath)) {
             m_watcher.addPath(m_filePath);
@@ -447,6 +627,18 @@ public:
             painter.fillRect(QRectF(QPointF(0, 0), pageSize), pageColor);
 
             QAbstractTextDocumentLayout::PaintContext ctx;
+            // A default-constructed PaintContext's palette is the AMBIENT
+            // system palette, not this widget's own -- reloadContent()
+            // already sets this widget's QPalette::Text/WindowText to
+            // match the active theme (see its comment on why a text run
+            // with no explicit CSS color falls back to the paint
+            // context's palette). Without this, a light document on a
+            // dark-system machine printed with the system's light/white
+            // Text color on this print path's explicitly light page
+            // background -- invisible text, only visible once selected
+            // (a different color pair). Reusing the already-correct
+            // widget palette here keeps print consistent with the screen.
+            ctx.palette = palette();
             ctx.clip = QRectF(0, page * pageSize.height(), pageSize.width(), pageSize.height());
             painter.save();
             painter.translate(0, -page * pageSize.height());
@@ -463,7 +655,7 @@ public:
         m_zoomLevel = 0;
         bool wasPersisted = (g_zoomMultiplier != 1.0);
         g_zoomMultiplier = 1.0;
-        applyZoom();
+        reapplyImageSizing();
         if (wasPersisted) saveSettings();
     }
 
@@ -478,7 +670,7 @@ public:
         g_zoomMultiplier *= (1.0 + 0.1 * m_zoomLevel);
         if (g_zoomMultiplier < 0.1) g_zoomMultiplier = 0.1;
         m_zoomLevel = 0; // the delta is now folded into g_zoomMultiplier; don't double-apply it
-        applyZoom();
+        reapplyImageSizing();
         saveSettings();
     }
 
@@ -486,6 +678,14 @@ protected:
     void resizeEvent(QResizeEvent* event) override {
         QTextBrowser::resizeEvent(event);
         positionFindBar();
+        // Re-fit plain images against the pane's new size -- the pane's
+        // real size (Double Commander resizing this widget into its
+        // quick-view panel) may not exist yet the first time reloadContent()
+        // runs. Debounced via m_imageFitTimer so a drag-resize coalesces
+        // into one re-render instead of one per intermediate frame.
+        if (!m_rawHtml.isEmpty()) {
+            m_imageFitTimer.start();
+        }
     }
 
     void keyPressEvent(QKeyEvent* event) override {
@@ -524,10 +724,10 @@ protected:
         if (event->modifiers() & Qt::ControlModifier) {
             if (event->angleDelta().y() > 0) {
                 m_zoomLevel++;
-                applyZoom();
+                reapplyImageSizing();
             } else if (event->angleDelta().y() < 0) {
                 m_zoomLevel--;
-                applyZoom();
+                reapplyImageSizing();
             }
             event->accept();
         } else {

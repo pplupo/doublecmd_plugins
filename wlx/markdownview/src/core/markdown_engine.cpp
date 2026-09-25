@@ -800,6 +800,20 @@ ChartCssFonts resolveChartFonts() {
 std::string postProcessHtml(const std::string &rawHtml, bool darkMode, const std::string &customCssPath) {
     std::string html = rawHtml;
 
+    // md4c-html renders a standalone `![alt](src)` image as `<p><img
+    // .../></p>` with no other markup, and QTextDocument reserves the
+    // body stylesheet's full line-height (1.6x) worth of extra blank
+    // space below it, same as the diagram/equation figures already
+    // worked around in renderDiagramImgTag/renderVegaLiteImgTag/
+    // replaceMathTags above (see the comments there for why). Only
+    // paragraphs that open directly on an <img> are touched here, so a
+    // paragraph mixing text and an inline image keeps its normal
+    // line-height. Centered to match injectPlainImageSizes()'s (see
+    // plugin_qt6.cpp) "smaller than the pane: show at original size,
+    // centered" rule -- without this a standalone image sits flush left
+    // like ordinary text.
+    replaceAll(html, "<p><img", "<p align=\"center\" style=\"line-height:1;\"><img");
+
     // The blockquote/pre text color used to be a hardcoded inline
     // style="color:..." here, always winning over ANY loaded stylesheet's
     // own rule for it (inline style beats a CSS class selector no matter
