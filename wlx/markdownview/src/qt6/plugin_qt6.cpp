@@ -476,6 +476,23 @@ public:
     MarkdownViewerWidget(QWidget* parent = nullptr) : QTextBrowser(parent) {
         setOpenExternalLinks(true);
         setOpenLinks(true);
+        // Qt::ScrollBarAsNeeded (the default) toggles the vertical
+        // scrollbar's visibility based on content height -- but showing/
+        // hiding it changes the viewport's WIDTH, which rewraps the text,
+        // which changes the total height, which can toggle the scrollbar
+        // again: a classic reflow oscillation. Confirmed live: a document
+        // made of a few long, densely-wrapped paragraphs reflows a lot
+        // from a ~15-20px width change and can land right on that
+        // threshold, visibly flickering the scrollbar between two states
+        // from the moment the document opens (nothing to do with theme,
+        // scrolling, or the print-path work elsewhere in this file --
+        // this is a plain QAbstractScrollArea/QTextEdit internal
+        // mechanism). A table/bullet/code-heavy document barely reflows
+        // from that same width delta, which is why this was never
+        // visible on those. Always reserving the scrollbar's width makes
+        // the viewport width constant regardless of content height,
+        // removing the oscillation entirely.
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
         m_baseFontPointSize = font().pointSizeF();
 
         m_debounceTimer.setSingleShot(true);
