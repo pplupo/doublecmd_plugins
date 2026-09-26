@@ -796,7 +796,20 @@ protected:
         // quick-view panel) may not exist yet the first time reloadContent()
         // runs. Debounced via m_imageFitTimer so a drag-resize coalesces
         // into one re-render instead of one per intermediate frame.
-        if (!m_rawHtml.isEmpty()) {
+        //
+        // Only worth doing at all if there's a plain <img> to fit --
+        // reapplyImageSizing() otherwise does a full setHtml() reload for
+        // zero benefit (ordinary text reflow on resize is already Qt's
+        // own doing, not something this timer drives). Double Commander
+        // settling its quick-view panel into its final size fires several
+        // resizeEvent()s in quick succession right on load; an image-less
+        // document used to pay for a full document rebuild on every one
+        // of them, which is real, visible work landing in the same
+        // fraction of a second the scrollbar was still settling --
+        // confirmed live as the remaining "resizes a few times on load"
+        // quirk on exactly the same files that had the reflow-oscillation
+        // bug fixed by setVerticalScrollBarPolicy() above.
+        if (!m_rawHtml.isEmpty() && m_rawHtml.contains(QLatin1String("<img"))) {
             m_imageFitTimer.start();
         }
     }
