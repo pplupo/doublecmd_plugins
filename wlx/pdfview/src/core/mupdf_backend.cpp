@@ -2,7 +2,7 @@
 #include <iostream>
 
 MupdfBackend::MupdfBackend() {
-    ctx = fz_new_context(NULL, NULL, FZ_STORE_UNLIMITED);
+    ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
     if (!ctx) {
         std::cerr << "Cannot create MuPDF context" << std::endl;
     }

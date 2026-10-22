@@ -220,9 +220,17 @@ QPoint ViewerWidget::pageOrigin(int page) const {
     return QPoint(qRound(x), qRound(pageTopScreen));
 }
 
-const QImage& ViewerWidget::renderedPage(int page) {
+QImage ViewerWidget::renderedPage(int page) {
     auto it = pageCache.find(page);
     if (it != pageCache.end()) return it.value();
+
+    // Bound memory: drop cached pages that are no longer near the
+    // viewport before allocating/inserting a new page.
+    int first = pageAt(0);
+    int last = pageAt(viewport()->height());
+    for (auto k : pageCache.keys()) {
+        if (k < first - 2 || k > last + 2) pageCache.remove(k);
+    }
 
     qreal dpr = devicePixelRatioF();
     if (dpr <= 0) dpr = 1.0;
@@ -235,18 +243,8 @@ const QImage& ViewerWidget::renderedPage(int page) {
         img.setDevicePixelRatio(dpr);
     }
 
-    auto inserted = pageCache.insert(page, img);
-
-    // Bound memory: drop cached pages that are no longer near the
-    // viewport instead of keeping every rendered page for the document's
-    // lifetime.
-    int first = pageAt(0);
-    int last = pageAt(viewport()->height());
-    for (auto k : pageCache.keys()) {
-        if (k < first - 2 || k > last + 2) pageCache.remove(k);
-    }
-
-    return inserted.value();
+    pageCache.insert(page, img);
+    return img;
 }
 
 const std::vector<TextBlock>& ViewerWidget::pageText(int page) {
@@ -276,7 +274,7 @@ void ViewerWidget::paintEvent(QPaintEvent* event) {
     int lastPage = pageAt(viewport()->height());
 
     for (int p = firstPage; p <= lastPage; ++p) {
-        const QImage& img = renderedPage(p);
+        QImage img = renderedPage(p);
         if (img.isNull()) continue;
         painter.drawImage(pageOrigin(p), img);
     }

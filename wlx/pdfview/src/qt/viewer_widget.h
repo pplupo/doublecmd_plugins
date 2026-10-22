@@ -51,7 +51,7 @@ private:
     void updateScrollbars();
     int pageAt(int viewportY) const;      // page index under a viewport-relative y
     QPoint pageOrigin(int page) const;    // top-left of a page in viewport coords
-    const QImage& renderedPage(int page); // lazily renders/caches, evicts far-away pages
+    QImage renderedPage(int page);        // lazily renders/caches, evicts far-away pages
     const std::vector<TextBlock>& pageText(int page); // lazily fetches/caches per-page text
     DocPoint toDocPoint(const QPoint& viewportPt) const;
     static int rowAt(const std::vector<TextBlock>& tb, double y);
