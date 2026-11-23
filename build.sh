@@ -258,3 +258,12 @@ for category_dir in */; do
   done
 done
 popd
+
+# --- Export-isolation + runtime-dependency guard -----------------------------
+# Fail the build if any packaged artifact exports a symbol outside its plugin
+# type's Total Commander ABI (a regression of the sdk/exports/*.map version
+# scripts, or a new plugin that forgot to wire one up), or has an unresolved
+# runtime dependency (`ldd ... not found`) in this build container. Runs last so
+# its exit status becomes build.sh's -- a failure here fails the CI build step
+# before any zip is uploaded.
+.github/check-exports.sh release

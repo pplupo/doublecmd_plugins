@@ -12,8 +12,11 @@ VFS_OBJECTS=exif.o
 
 all: exif.wdx
 
+# -Wl,--version-script: export ONLY the WDX "Content*" C ABI (see
+# ../../sdk/exports/wdx.map); keep every other symbol local so it cannot be
+# interposed against Double Commander's own in-process libraries.
 exif.wdx: $(VFS_OBJECTS)
-	$(CC) -shared -o exif.wdx $(VFS_OBJECTS) $(CFLAGS)
+	$(CC) -shared -o exif.wdx $(VFS_OBJECTS) $(CFLAGS) -Wl,--version-script=../../sdk/exports/wdx.map
 
 clean: 
 	rm -f *.o *.d *.gch

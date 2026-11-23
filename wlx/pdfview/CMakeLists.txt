@@ -55,3 +55,15 @@ set_target_properties(pdfview_gtk PROPERTIES PREFIX "" SUFFIX ".wlx" OUTPUT_NAME
 target_include_directories(pdfview_gtk PRIVATE src/gtk ${GTK3_INCLUDE_DIRS})
 target_link_options(pdfview_gtk PRIVATE ${GTK3_LDFLAGS})
 target_link_libraries(pdfview_gtk PRIVATE doc_core ${GTK3_LIBRARIES})
+
+# --- Symbol-export isolation (see sdk/exports/wlx.map) -------------------------
+# Export ONLY the WLX "List*" C ABI from each .wlx; keep every internal,
+# vendored, and C++-runtime symbol local so none can be interposed against
+# Double Commander's own in-process Qt/GTK toolkit stack. if(TARGET) guards each
+# so a variant disabled in this configuration is simply skipped.
+foreach(_wlx_tgt pdfview_qt pdfview_gtk)
+    if(TARGET ${_wlx_tgt})
+        target_link_options(${_wlx_tgt} PRIVATE
+            "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/../../sdk/exports/wlx.map")
+    endif()
+endforeach()

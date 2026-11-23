@@ -1,0 +1,48 @@
+/* Linker version script for WCX (Packer) plugin modules.
+ *
+ * A .wcx is a Total Commander / Double Commander packer plugin. Unlike the
+ * other families it has no common symbol prefix, so its C ABI is listed
+ * explicitly below (including the *W Unicode variants and the optional
+ * callback setters / ExtensionInitialize). A plugin only defines a subset of
+ * these; naming an entry that a given plugin does not define is harmless --
+ * the version script matches by name and simply exports nothing for it.
+ * Everything NOT listed here is internal and made local.
+ *
+ * See sdk/exports/wlx.map for the full rationale on why exporting internal
+ * symbols from an in-process plugin is an ELF symbol-interposition hazard.
+ */
+{
+  global:
+    OpenArchive;
+    OpenArchiveW;
+    ReadHeader;
+    ReadHeaderEx;
+    ReadHeaderExW;
+    ProcessFile;
+    ProcessFileW;
+    CloseArchive;
+    PackFiles;
+    PackFilesW;
+    DeleteFiles;
+    DeleteFilesW;
+    GetPackerCaps;
+    ConfigurePacker;
+    StartMemPack;
+    StartMemPackW;
+    PackToMem;
+    DoneMemPack;
+    CanYouHandleThisFile;
+    CanYouHandleThisFileW;
+    PackSetDefaultParams;
+    SetChangeVolProc;
+    SetChangeVolProcW;
+    SetProcessDataProc;
+    SetProcessDataProcW;
+    GetBackgroundFlags;
+    PkSetCryptCallback;
+    PkSetCryptCallbackW;
+    ExtensionInitialize;
+    ExtensionFinalize;
+  local:
+    *;
+};

@@ -21,7 +21,10 @@ DEL_TREE      = rm -rf
 TAR           = tar -cf
 COMPRESS      = gzip -9f
 LINK          = g++
-LFLAGS        = -shared -Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now
+# --version-script: export ONLY the WDX "Content*" C ABI (see
+# ../../../sdk/exports/wdx.map); keep internal C++ symbols local so none can be
+# interposed in Double Commander's process.
+LFLAGS        = -shared -Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now -Wl,--version-script=../../../sdk/exports/wdx.map
 LIBS          = $(SUBLIBS)
 STRIP         = strip
 

@@ -43,3 +43,15 @@ set(CMAKE_MODULE_PATH ${ECM_MODULE_PATH})
 include(KDEInstallDirs)
 include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)
+
+# --- Symbol-export isolation (see sdk/exports/wlx.map) -------------------------
+# Export ONLY the WLX "List*" C ABI from each .wlx; keep every internal,
+# vendored, and C++-runtime symbol local so none can be interposed against
+# Double Commander's own in-process Qt/GTK toolkit stack. if(TARGET) guards each
+# so a variant disabled in this configuration is simply skipped.
+foreach(_wlx_tgt kpartview_host_qt6)
+    if(TARGET ${_wlx_tgt})
+        target_link_options(${_wlx_tgt} PRIVATE
+            "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/../../sdk/exports/wlx.map")
+    endif()
+endforeach()

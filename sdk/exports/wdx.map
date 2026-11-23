@@ -1,0 +1,27 @@
+/* Linker version script for WDX (Content) plugin modules.
+ *
+ * A .wdx is a Total Commander / Double Commander Content plugin: its host
+ * only ever dlsym()s the "Content*" C ABI (ContentGetDetectString,
+ * ContentGetSupportedField, ContentGetValue, ContentGetValueW,
+ * ContentSetDefaultParams, ContentStopGetValue, ContentSendStateInformation,
+ * ContentGetDefaultSortOrder, ContentPluginUnloading, ContentGetSupportedFieldFlags,
+ * ContentSetValue/W, ContentEditValue, ContentCompareFiles, and their *W
+ * Unicode variants), optionally ExtensionInitialize. Everything else -- any
+ * vendored C/C++ code, zlib/minizip, tinyxml, the C++ runtime -- is an
+ * internal implementation detail and must NOT be exported.
+ *
+ * See sdk/exports/wlx.map for the full rationale: Double Commander is itself a
+ * toolkit process, so exporting internal symbols from a plugin exposes them to
+ * ELF symbol interposition against whatever the host has already loaded, which
+ * can silently rebind a plugin's own intra-module call to a foreign copy with
+ * an incompatible ABI. Keeping every non-ABI symbol local prevents that.
+ */
+{
+  global:
+    Content*;
+    *SetDefaultParams;
+    ExtensionInitialize;
+    ExtensionFinalize;
+  local:
+    *;
+};

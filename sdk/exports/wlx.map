@@ -1,0 +1,37 @@
+/* Linker version script for WLX (Lister) plugin modules.
+ *
+ * A .wlx is a Total Commander / Double Commander Lister plugin: its host
+ * only ever dlsym()s the "List*" C ABI (ListLoad, ListLoadNext,
+ * ListCloseWindow, ListGetDetectString, ListSendCommand, ListSearchText,
+ * ListSearchDialog, ListPrint, ListNotificationReceived, ListSetDefaultParams,
+ * ListGetPreviewBitmap, and their *W Unicode variants). Everything else --
+ * any vendored parser/renderer, the C++ runtime, statically linked helper
+ * libraries -- is an internal implementation detail and must NOT be exported.
+ *
+ * Why this is load-bearing, not hygiene: Double Commander is itself a Qt (or
+ * GTK) process, so its global dynamic-symbol scope already contains a full
+ * toolkit stack and whatever libraries that stack links. If a plugin exports
+ * an internal symbol that collides with one already in that scope, ELF symbol
+ * interposition can bind the plugin's own intra-module call to the host's
+ * copy instead of its own.
+ *
+ * This is not theoretical. markdownview vendors its own md4c (a build whose
+ * md4c-html companion understands wikilinks) and links it statically, but
+ * libQt6Gui.so.6 itself dynamically links the system libmd4c.so.0 (Qt uses
+ * md4c for Markdown). With md_parse/md_html exported at default visibility,
+ * the plugin's own md_html -> md_parse call became preemptible and bound to
+ * the SYSTEM md4c, whose MD_SPAN enum / detail-struct ABI differs from the
+ * vendored md4c-html the callbacks were compiled against -- dispatching an
+ * ordinary link span into render_open_wikilink_span() with a null detail
+ * pointer and segfaulting (confirmed live via gdb). Keeping every non-ABI
+ * symbol local makes each intra-module reference bind to the plugin's own
+ * copy, immune to interposition.
+ */
+{
+  global:
+    List*;
+    ExtensionInitialize;
+    ExtensionFinalize;
+  local:
+    *;
+};
