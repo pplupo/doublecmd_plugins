@@ -95,3 +95,15 @@ if(ENABLE_GTK3)
         message(STATUS "mdk: gtk+-3.0/epoxy not found — GTK3 variant skipped for this build")
     endif()
 endif()
+
+# --- Symbol-export isolation (see sdk/exports/wlx.map) -------------------------
+# Export ONLY the WLX "List*" C ABI from each .wlx; keep every internal,
+# vendored, and C++-runtime symbol local so none can be interposed against
+# Double Commander's own in-process Qt/GTK toolkit stack. if(TARGET) guards each
+# so a variant disabled in this configuration is simply skipped.
+foreach(_wlx_tgt mdk_qt6 mdk_gtk3)
+    if(TARGET ${_wlx_tgt})
+        target_link_options(${_wlx_tgt} PRIVATE
+            "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/../../sdk/exports/wlx.map")
+    endif()
+endforeach()

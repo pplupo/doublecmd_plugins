@@ -48,6 +48,12 @@ if(ENABLE_QT6)
         Qt6::Gui
         Qt6::Core
     )
+
+    # Export ONLY the WLX "List*" C ABI (see sdk/exports/wlx.map); keep every
+    # internal/vendored/C++-runtime symbol local so it cannot be interposed
+    # against Double Commander's own in-process toolkit stack.
+    target_link_options(svgview_qt6 PRIVATE
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/../../sdk/exports/wlx.map")
 endif()
 
 # --- GTK3 Variant ---
@@ -68,8 +74,13 @@ if(ENABLE_GTK3)
         ${GTK3_LIBRARIES}
     )
     
-    # Static link libstdc++ and libgcc for portability
-    target_link_options(svgview_gtk3 PRIVATE -static-libstdc++ -static-libgcc)
+    # Static link libstdc++ and libgcc for portability. The version script is
+    # essential here: without it, -static-libstdc++ would re-export the entire
+    # C++ runtime from the .wlx, exposing it to interposition in DC's process.
+    # Export ONLY the WLX "List*" C ABI (see sdk/exports/wlx.map).
+    target_link_options(svgview_gtk3 PRIVATE
+        -static-libstdc++ -static-libgcc
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/../../sdk/exports/wlx.map")
     
     set_target_properties(svgview_gtk3 PROPERTIES
         PREFIX ""

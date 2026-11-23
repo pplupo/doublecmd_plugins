@@ -4,3 +4,7 @@ Double Commander uses [Total Commander](http://www.ghisler.com) plugin API,
 so under Microsoft Windows you can use [plugins from Total Commander](http://totalcmd.net).
 
 Binaries for Linux (x86_64) can be downloaded from [Releases](https://github.com/doublecmd/plugins/releases) section, or see specific plugin directory for installation instructions (e.g. `wcx/diskdir/installation.md`)
+
+Each plugin links the host toolkit (Qt6 / GTK) dynamically from the system; see
+[RUNTIME_REQUIREMENTS.md](RUNTIME_REQUIREMENTS.md) for the system packages each
+plugin variant needs at runtime.

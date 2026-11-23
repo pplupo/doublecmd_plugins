@@ -1,0 +1,22 @@
+/* Linker version script for WFX (File system) plugin modules.
+ *
+ * A .wfx is a Total Commander / Double Commander File-system plugin: its host
+ * only ever dlsym()s the "Fs*" C ABI (FsInit/W, FsFindFirst/W, FsFindNext/W,
+ * FsFindClose, FsGetFile/W, FsPutFile/W, FsRenMovFile/W, FsDeleteFile/W,
+ * FsMkDir/W, FsRemoveDir/W, FsExecuteFile/W, FsDisconnect/W, FsStatusInfo/W,
+ * FsSetDefaultParams, FsGetDefRootName, FsGetBackgroundFlags, FsExtractCustomIcon/W,
+ * FsSetCryptCallback/W, FsContent* and the other Fs* entry points), optionally
+ * ExtensionInitialize. Everything else is internal and must NOT be exported.
+ *
+ * See sdk/exports/wlx.map for the full rationale on why exporting internal
+ * symbols from an in-process plugin is an ELF symbol-interposition hazard, not
+ * merely untidy.
+ */
+{
+  global:
+    Fs*;
+    ExtensionInitialize;
+    ExtensionFinalize;
+  local:
+    *;
+};
